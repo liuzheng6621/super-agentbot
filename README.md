@@ -13,6 +13,7 @@
 
 - **零依赖、零构建** —— 纯 Node.js + 原生 ESM，`node server/index.mjs` 即可启动，前端无需打包。
 - **真实多角色协作** —— 5 个角色按依赖顺序编排执行，上游产物作为下游输入，失败可回抛重跑。
+- **上下文自动注入** —— 每次下发任务前拼装上下文包（目标、工作区路径、已知文件、近期对话），保证角色不脱离现场；界面右侧「上下文」页可随时查看。
 - **接入本机 CLI** —— 自动扫描 `codex` / `claude` / `opencode` / `dsh` / `workbuddy` 等 11 种命令行工具，一键挂载为团队成员。
 - **开箱即用** —— 内置模拟智能体，没有 API Key 也能跑通完整协作链路，产出可执行的真实代码。
 - **实时流式界面** —— SSE 推送，逐字输出的时间线、Markdown / 表格 / 代码块渲染、执行链路与产物浏览器。
@@ -53,6 +54,17 @@ npm start
 | `coder` | Kilo | 落代码、写文件 | 源码文件 |
 | `tester` | Probe | 用例矩阵、边界覆盖 | 测试用例、缺陷单 |
 | `reviewer` | Lens | 评审、质量门 | 评审意见 |
+
+## 界面
+
+三栏工作台，全部状态由 SSE 实时推送。
+
+| 区域 | 内容 |
+| --- | --- |
+| 左栏 | 团队成员（在线状态 / `SIM`·`CLI` 标记 / 执行次数）、本机 CLI 扫描结果、历史任务 |
+| 中栏 | 协作时间线：流式输出、Markdown / 表格 / 代码块渲染、底部群聊输入框（支持 `@成员`） |
+| 右栏 | 上下文（目标 / 近期对话 / 已知文件）、执行链路、产物文件源码、统计与 Bot Hook |
+| 顶栏 | `SHIFT` 开关切换日间 / 夜间两套配色 |
 
 ## 接入真实 CLI
 
@@ -99,11 +111,15 @@ Windows 下双击 `安装到桌面.bat`，桌面与开始菜单会生成 `AGENTF
 | `POST` | `/api/tasks/:id/chat` | `{ text }` 群聊，支持 `@成员名` |
 | `GET` | `/api/tasks/:id/files` | 工作区文件列表 |
 | `GET` | `/api/tasks/:id/file?path=` | 读取单个文件 |
-| `GET` `POST` | `/api/agents` | 团队列表 / 新增成员 |
+| `POST` | `/api/context-preview` | `{ goal, workspace? }` 预览上下文包 |
+| `GET` | `/api/agents` `POST` | 团队列表 / 新增成员 |
 | `PATCH` `DELETE` | `/api/agents/:id` | 修改 / 移除成员 |
 | `POST` | `/api/agents/:id/test` | 冒烟测试 CLI 连通性 |
+| `POST` | `/api/agents/adopt` | 批量接入已检测到的 CLIs |
 | `GET` | `/api/probe` | 扫描本机 CLI |
+| `GET` | `/api/fs?path=` | 浏览本机目录（「选文件夹开工」用） |
 | `GET` | `/api/stream` | SSE 事件流 |
+| `GET` | `/api/health` | 健康检查 |
 | `POST` | `/api/hooks/:token` | 外部触发（Bot Hook） |
 
 ### Bot Hook
