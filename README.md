@@ -1,80 +1,112 @@
-# AGENTFORGE · 多智能体开发协作台
+# AgentForge
 
-把一句话需求交给一支会协作的 AI 研发团队：**规划 → 架构 → 实现 → 测试 → 评审 → 收口**，
-全过程实时可见，产物写进真实工作区。可把本机的 `codex` / `dsh` / `workbuddy` / `claude` 等 CLI 挂成团队成员。
+**把一句话需求丢给一支会协作的 AI 研发团队。** 规划、架构、实现、测试、评审全流程自动编排，过程实时可见，产物落到真实工作区 —— 本机的 `codex`、`claude`、`workbuddy` 等 CLI 可以直接挂成团队成员。
 
-- 零依赖，`node server/index.mjs` 即可跑（Node ≥ 20.11）
-- 内置模拟智能体，没有 API Key 也能完整演示协作链路
-- 一条 HTTP 请求即可从外部系统触发任务（Bot Hook）
+![Node](https://img.shields.io/badge/node-%E2%89%A520.11-3c873a?logo=node.js&logoColor=white)
+![Dependencies](https://img.shields.io/badge/dependencies-0-blue)
+![Build](https://img.shields.io/badge/build-none-lightgrey)
+![License](https://img.shields.io/badge/license-MIT-green)
+
+![AgentForge 界面](docs/screenshot.png)
+
+## 特性
+
+- **零依赖、零构建** —— 纯 Node.js + 原生 ESM，`node server/index.mjs` 即可启动，前端无需打包。
+- **真实多角色协作** —— 5 个角色按依赖顺序编排执行，上游产物作为下游输入，失败可回抛重跑。
+- **接入本机 CLI** —— 自动扫描 `codex` / `claude` / `opencode` / `dsh` / `workbuddy` 等 11 种命令行工具，一键挂载为团队成员。
+- **开箱即用** —— 内置模拟智能体，没有 API Key 也能跑通完整协作链路，产出可执行的真实代码。
+- **实时流式界面** —— SSE 推送，逐字输出的时间线、Markdown / 表格 / 代码块渲染、执行链路与产物浏览器。
+- **可被外部触发** —— 一次 HTTP POST 即可让流水线开工，方便接入机器人、CI 或自建系统。
+- **桌面化运行** —— 不打包 Electron，用系统浏览器 `--app` 模式得到独立窗口与任务栏图标，安装成本为零。
 
 ## 快速开始
 
+要求 Node.js ≥ 20.11，无其他依赖。
+
 ```bash
-cd e:/SKIl.1/bot
+git clone https://github.com/liuzheng6621/super-agentbot.git
+cd super-agentbot
 npm start
-# 打开 http://127.0.0.1:8787
 ```
 
-首次启动会自动创建 `data/db.json`（团队、任务、Webhook Token）与 `data/workspaces/<taskId>/`（产物目录）。
+打开 http://127.0.0.1:8787 ，在左下角输入框描述需求，`Ctrl/⌘ + Enter` 开工。
 
-## 部署到桌面（推荐）
+首次启动会自动生成 `data/db.json`（团队、任务、Webhook Token）与 `data/workspaces/<taskId>/`（产物目录）。
 
-双击 **`安装到桌面.bat`** → 桌面出现 `AGENTFORGE` 图标 → 双击即用。
+## 工作原理
 
-不依赖 Electron，安装包体为 0 字节下载：
+```
+需求
+ └─ planner    拆解目标、排定工序、收口交付
+     └─ architect   技术方案、接口契约、设计文档
+         └─ coder   实现代码、写入工作区
+             └─ tester   用例矩阵、边界覆盖、缺陷回抛
+                 └─ reviewer   质量评审、Blockers、交付结论
+```
 
-| 能力 | 实现 |
-|------|------|
-| 无控制台黑框 | `wscript` 隐藏启动 `detached/launcher.mjs` |
-| 独立应用窗口 | Edge/Chrome `--app` 模式，无地址栏、独立任务栏图标 |
-| 独立浏览器配置 | `%LOCALAPPDATA%\AgentForge\browser`，不污染日常浏览器 |
-| 单实例 | 已有实例直接开窗复用，不会重复起服务 |
-| 退出即回收 | 关窗 → 自动结束服务进程并清理 runtime 锁 |
-| 快捷方式 | 桌面 + 开始菜单，图标由 `desktop/make-icon.mjs` 纯 Node 生成 |
+每个角色都是一个可替换的执行器：默认走内置模拟引擎，也可以指向本机任意 CLI。角色可增删改，提示词、命令与参数都能在界面上编辑。
 
-- 退出：直接关窗口，或点左下角「退出」按钮（桌面模式下才显示），两条路都会回收服务进程
-- 日志：`%LOCALAPPDATA%\AgentForge\logs\`（`launcher.log` / `server.log`）
-- 业务数据仍在项目内 `data/`
-- 移除快捷方式：跑 `卸载桌面快捷方式.bat`，或 `node desktop/install.mjs --remove`
-- 也可以 `npm run desktop` 直接启动（保留控制台，便于看日志）
-
-## 界面
-
-- **左栏**：团队成员（含在线状态 / SIM·CLI 标记 / 执行次数）、本机 CLI 扫描、历史任务
-- **中栏**：协作时间线（流式输出、Markdown / 代码块 / 表格渲染）、底部群聊输入框
-- **右栏**：执行链路（每道工序状态）、产物文件（点开即看源码）、统计与 Bot Hook
-- **日夜模式**：右上角 `SHIFT` 开关切换白昼 / 夜巡两套配色
-
-## 团队与角色
-
-| 角色 | 默认成员 | 职责 |
-|------|---------|------|
-| planner | Nova | 拆需求、排工序、收口交付 |
-| architect | Forge | 技术方案、接口契约、写设计文档 |
-| coder | Kilo | 落代码、写文件 |
-| tester | Probe | 用例矩阵、边界覆盖、回抛缺陷 |
-| reviewer | Lens | 评审、质量门、卡 Blocker |
+| 角色 | 默认成员 | 职责 | 产出 |
+| --- | --- | --- | --- |
+| `planner` | Nova | 拆需求、排工序、收口 | 任务分解、交付结论 |
+| `architect` | Forge | 技术方案、接口契约 | 设计文档 |
+| `coder` | Kilo | 落代码、写文件 | 源码文件 |
+| `tester` | Probe | 用例矩阵、边界覆盖 | 测试用例、缺陷单 |
+| `reviewer` | Lens | 评审、质量门 | 评审意见 |
 
 ## 接入真实 CLI
 
-「扫描本机 CLI」用 `where.exe` 先确认命令是否真的存在（只有存在才去读 `--version`），
-探测 `claude / codex / opencode / dsh / workbuddy / crush / goose / aider / gemini / qwen / ollama`：
+左栏「扫描本机 CLI」用 `where.exe` / `which` 确认命令是否存在，再读取版本信息。覆盖 `claude`、`codex`、`opencode`、`dsh`、`workbuddy`、`crush`、`goose`、`aider`、`gemini`、`qwen`、`ollama`。
 
-- **READY**：已安装，点「接入」自动带上绝对路径
-- **N/A**：本机没有这个命令，点「手动」可以直接填绝对路径或任意自定义命令
-- 点成员右侧的 **⚙** 可以改名字 / 切换模拟与 CLI / 改命令与参数，也能「移出团队」
+- **READY** — 已安装，点「接入」自动填充绝对路径
+- **N/A** — 未检测到，可点「手动」填写绝对路径或任意自定义命令
+- 成员右侧 **⚙** 可重命名、切换模拟 / CLI 模式、修改命令与参数，或移出团队
 
-调用方式说明：
+调用约定：
 
-- `.exe` 用参数数组直连进程，中文提示词原样送达
-- `.cmd / .bat` 走 `cmd.exe`，会先 `chcp 65001` 再执行，避免 UTF-8 被按 GBK 解析成乱码
-- 参数模板里没有 `{{prompt}}` 时，提示词改由 stdin 传入
-- 子进程 stdin 会被立即关闭，防止 `codex` 这类工具卡在「Reading additional input from stdin」
+| 场景 | 处理方式 |
+| --- | --- |
+| `.exe` | 参数数组直连进程，UTF-8 提示词原样传递 |
+| `.cmd` / `.bat` | 经 `cmd.exe` 执行，前置 `chcp 65001` 避免编码错乱 |
+| 参数模板无 `{{prompt}}` | 提示词改由 stdin 传入 |
+| 子进程 stdin | 立即关闭，防止 CLI 阻塞在交互读取 |
+| 工作目录 | 任务专属工作区，运行期新增 / 修改的文件自动收录为产物 |
 
-CLI 以**任务工作区**为 cwd 执行，运行期间新增/修改的文件会自动收录进「产物」。
-先把模式设为「真实 CLI」再填命令；不确定就先留在「模拟」模式。
+## 桌面模式
 
-## 外部触发（Bot）
+Windows 下双击 `安装到桌面.bat`，桌面与开始菜单会生成 `AGENTFORGE` 快捷方式，双击即用。
+
+| 能力 | 实现 |
+| --- | --- |
+| 无控制台窗口 | `wscript` 隐藏启动 `desktop/launcher.mjs` |
+| 独立应用窗口 | Edge / Chrome `--app` 模式，无地址栏、独立任务栏图标 |
+| 隔离的浏览器配置 | `%LOCALAPPDATA%\AgentForge\browser` |
+| 单实例 | 已运行时直接开窗复用，不重复起服务 |
+| 退出回收 | 关窗即结束服务进程并清理运行时锁 |
+| 图标生成 | `desktop/make-icon.mjs` 纯 Node 生成 PNG / ICO |
+
+日志位于 `%LOCALAPPDATA%\AgentForge\logs\`，业务数据仍在项目内 `data/`。卸载：运行 `卸载桌面快捷方式.bat` 或 `node desktop/install.mjs --remove`。
+
+## HTTP API
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `GET` | `/api/state` | 全量状态（团队 / 任务 / 设置 / 当前任务） |
+| `POST` | `/api/tasks` | `{ goal, autoRun? }` 创建任务，默认自动开工 |
+| `GET` | `/api/tasks/:id` | 任务详情（消息、工序、产物） |
+| `POST` | `/api/tasks/:id/run` | 重新编排 |
+| `POST` | `/api/tasks/:id/stop` | 停止执行 |
+| `POST` | `/api/tasks/:id/chat` | `{ text }` 群聊，支持 `@成员名` |
+| `GET` | `/api/tasks/:id/files` | 工作区文件列表 |
+| `GET` | `/api/tasks/:id/file?path=` | 读取单个文件 |
+| `GET` `POST` | `/api/agents` | 团队列表 / 新增成员 |
+| `PATCH` `DELETE` | `/api/agents/:id` | 修改 / 移除成员 |
+| `POST` | `/api/agents/:id/test` | 冒烟测试 CLI 连通性 |
+| `GET` | `/api/probe` | 扫描本机 CLI |
+| `GET` | `/api/stream` | SSE 事件流 |
+| `POST` | `/api/hooks/:token` | 外部触发（Bot Hook） |
+
+### Bot Hook
 
 ```bash
 curl -X POST http://127.0.0.1:8787/api/hooks/<token> \
@@ -82,56 +114,47 @@ curl -X POST http://127.0.0.1:8787/api/hooks/<token> \
   -d '{"goal":"做一个并发安全的待办 API"}'
 ```
 
-Token 在右侧「统计」页可见，也可读 `data/db.json` 的 `settings.hookToken`。
+Token 显示在界面右侧「统计」面板，也可从 `data/db.json` 的 `settings.hookToken` 读取。
 
-## API
+## 配置
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| GET | `/api/state` | 全量状态（团队 / 任务 / 设置 / 当前任务） |
-| POST | `/api/tasks` | `{goal, autoRun?}` 创建任务，默认自动开工 |
-| GET | `/api/tasks/:id` | 任务详情（含消息、工序、产物） |
-| POST | `/api/tasks/:id/run` | 重新编排 |
-| POST | `/api/tasks/:id/stop` | 停止 |
-| POST | `/api/tasks/:id/chat` | `{text}` 群聊，支持 `@成员名` |
-| GET | `/api/tasks/:id/files` | 工作区文件列表 |
-| GET | `/api/tasks/:id/file?path=` | 读取单个文件 |
-| GET/POST | `/api/agents` | 团队列表 / 新增成员 |
-| PATCH/DELETE | `/api/agents/:id` | 修改 / 移除成员 |
-| POST | `/api/agents/:id/test` | 冒烟测试该 CLI |
-| GET | `/api/probe` | 扫描本机 CLI |
-| GET | `/api/stream` | SSE 事件流 |
-| POST | `/api/hooks/:token` | 外部触发 |
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `PORT` | `8787` | HTTP 监听端口 |
+| `HOST` | `127.0.0.1` | 监听地址，局域网共享可设为 `0.0.0.0` |
 
-## 目录
+运行时数据均在 `data/`（已加入 `.gitignore`）：`db.json` 保存团队、任务与设置，`workspaces/<taskId>/` 保存每个任务的产物。
+
+## 项目结构
 
 ```
-bot/
-├─ server/
-│  ├─ index.mjs         HTTP + SSE + 路由 + 静态资源
-│  ├─ store.mjs         状态与持久化、事件总线
-│  ├─ orchestrator.mjs  编排流水线、群聊、产物落盘
-│  ├─ adapters.mjs      模拟流式输出 / 真实 CLI 适配 / 本机探测
-│  └─ sim.mjs           内置智能体内容引擎
-├─ public/              前端（原生 ESM，无构建步骤）
-│  ├─ index.html
-│  ├─ styles.css        像素印刷风视觉
-│  ├─ app.js            SSE 客户端与渲染
-│  ├─ icon-256.png      生成的网页图标
-│  └─ fonts/
-├─ desktop/             桌面化
-│  ├─ launcher.mjs      拉起服务 + 打开应用窗口 + 关窗回收
-│  ├─ install.mjs       一键部署快捷方式（桌面 / 开始菜单）
-│  ├─ make-icon.mjs     纯 Node 生成 PNG / ICO 图标
-│  ├─ start.vbs         生成的隐藏启动入口
-│  └─ icon.ico
-├─ 安装到桌面.bat
-├─ 卸载桌面快捷方式.bat
-└─ data/                运行时数据（已 gitignore）
+.
+├── server/
+│   ├── index.mjs        HTTP 路由、SSE、静态资源
+│   ├── store.mjs        状态管理、持久化、事件总线
+│   ├── orchestrator.mjs 流水线编排、群聊、产物落盘
+│   ├── adapters.mjs     模拟流式输出、真实 CLI 适配、本机探测
+│   └── sim.mjs          内置智能体内容引擎
+├── public/              前端（原生 ESM，无构建）
+│   ├── index.html
+│   ├── styles.css
+│   └── app.js           SSE 客户端与渲染
+├── desktop/
+│   ├── launcher.mjs     启动服务、打开应用窗口、关窗回收
+│   ├── install.mjs      部署桌面 / 开始菜单快捷方式
+│   └── make-icon.mjs    纯 Node 生成图标
+├── docs/
+│   └── screenshot.png
+├── 安装到桌面.bat
+├── 卸载桌面快捷方式.bat
+└── data/                运行时数据（gitignore）
 ```
 
 ## 说明
 
-- 模拟模式产出的是**可运行的真实代码**：`data/workspaces/<taskId>/tests/*.test.js` 可直接 `node` 执行。
-- 环境变量：`PORT`（默认 8787）、`HOST`（默认 127.0.0.1）。
-- 视觉语言参考 `E:\vue黄课作\商品管理`（MAKET 像素仓库）：纸张黄 + 墨绿描边 + 硬投影 + 像素字。
+- 模拟模式产出的是可运行的真实代码：`data/workspaces/<taskId>/tests/*.test.js` 可直接用 `node` 执行。
+- 单机单进程设计，状态存于 JSON 文件，适合本地个人使用与团队内网演示；如需多实例部署，需要替换 `store.mjs` 的持久化实现。
+
+## License
+
+MIT

@@ -5,3 +5,6 @@ data/
 .tmp-edge/
 shot.png
 .DS_Store
+
+# 本地 agent 工作区数据
+.workbuddy/
