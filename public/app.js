@@ -439,6 +439,66 @@ function renderStats() {
   grid.innerHTML = items
     .map(([label, value]) => `<div class="stat"><div class="s-label">${label}</div><div class="s-value">${value}</div></div>`)
     .join("");
+  const ws = $("#workspacePath");
+  if (ws) {
+    ws.textContent = t ? t.workspace || "自动工作区" : "未选择任务";
+    ws.title = t?.workspace || "";
+  }
+}
+
+function renderContext() {
+  const wrap = $("#contextList");
+  const hint = $("#contextHint");
+  const t = S.task;
+  const context = t?.context;
+
+  if (!context) {
+    if (hint) hint.textContent = "选择任务后，这里会显示当前上下文。";
+    wrap.innerHTML = "";
+    return;
+  }
+
+  const files = context.files || [];
+  const messages = context.messages || [];
+  if (hint) {
+    hint.textContent = `工作区 ${shortPath(context.workspace || "")} · ${messages.length} 条近期对话 · ${files.length} 个已知文件`;
+    hint.title = context.workspace || "";
+  }
+
+  const contextFiles = files.slice(0, 12);
+  const contextMessages = messages.slice(-4).reverse();
+  wrap.innerHTML = `
+    <div class="ctx-block">
+      <div class="ctx-label">GOAL</div>
+      <p>${escapeHtml(context.goal || "")}</p>
+    </div>
+    <div class="ctx-block">
+      <div class="ctx-label">RECENT</div>
+      ${
+        contextMessages.length
+          ? contextMessages
+              .map(
+                (m) =>
+                  `<div class="ctx-message"><b>${escapeHtml(m.name)}</b><span>${escapeHtml(m.text)}</span></div>`,
+              )
+              .join("")
+          : '<p class="hint">暂无近期协作摘要。</p>'
+      }
+    </div>
+    <div class="ctx-block">
+      <div class="ctx-label">FILES</div>
+      ${
+        contextFiles.length
+          ? contextFiles
+              .map(
+                (f) =>
+                  `<div class="ctx-file"><span>${escapeHtml(f.path)}</span><i>${fmtBytes(f.bytes)}</i></div>`,
+              )
+              .join("")
+          : '<p class="hint">工作区还没有可读取的文件。</p>'
+      }
+    </div>
+  `;
 }
 
 /* ---------------- 渲染总入口 ---------------- */
@@ -451,6 +511,7 @@ function renderAll() {
   renderPlan();
   renderFiles();
   renderStats();
+  renderContext();
 }
 
 /* ---------------- 任务操作 ---------------- */
@@ -932,6 +993,7 @@ function switchTab(tab) {
   S.tab = tab;
   $$(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   $("#pane-plan").hidden = tab !== "plan";
+  $("#pane-context").hidden = tab !== "context";
   $("#pane-files").hidden = tab !== "files";
   $("#pane-stats").hidden = tab !== "stats";
 }

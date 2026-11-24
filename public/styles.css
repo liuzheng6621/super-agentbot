@@ -1634,6 +1634,83 @@ kbd {
   padding: 14px 12px 22px;
 }
 
+/* 当前任务上下文 */
+.context-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+.ctx-block {
+  border: 2px solid var(--edge);
+  background: var(--card);
+  box-shadow: 3px 3px 0 var(--hard);
+  padding: 9px 10px;
+}
+
+.ctx-label {
+  margin-bottom: 6px;
+  font-family: var(--f-pixel);
+  font-size: 9.5px;
+  letter-spacing: 1px;
+  color: var(--muted);
+}
+
+.ctx-block > p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.ctx-message {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px;
+  align-items: baseline;
+  padding: 4px 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.ctx-message + .ctx-message {
+  border-top: 1px dashed var(--muted);
+}
+
+.ctx-message b {
+  white-space: nowrap;
+}
+
+.ctx-message span {
+  color: var(--muted);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.ctx-file {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 0;
+  font-family: var(--f-code);
+  font-size: 11px;
+}
+
+.ctx-file span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctx-file i {
+  font-style: normal;
+  font-family: var(--f-pixel);
+  color: var(--muted);
+}
+
 /* 执行链路 */
 .plan-list {
   display: flex;
@@ -1866,6 +1943,11 @@ kbd {
   border: 2px solid var(--edge);
   background: var(--sunken);
   box-shadow: 3px 3px 0 var(--hard);
+}
+
+.workspace-card {
+  margin-top: 12px;
+  background: var(--sunken);
 }
 
 .hook-card h4 {

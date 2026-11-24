@@ -175,7 +175,8 @@
         <aside class="inspector" id="inspector">
           <div class="insp-head">
             <div class="tabs" id="tabs">
-              <button class="tab active" data-tab="plan">执行链路</button>
+              <button class="tab active" data-tab="context">上下文</button>
+              <button class="tab" data-tab="plan">执行链路</button>
               <button class="tab" data-tab="files">产物</button>
               <button class="tab" data-tab="stats">统计</button>
             </div>
@@ -183,6 +184,10 @@
           </div>
 
           <div class="insp-body">
+            <div class="pane" id="pane-context">
+              <p class="hint" id="contextHint">选择任务后，这里会显示当前上下文。</p>
+              <div class="context-list" id="contextList"></div>
+            </div>
             <div class="pane" id="pane-plan">
               <div class="plan-list" id="planList">
                 <p class="hint">任务开始后，这里会显示每道工序的状态。</p>
@@ -204,6 +209,10 @@
 
             <div class="pane" id="pane-stats" hidden>
               <div class="stat-grid" id="statGrid"></div>
+              <div class="ctx-block workspace-card">
+                <div class="ctx-label">WORKSPACE</div>
+                <p id="workspacePath">未选择任务</p>
+              </div>
               <div class="hook-card">
                 <h4>外部触发 / BOT HOOK</h4>
                 <p>任何系统都能用一个 HTTP 请求把任务丢进来，团队自动开工。</p>
