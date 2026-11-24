@@ -71,12 +71,28 @@ const wrap = (s) => s.trim() + '\n';
 /* 各角色的产出                                                        */
 /* ------------------------------------------------------------------ */
 
-function plannerText({ goal, mod }) {
+function plannerText({ goal, mod, outputs = {} }) {
+  const decision = outputs.decision || null;
+  const route = {
+    contract: '先把接口契约冻结，再让实现与测试并行',
+    mvp: '先跑通最小闭环，再补齐契约与边界',
+    'test-first': '先落用例矩阵，再由实现把用例跑绿',
+    'risk-first': '先做防护栏，再补功能主线',
+    phased: '先交付 P0 主链路，再进 P1 加固',
+  }[decision?.angleKey];
+  const adopted = decision
+    ? `
+### 零、本轮已裁决的方案
+讨论组采纳 **方案 ${decision.winnerId} · ${decision.angleLabel}**（${decision.winnerName} 提出，平均 ${decision.average ?? '—'} 分、${decision.votes} 票）。
+后续工序按「${route || '该方案的路线'}」执行，评审以它为准；偏离必须在评审结论里写明理由。
+`
+    : '';
+
   return wrap(`
 我已收到这个目标，先把它拆成可并行/可串行执行的工序，再分派给合适的成员。
 
 > **目标**：${goal}
-
+${adopted}
 ### 一、需求澄清（我的假设）
 1. **交付形态**：可运行的 ${mod.label} 最小闭环，而不是一次性做全量特性。
 2. **优先级**：主链路可用 > 边界完备 > 性能优化。
@@ -86,7 +102,7 @@ function plannerText({ goal, mod }) {
 
 | # | 工序 | 负责 | 交付物 | 阻塞关系 |
 |---|------|------|--------|----------|
-| 1 | 技术方案与接口契约 | Forge | \`docs/${mod.name}-design.md\` | 无 |
+| 1 | 技术方案与接口契约 | Forge | \`docs/${mod.name}-design.md\` | 方案讨论 |
 | 2 | 主链路实现 | Kilo | \`src/${mod.name}.js\` | 依赖 1 |
 | 3 | 测试设计 | Probe | \`tests/${mod.name}.test.js\` | 依赖 1 |
 | 4 | 评审与质量门 | Lens | 评审结论 | 依赖 2 / 3 |
@@ -99,17 +115,18 @@ function plannerText({ goal, mod }) {
 - **过度设计**：本轮不引入数据库与鉴权体系，用内存态 + 可替换 repository 兜住。
 
 ### 四、我的编排决策
-先让 **Forge** 定契约 → **Kilo / Probe** 两路并行 → 汇合后执行质量门 → **Lens** 评审。
+${decision ? `按已裁决的方案 ${decision.winnerId}（${decision.angleLabel}）：${route}。` : '先让 **Forge** 定契约 → **Kilo / Probe** 两路并行 → 汇合后执行质量门 → **Lens** 评审。'}
 任何一步失败，我会阻断依赖它的下游；评审未通过则自动返工复评，不需要你重新描述需求。
 
 现在开始分派。
 `);
 }
 
-function architectText({ goal, mod }) {
+function architectText({ goal, mod, outputs = {} }) {
+  const decision = outputs.decision || null;
   return wrap(`
 方案定稿，先把**契约**写死，后面实现按契约走，避免来回改。
-
+${decision ? `\n> 方案基线：讨论采纳 **方案 ${decision.winnerId} · ${decision.angleLabel}**，本设计按其路线收敛。\n` : ''}
 ### 一、模块边界
 \`\`\`
 ${mod.name}/
@@ -161,7 +178,7 @@ function coderText({ goal, mod, outputs = {} }) {
   }
   return wrap(`
 按契约实现，先跑通主链路，同时把边界挡在入口。
-
+${outputs.decision ? `\n> 方案基线：本轮按讨论裁决的 **方案 ${outputs.decision.winnerId} · ${outputs.decision.angleLabel}** 执行。\n` : ''}
 逐条对齐 Forge 的接口：\`create / list / close\` 三个方法全部落地，错误统一走 \`AppError\`。
 
 **已完成的取舍**
@@ -261,6 +278,7 @@ VERDICT: FAIL
 function summaryText({ goal, mod, outputs = {} }) {
   const passed = outputs.passed !== false;
   const repairRound = Number(outputs.repairRound || 0);
+  const decision = outputs.decision || null;
   const done = ['方案文档', `${mod.name} 模块实现`, '自动化测试', '评审结论'];
   return wrap(`
 ## ${passed ? '交付完成' : '需要人工确认'}
@@ -269,6 +287,7 @@ function summaryText({ goal, mod, outputs = {} }) {
 
 本轮 ${done.length} 项工序全部走完${repairRound ? `，经过 ${repairRound} 轮返工复评` : ''}。
 质量门${passed ? '已通过' : '仍未通过，不能按完成交付'}。
+${decision ? `实施采用的是讨论后胜出的 **方案 ${decision.winnerId} · ${decision.angleLabel}**（${decision.average ?? '—'} 分）。` : ''}
 
 ### 产物
 ${done.map((d, i) => `${i + 1}. ${d}`).join('\n')}
@@ -519,6 +538,402 @@ export function compose({ kind, goal, agent, outputs = {} }) {
     default:
       return { text: `收到：${goal}`, artifacts: [] };
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* 方案讨论：提案 / 交叉质询 / 裁决                                     */
+/* ------------------------------------------------------------------ */
+
+export const ANGLES = [
+  {
+    key: 'contract',
+    label: '契约先行',
+    tag: '先把接口与数据结构钉死，实现只做填空题',
+    why: '需求边界清楚、后续还要长期维护时，返工最少',
+  },
+  {
+    key: 'mvp',
+    label: '最小闭环',
+    tag: '用最少代码先跑通一条端到端链路，结构后补',
+    why: '首版交付最快，能最早拿到真实反馈',
+  },
+  {
+    key: 'test-first',
+    label: '测试先行',
+    tag: '先把验收标准写成可执行用例，再让实现满足它',
+    why: '边界和回归有保障，评审时不用靠人眼兜底',
+  },
+  {
+    key: 'risk-first',
+    label: '风险优先',
+    tag: '先处理并发、错误泄漏、越权这三类会出事故的点',
+    why: '上线风险最低，故障排查成本最小',
+  },
+  {
+    key: 'phased',
+    label: '分阶段交付',
+    tag: '拆成两个可独立验收的阶段，先主链路再加固',
+    why: '能分段验收，任何一段出问题都不会拖垮整体',
+  },
+];
+
+export function angleByIndex(index) {
+  return ANGLES[((index % ANGLES.length) + ANGLES.length) % ANGLES.length];
+}
+
+export function angleByKey(key) {
+  return ANGLES.find((a) => a.key === key) || ANGLES[0];
+}
+
+function hash(text) {
+  let h = 2166136261;
+  for (const ch of String(text)) {
+    h ^= ch.charCodeAt(0);
+    h = Math.imul(h, 16777619);
+  }
+  return Math.abs(h);
+}
+
+const ROLE_TEXT = {
+  planner: '规划师',
+  architect: '架构师',
+  coder: '实现工程师',
+  tester: '测试工程师',
+  reviewer: '代码评审',
+};
+
+function angleBody({ angle, goal, mod, agent }) {
+  const cap = mod.name.charAt(0).toUpperCase() + mod.name.slice(1);
+  const head = `> 提案人：${agent?.name || '成员'}（${agent?.title || ROLE_TEXT[agent?.role] || '成员'}） · 主张：${angle.tag}\n\n**目标**：${goal}\n`;
+
+  if (angle.key === 'contract') {
+    return wrap(`
+${head}
+### 一、核心主张
+先把**接口与数据结构钉死**，实现阶段只做填空题。这样实现、测试、评审三条线可以同时开工，不互相等。
+
+### 二、技术路线
+- 边界：\`transport → domain → repository\` 三层，依赖单向，domain 不碰 IO。
+- 契约：\`create / list / close\` 三个方法先写进文档，字段名当天冻结。
+- 存储：内存 repository，接口不变，后面换数据库不用改业务代码。
+
+### 三、落地工序
+
+| # | 工序 | 负责 | 产出 | 依赖 |
+|---|------|------|------|------|
+| 1 | 契约与数据结构定稿 | 架构 | \`docs/${mod.name}-design.md\` | 无 |
+| 2 | 实现与用例设计并行 | 实现 / 测试 | \`src/${mod.name}.js\`、\`tests/${mod.name}.test.js\` | 1 |
+| 3 | 评审与质量门 | 评审 | VERDICT | 2 |
+
+### 四、代价与风险
+1. 前置设计要花时间，需求如果还在变，契约会返工。
+2. 对很小的需求来说偏重，容易过度设计。
+3. 契约一旦定错，错误会被三条线同时放大。
+
+### 五、工作量
+约 3 个文件、1 轮返工。适合边界清楚、要长期维护的 ${mod.label}。
+`);
+  }
+
+  if (angle.key === 'mvp') {
+    return wrap(`
+${head}
+### 一、核心主张
+先用最少的代码跑通一条**端到端主链路**，把结构留给第二轮。首版能演示、能验收，比纸面完美更重要。
+
+### 二、技术路线
+- 一个领域文件 + 内存仓储，先不分层。
+- 只实现 \`create / list / close\` 主路径，校验集中放在入口。
+- 测试只覆盖主链路和两个高频错误，边界在第二轮补。
+
+### 三、落地工序
+
+| # | 工序 | 负责 | 产出 | 依赖 |
+|---|------|------|------|------|
+| 1 | 主链路实现（含最小用例） | 实现 | \`src/${mod.name}.js\`、\`tests/${mod.name}.test.js\` | 无 |
+| 2 | 补契约文档 | 架构 | \`docs/${mod.name}-design.md\` | 1 |
+| 3 | 评审与质量门 | 评审 | VERDICT | 1 |
+
+### 四、代价与风险
+1. 结构后补，第二批需求进来时大概率要重构。
+2. 边界覆盖不足，空值和并发是最可能漏的两处。
+3. 先写实现再补文档，文档容易变成事后描述而不是约束。
+
+### 五、工作量
+约 2 个文件、半天内可交付。适合先验证方向、再决定是否投入的场景。
+`);
+  }
+
+  if (angle.key === 'test-first') {
+    return wrap(`
+${head}
+### 一、核心主张
+先把**验收标准写成可执行用例**，实现的目标就是让这些用例变绿。测试即文档，评审不用靠人眼兜底。
+
+### 二、技术路线
+- 先出用例矩阵：正常、空值、超长、幂等、并发五类。
+- 契约由用例反推：用例里出现过的字段才算契约的一部分。
+- 质量门真实执行测试，不通过就不交付。
+
+### 三、落地工序
+
+| # | 工序 | 负责 | 产出 | 依赖 |
+|---|------|------|------|------|
+| 1 | 用例矩阵与验收口径 | 测试 | \`tests/${mod.name}.test.js\` | 无 |
+| 2 | 契约草案（由用例反推） | 架构 | \`docs/${mod.name}-design.md\` | 1 |
+| 3 | 实现并跑绿 | 实现 | \`src/${mod.name}.js\` | 1、2 |
+| 4 | 质量门 + 评审 | 评审 | VERDICT | 3 |
+
+### 四、代价与风险
+1. 用例写多会拖慢首版，需求没定稿时容易白写。
+2. 测试本身有盲区，用例没覆盖到的地方依然是风险。
+3. 实现可能为了过用例写死逻辑，评审要盯这一点。
+
+### 五、工作量
+约 3 个文件、1 轮返工。适合错误代价高、需要长期回归的 ${mod.label}。
+`);
+  }
+
+  if (angle.key === 'risk-first') {
+    return wrap(`
+${head}
+### 一、核心主张
+先处理**会出事故的三类点**：并发写丢更新、错误信息泄漏、越权与非法入参。功能少一点可以接受，事故不能有。
+
+### 二、技术路线
+- 写路径统一进 promise 队列，读多写少也不放松。
+- 对外只返回错误码 + 中文文案，堆栈只进日志。
+- 入口统一校验，超长直接拒绝，不做静默截断。
+
+### 三、落地工序
+
+| # | 工序 | 负责 | 产出 | 依赖 |
+|---|------|------|------|------|
+| 1 | 风险清单与防护设计 | 评审 | 风险清单 | 无 |
+| 2 | 防护栏实现（锁 / 错误码 / 校验） | 实现 | \`src/${mod.name}.js\` | 1 |
+| 3 | 对抗性用例 | 测试 | \`tests/${mod.name}.test.js\` | 2 |
+| 4 | 复评与质量门 | 评审 | VERDICT | 3 |
+
+### 四、代价与风险
+1. 防护栏先做，功能进度看起来会慢。
+2. 过度防护会增加复杂度，评审要能区分必要与多余。
+3. 风险清单如果凭经验拍脑袋，可能漏掉真正的业务风险。
+
+### 五、工作量
+约 3 个文件、1 轮返工。适合涉及资金、权限或对外接口的 ${mod.label}。
+`);
+  }
+
+  return wrap(`
+${head}
+### 一、核心主张
+拆成两个**可独立验收**的阶段：P0 主链路先上线，P1 再补边界与运维。任何一段出问题都不会拖垮整体。
+
+### 二、技术路线
+- P0：领域模块 + 内存仓储 + 主链路用例，先拿到可演示版本。
+- P1：并发锁、错误码文档、持久化替换点。
+- 每阶段单独跑质量门，通过才进下一阶段。
+
+### 三、落地工序
+
+| # | 工序 | 负责 | 产出 | 依赖 |
+|---|------|------|------|------|
+| 1 | P0 契约与主链路 | 架构 / 实现 | \`docs/${mod.name}-design.md\`、\`src/${mod.name}.js\` | 无 |
+| 2 | P0 用例与验收 | 测试 | \`tests/${mod.name}.test.js\` | 1 |
+| 3 | P1 加固项 | 实现 | 并发锁、错误码 | 2 |
+| 4 | 整体评审 | 评审 | VERDICT | 3 |
+
+### 四、代价与风险
+1. 两阶段之间要做一次完整回归，成本不能省。
+2. 阶段切分如果错了，同一块代码会被改两遍。
+3. 多一次验收就多一次沟通开销。
+
+### 五、工作量
+约 3 个文件、2 次质量门。适合目标明确但需要分步上线的 ${mod.label}。
+`);
+}
+
+/* ------------------------------------------------------------------ */
+/* 方案讨论文本                                                        */
+/* ------------------------------------------------------------------ */
+
+export function proposalFor({ goal, agent, index, id }) {
+  const angle = angleByIndex(index);
+  const mod = pickModule(goal);
+  return {
+    angle,
+    text: `## 方案 ${id || ''} · ${angle.label}\n\n${angleBody({ angle, goal, mod, agent })}`,
+  };
+}
+
+const PREFERENCE = {
+  contract: { contract: 9, mvp: 6, 'test-first': 8, 'risk-first': 8, phased: 7 },
+  mvp: { contract: 6, mvp: 9, 'test-first': 7, 'risk-first': 6, phased: 7 },
+  'test-first': { contract: 8, mvp: 6, 'test-first': 9, 'risk-first': 8, phased: 7 },
+  'risk-first': { contract: 8, mvp: 5, 'test-first': 8, 'risk-first': 9, phased: 7 },
+  phased: { contract: 8, mvp: 7, 'test-first': 7, 'risk-first': 7, phased: 9 },
+};
+
+const REASONS = {
+  contract: [
+    '契约清楚，实现和测试能同时开工',
+    '字段冻结后返工少，但前置设计偏重',
+    '结构最稳，首版会慢一些',
+  ],
+  mvp: [
+    '交付最快，能最早拿到真实反馈',
+    '结构先欠着，第二批需求会还债',
+    '主链路清爽，边界覆盖偏薄',
+  ],
+  'test-first': [
+    '用例先行，质量门有真实依据',
+    '边界最完整，但首版周期最长',
+    '测试即文档，评审成本最低',
+  ],
+  'risk-first': [
+    '事故面最小，防护栏做得实',
+    '功能进度慢，防护可能过度',
+    '错误处理最扎实，体验层偏弱',
+  ],
+  phased: [
+    '分阶段验收，风险可控',
+    '多一次回归，沟通成本更高',
+    '节奏稳，但整体交付被拉长',
+  ],
+};
+
+const WEAKNESS = {
+  contract: '契约定得早，如果需求还会变，返工面会同时压到三条线。',
+  mvp: '边界覆盖不足，空值和并发最可能在上线后暴露。',
+  'test-first': '用例写多会拖慢首版，且测试本身有盲区。',
+  'risk-first': '防护栏先做，功能观感上会明显偏慢。',
+  phased: '阶段切分如果错了，同一块代码要改两遍。',
+};
+
+function scoreFor(criticAngle, targetAngle, salt) {
+  const base = PREFERENCE[criticAngle]?.[targetAngle] ?? 7;
+  const jitter = (hash(salt) % 3) - 1; // -1 / 0 / 1
+  return Math.max(5, Math.min(10, Math.round(base + jitter)));
+}
+
+export function critiqueFor({ goal, agent, index, proposals }) {
+  const ownAngle = angleByIndex(index);
+  const own = proposals.find((p) => p.own);
+  const targets = proposals.filter((p) => !p.own);
+  const criticAngle = own?.angleKey || ownAngle.key;
+
+  const rows = targets.map((p) => {
+    const score = scoreFor(criticAngle, p.angleKey, `${agent?.name}|${p.id}|${p.angleKey}`);
+    const pool = REASONS[p.angleKey] || REASONS.contract;
+    const reason = pool[hash(`${agent?.name}${p.id}`) % pool.length];
+    const risk = WEAKNESS[p.angleKey] || WEAKNESS.contract;
+    return { id: p.id, score, reason, risk };
+  });
+
+  const table = [
+    '| 方案 | 评分 | 关键理由 | 我看到的硬伤 |',
+    '|------|------|----------|--------------|',
+    ...rows.map((r) => `| ${r.id} | ${r.score} | ${r.reason} | ${r.risk} |`),
+  ].join('\n');
+
+  const best = [...rows].sort((a, b) => b.score - a.score)[0];
+  const selfLine = own
+    ? `我自己的方案（${own.id}）不参与打分。它的短板我认：${WEAKNESS[own.angleKey] || WEAKNESS.contract}`
+    : `我这一轮没有提交方案，只做评审。`;
+
+  return {
+    scores: rows.map((r) => ({ id: r.id, score: r.score, reason: r.reason })),
+    text: wrap(`
+## 交叉质询 · ${agent?.name || '成员'}
+
+目标：${goal}
+
+### 评分
+
+${table}
+
+### 我的判断
+${best ? `我会优先选 **方案 ${best.id}**：${best.reason}。` : '本轮没有可评的方案。'}
+
+${selfLine}
+
+### 一句话
+${rows.length ? `方案之间存在真实分歧，不是措辞差异；实施时必须明确采纳哪一条路线。` : '提案不足，无法比较。'}
+`),
+  };
+}
+
+const WINNER_WHY = {
+  contract: [
+    '实现与测试可以在契约冻结后并行，整体周期最短',
+    '评审有明确基准，返工范围可控',
+    '后面换存储或加接口，不用动业务代码',
+  ],
+  mvp: [
+    '能最快拿到可运行版本，方向错了也及时止损',
+    '工作量最小，首版验收压力低',
+    '后续优化有真实反馈作为依据',
+  ],
+  'test-first': [
+    '每条验收标准都可执行，质量门不是形式',
+    '边界覆盖最完整，回归成本最低',
+    '实现目标明确，评审争议最少',
+  ],
+  'risk-first': [
+    '上线风险最低，事故成本最小',
+    '错误处理与并发控制一次做到位',
+    '后续加功能不用回头补防护栏',
+  ],
+  phased: [
+    '两个阶段都能独立验收，风险不会累积',
+    '主链路先上线，反馈来得早',
+    '加固项有明确边界，不会无限扩散',
+  ],
+};
+
+export function decisionFor({ goal, ranking, winner, judge, participants }) {
+  const avg = winner.average == null ? '无有效评分' : `${winner.average.toFixed(1)} 分`;
+  const rows = ranking
+    .map(
+      (p, i) =>
+        `| ${p.id} | ${p.name} | ${p.angleLabel} | ${p.average == null ? '—' : p.average.toFixed(1)} | ${p.votes} | ${
+          p.id === winner.id ? '**采纳**' : i === 1 ? '备选' : '未采纳'
+        } |`,
+    )
+    .join('\n');
+
+  const absorbed = ranking
+    .filter((p) => p.id !== winner.id)
+    .slice(0, 2)
+    .map((p) => `- 吸收 **方案 ${p.id}（${p.angleLabel}）** 的一点：${(REASONS[p.angleKey] || REASONS.contract)[0]}。`)
+    .join('\n');
+
+  return wrap(`
+## 裁决完成
+
+**采纳方案 ${winner.id} · ${winner.angleLabel}**（${winner.name} 提出，平均 ${avg}，${winner.votes} 票）
+
+目标：${goal}
+
+### 评分汇总
+
+| 方案 | 提案人 | 主张 | 平均分 | 票数 | 结论 |
+|------|--------|------|--------|------|------|
+${rows}
+
+### 为什么是它
+${(WINNER_WHY[winner.angleKey] || WINNER_WHY.contract).map((line) => `- ${line}`).join('\n')}
+
+### 吸收了其他方案的什么
+${absorbed || '- 本轮没有可吸收的备选方案。'}
+
+### 实施约束
+1. 后续工序按方案 ${winner.id} 的路线执行，不得擅自更换技术路线。
+2. 评审以本方案为基准；发现硬伤必须在结论里写明，不能默默改道。
+3. 质量门不通过就返工，不允许退回其他方案重来。
+
+由 ${judge?.name || '主持人'} 主持裁决，共 ${participants} 位成员参与。现在进入实施。
+`);
 }
 
 export function designDoc({ goal }) {

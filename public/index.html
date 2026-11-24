@@ -177,6 +177,7 @@
           <div class="insp-head">
             <div class="tabs" id="tabs">
               <button class="tab active" data-tab="context">上下文</button>
+              <button class="tab" data-tab="debate">讨论</button>
               <button class="tab" data-tab="plan">执行链路</button>
               <button class="tab" data-tab="files">产物</button>
               <button class="tab" data-tab="stats">统计</button>
@@ -189,6 +190,13 @@
               <p class="hint" id="contextHint">选择任务后，这里会显示当前上下文。</p>
               <div class="context-list" id="contextList"></div>
             </div>
+            <div class="pane" id="pane-debate" hidden>
+              <div class="debate-head" id="debateHead"></div>
+              <div class="debate-list" id="debateList">
+                <p class="hint">任务开始后，成员会先各自出方案、互相评分，这里会显示每份方案和最终裁决。</p>
+              </div>
+            </div>
+
             <div class="pane" id="pane-plan">
               <div class="plan-overview" id="planOverview" hidden></div>
               <div class="plan-list" id="planList">

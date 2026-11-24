@@ -328,6 +328,7 @@ const STEP_STATUS_TEXT = {
   error: "失败",
   blocked: "上游中断",
   stopped: "已停止",
+  skipped: "已跳过",
 };
 
 function renderTasks() {
@@ -388,9 +389,20 @@ function renderTopbar() {
 function messageHtml(m) {
   const isUser = m.kind === "user" || m.agentId === "user";
   const color = m.color || "#b8d94f";
+  const badge =
+    m.kind === "proposal"
+      ? `<span class="msg-badge proposal">方案 ${escapeHtml(m.debate?.proposalId || "")} · 提案</span>`
+      : m.kind === "critique"
+        ? '<span class="msg-badge critique">交叉质询</span>'
+        : m.kind === "decision"
+          ? '<span class="msg-badge decision">裁决</span>'
+          : m.kind === "debate-intro"
+            ? '<span class="msg-badge intro">讨论</span>'
+            : "";
   const head = `<div class="msg-head">
       <span class="m-name">${escapeHtml(m.name || "AI")}</span>
       <span class="m-role">${escapeHtml((m.title || m.role || "").toUpperCase())}</span>
+      ${badge}
       <span class="m-time">${fmtTime(m.createdAt)}</span>
     </div>`;
   const meta =
@@ -461,7 +473,6 @@ function renderPlan() {
     wrap.innerHTML = '<p class="hint">任务开始后，这里会显示每道工序的状态。</p>';
     return;
   }
-
   const indexOf = new Map(t.plan.map((step, i) => [step.id, i + 1]));
   const qualityText =
     t.quality?.status === "passed"
@@ -477,6 +488,11 @@ function renderPlan() {
       <span class="po-mode">DAG · 自动编排</span>
       <b>${t.plan.length} 道工序</b>
       <span>${t.repairRound ? `返工 ${t.repairRound} 轮` : "首轮执行"}</span>
+      ${
+        t.debate?.decision
+          ? `<span class="po-decision" title="方案讨论结果">采纳方案 ${t.debate.decision.winnerId}</span>`
+          : ""
+      }
       <span class="po-quality" data-quality="${t.quality?.status || "pending"}">${qualityText}</span>`;
   }
 
@@ -510,6 +526,146 @@ function renderPlan() {
       </div>`;
     })
     .join("");
+}
+
+/* ---------------- 渲染：方案讨论 ---------------- */
+
+const DEBATE_STATUS = {
+  pending: "待开始",
+  proposing: "提案中",
+  critiquing: "交叉质询中",
+  decided: "已裁决",
+  skipped: "已跳过",
+  failed: "讨论失败",
+};
+
+function proposalScore(p) {
+  const votes = p.votes || [];
+  if (!votes.length) return null;
+  return votes.reduce((sum, v) => sum + Number(v.score || 0), 0) / votes.length;
+}
+
+function renderDebate() {
+  const head = $("#debateHead");
+  const list = $("#debateList");
+  if (!head || !list) return;
+  const d = S.task?.debate;
+  if (!d) {
+    head.innerHTML = "";
+    list.innerHTML =
+      '<p class="hint">任务开始后，成员会先各自出方案、互相评分，这里会显示每份方案和最终裁决。</p>';
+    return;
+  }
+  if (!d.participants?.length) {
+    head.innerHTML =
+      d.status && d.status !== "pending"
+        ? `<div class="debate-status" data-status="${d.status}"><b>${
+            DEBATE_STATUS[d.status] || d.status
+          }</b></div>`
+        : "";
+    list.innerHTML = `<p class="hint">${escapeHtml(
+      d.reason || "本轮没有进行方案讨论，直接进入实施。",
+    )}</p>`;
+    return;
+  }
+
+  const dec = d.decision;
+  head.innerHTML = `
+    <div class="debate-status" data-status="${d.status}">
+      <b>${DEBATE_STATUS[d.status] || d.status}</b>
+      <span>${d.participants.length} 位提案人</span>
+      ${dec ? `<em>${dec.average == null ? "无评分" : `${dec.average} 分`}</em>` : ""}
+    </div>
+    <div class="debate-people">
+      ${d.participants
+        .map(
+          (p) =>
+            `<span class="dp" style="--c:${p.color}">${escapeHtml(p.name)}${
+              p.seat === false ? '<i class="dp-pool">池</i>' : ""
+            }</span>`,
+        )
+        .join("")}
+    </div>
+    ${
+      dec
+        ? `<div class="debate-winner">
+            <span class="dw-tag">裁决</span>
+            <div class="dw-main">
+              <b>方案 ${dec.winnerId} · ${escapeHtml(dec.angleLabel)}</b>
+              <span>${escapeHtml(dec.winnerName)} 提出 · 平均 ${dec.average ?? "—"} 分 · ${dec.votes} 票</span>
+              <span class="dw-judge">主持人 ${escapeHtml(dec.judgeName)}</span>
+            </div>
+          </div>`
+        : ""
+    }
+  `;
+
+  const rank = new Map((dec?.ranking || []).map((r, i) => [r.id, i + 1]));
+  const proposals = [...(d.proposals || [])].sort((a, b) => {
+    const ra = rank.get(a.id) ?? 99;
+    const rb = rank.get(b.id) ?? 99;
+    if (ra !== rb) return ra - rb;
+    return String(a.id).localeCompare(String(b.id));
+  });
+
+  if (!proposals.length) {
+    list.innerHTML = `<p class="hint">${
+      d.status === "proposing" ? "成员正在独立写方案…" : "本轮没有产生提案。"
+    }</p>`;
+    return;
+  }
+
+  list.innerHTML = proposals
+    .map((p) => {
+      const score = proposalScore(p);
+      const win = dec && dec.winnerId === p.id;
+      const votes = (p.votes || [])
+        .map(
+          (v) =>
+            `<span class="vote-chip" title="${escapeHtml(v.reason || "")}">${escapeHtml(v.byName)} · ${v.score}</span>`,
+        )
+        .join("");
+      return `<article class="proposal ${win ? "win" : ""}" data-status="${p.status || "running"}">
+        <div class="proposal-head">
+          <span class="p-id">方案 ${p.id}</span>
+          <span class="p-author" style="--c:${p.color}">${escapeHtml(p.name)}</span>
+          <span class="p-angle">${escapeHtml(p.angleLabel)}</span>
+          <span class="p-score">${score == null ? "—" : score.toFixed(1)}</span>
+        </div>
+        <div class="p-bar"><i style="width:${score ? Math.min(100, score * 10) : 0}%"></i></div>
+        <div class="p-meta">${
+          p.status === "failed"
+            ? escapeHtml(p.note || "提案失败")
+            : `${p.votes?.length || 0} 票${win ? " · 已采纳" : ""}`
+        }</div>
+        ${votes ? `<div class="p-votes">${votes}</div>` : ""}
+        ${
+          p.text
+            ? `<details><summary>方案全文</summary><div class="p-body">${md(p.text)}</div></details>`
+            : ""
+        }
+      </article>`;
+    })
+    .join("");
+
+  const critiques = d.critiques || [];
+  if (critiques.length) {
+    list.insertAdjacentHTML(
+      "beforeend",
+      `<div class="debate-critiques">
+        <div class="dc-title">交叉质询记录</div>
+        ${critiques
+          .map(
+            (c) =>
+              `<div class="dc-row ${c.ok ? "ok" : "fail"}">
+                <span class="dc-name" style="--c:${c.color}">${escapeHtml(c.name)}</span>
+                <span>${escapeHtml(c.note || (c.ok ? "已完成评分" : "质询失败"))}</span>
+              </div>`,
+          )
+          .join("")}
+      </div>`,
+    );
+  }
 }
 
 function renderFiles() {
@@ -630,6 +786,7 @@ function renderAll() {
   renderTopbar();
   renderMessages();
   renderPlan();
+  renderDebate();
   renderFiles();
   renderStats();
   renderContext();
@@ -778,6 +935,14 @@ function handleEvent(ev) {
           summary.doneSteps = ev.plan.filter((s) => s.status === "done").length;
           renderTasks();
         }
+      }
+      break;
+    }
+    case "debate.updated": {
+      if (cur && cur.id === ev.taskId) {
+        cur.debate = ev.debate;
+        renderDebate();
+        renderPlan();
       }
       break;
     }
@@ -1169,6 +1334,7 @@ function switchTab(tab) {
   $$(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   $("#pane-plan").hidden = tab !== "plan";
   $("#pane-context").hidden = tab !== "context";
+  $("#pane-debate").hidden = tab !== "debate";
   $("#pane-files").hidden = tab !== "files";
   $("#pane-stats").hidden = tab !== "stats";
 }
@@ -1462,6 +1628,9 @@ async function boot() {
     renderAll();
     renderStats();
     connect();
+    // 支持 #debate 这类深链，方便直接打开方案讨论
+    const hashTab = location.hash.replace("#", "");
+    if (["context", "debate", "plan", "files", "stats"].includes(hashTab)) switchTab(hashTab);
   } catch (err) {
     $("#connState").textContent = "服务未启动";
     toast(`无法连接后端：${err.message}`, "err");

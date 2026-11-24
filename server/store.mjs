@@ -58,6 +58,11 @@ function emptyDb() {
       maxConcurrency: 2,
       maxRepairRounds: 1,
       maxStepAttempts: 2,
+      // 方案讨论：默认 5 位提案人（4 个执行席位 + 1 个工具池 CLI），决策后再实施。
+      debateEnabled: true,
+      debateParticipants: 5,
+      debatePoolSeats: 1,
+      debateConcurrency: 2,
     },
   };
 }
@@ -109,6 +114,13 @@ class Store {
               s.note ||= '服务重启时中断';
               recovered = true;
             }
+          }
+          if (t.debate && ['proposing', 'critiquing', 'deciding'].includes(t.debate.status)) {
+            t.debate.status = 'stopped';
+            for (const p of t.debate.proposals || []) {
+              if (p.status === 'running') p.status = 'stopped';
+            }
+            recovered = true;
           }
           for (const m of t.messages || []) if (!m.done) m.done = true;
         }
@@ -343,6 +355,7 @@ class Store {
       runId: null,
       repairRound: 0,
       quality: { status: 'pending' },
+      debate: { status: 'pending', proposals: [], critiques: [], decision: null },
       stats: { tokens: 0, agentRuns: 0, files: 0, ms: 0 },
       workspace: root,
       // 用已有目录开工时，不替用户新建/改动它的目录结构
@@ -525,6 +538,84 @@ class Store {
     Object.assign(step, patch);
     this.broadcast({ type: 'plan.updated', taskId, runId: task.runId, plan: task.plan });
     this.save();
+  }
+
+  /* ---------- debate ---------- */
+  _emitDebate(task) {
+    this.broadcast({
+      type: 'debate.updated',
+      taskId: task.id,
+      runId: task.runId || null,
+      debate: task.debate,
+    });
+    this.save();
+  }
+
+  setDebate(taskId, patch) {
+    const task = this.getTask(taskId);
+    if (!task) return null;
+    task.debate = {
+      status: 'pending',
+      proposals: [],
+      critiques: [],
+      decision: null,
+      ...(task.debate || {}),
+      ...patch,
+      updatedAt: Date.now(),
+    };
+    this._emitDebate(task);
+    return task.debate;
+  }
+
+  addProposal(taskId, proposal) {
+    const task = this.getTask(taskId);
+    if (!task) return null;
+    task.debate ||= { status: 'proposing', proposals: [], critiques: [], decision: null };
+    task.debate.proposals ||= [];
+    const item = { votes: [], score: null, status: 'running', text: '', ...proposal };
+    task.debate.proposals.push(item);
+    this._emitDebate(task);
+    return item;
+  }
+
+  updateProposal(taskId, proposalId, patch) {
+    const task = this.getTask(taskId);
+    const item = task?.debate?.proposals?.find((p) => p.id === proposalId);
+    if (!item) return null;
+    Object.assign(item, patch);
+    this._emitDebate(task);
+    return item;
+  }
+
+  addVote(taskId, proposalId, vote) {
+    const task = this.getTask(taskId);
+    const item = task?.debate?.proposals?.find((p) => p.id === proposalId);
+    if (!item) return null;
+    item.votes ||= [];
+    if (vote?.byId && item.votes.some((v) => v.byId === vote.byId)) return item;
+    item.votes.push(vote);
+    this._emitDebate(task);
+    return item;
+  }
+
+  addCritique(taskId, critique) {
+    const task = this.getTask(taskId);
+    if (!task) return null;
+    task.debate ||= { status: 'critiquing', proposals: [], critiques: [], decision: null };
+    task.debate.critiques ||= [];
+    task.debate.critiques.push(critique);
+    this._emitDebate(task);
+    return critique;
+  }
+
+  setDecision(taskId, decision) {
+    const task = this.getTask(taskId);
+    if (!task) return null;
+    task.debate ||= { proposals: [], critiques: [] };
+    task.debate.decision = decision;
+    task.debate.status = 'decided';
+    this._emitDebate(task);
+    return decision;
   }
 
   /* ---------- artifacts ---------- */

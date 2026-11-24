@@ -67,6 +67,7 @@ function taskDetail(task) {
     plan: task.plan,
     messages: task.messages,
     artifacts: task.artifacts,
+    debate: task.debate || null,
     error: task.error || null,
     running: isRunning(task.id),
     workspace: task.workspace,

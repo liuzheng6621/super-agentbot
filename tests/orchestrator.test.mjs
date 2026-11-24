@@ -44,16 +44,54 @@ test('模拟团队完成并行协作、质量门和一轮返工', async () => {
   assert.equal(done.status, 'done');
   assert.equal(done.repairRound, 1);
   assert.equal(done.quality.status, 'passed');
-  assert.equal(done.plan.length, 8);
+  assert.equal(done.plan.length, 9);
   assert.equal(done.plan.find((s) => s.id === 'implement').status, 'done');
   assert.equal(done.plan.find((s) => s.id === 'test-design').status, 'done');
   assert.equal(done.plan.find((s) => s.id === 'review').verdict, 'fail');
   assert.equal(done.plan.find((s) => s.id === 're-review-1').verdict, 'pass');
 
-  const owners = new Set(done.plan.slice(0, 5).map((s) => s.agentId));
-  assert.equal(owners.size, 5, '五道工序应由五个不同席位的成员执行');
+  const owners = new Set(
+    ['plan', 'design', 'implement', 'test-design', 'review'].map((id) =>
+      done.plan.find((s) => s.id === id).agentId,
+    ),
+  );
+  assert.equal(owners.size, 5, '五道执行工序应由五个不同席位的成员执行');
   assert.ok(done.artifacts.some((f) => f.path.startsWith('src/')));
   assert.ok(done.artifacts.some((f) => f.path.startsWith('tests/')));
+});
+
+test('实施前先多方案讨论，按交叉评分选出唯一方案', async () => {
+  const task = store.createTask({ goal: '做一个并发安全的待办 API' });
+  const ok = await startTask(task.id, { speed: 1000 });
+  const done = store.getTask(task.id);
+  const debate = done.debate;
+
+  assert.equal(ok, true);
+  assert.equal(debate.status, 'decided');
+  assert.ok(debate.participants.length >= 3, '至少 3 位成员参与讨论');
+  assert.ok(debate.proposals.length >= 3, '至少产生 3 份方案');
+  assert.ok(debate.proposals.every((p) => p.status === 'done'));
+  assert.ok(debate.proposals.every((p) => p.angleKey), '每份方案应有不同主张');
+
+  // 每位成员评审其他所有方案，不给自己打分
+  for (const p of debate.proposals) {
+    assert.equal(p.votes.length, debate.participants.length - 1);
+    assert.ok(p.votes.every((v) => v.byId !== p.agentId));
+  }
+
+  const decided = debate.decision;
+  const averages = debate.proposals.map(
+    (p) => p.votes.reduce((sum, v) => sum + v.score, 0) / p.votes.length,
+  );
+  const best = Math.round(Math.max(...averages) * 10) / 10;
+  assert.equal(decided.average, best, '采纳的方案必须平均分最高');
+  assert.ok(debate.proposals.some((p) => p.id === decided.winnerId));
+
+  // 讨论成为正式工序，后续实施依赖裁决结果
+  const debateStep = done.plan.find((s) => s.id === 'debate');
+  assert.equal(debateStep.status, 'done');
+  assert.match(debateStep.title, new RegExp(`采纳方案 ${decided.winnerId}`));
+  assert.deepEqual(done.plan.find((s) => s.id === 'plan').needs, ['debate']);
 });
 
 test('CLI 失败会阻断下游，任务不会被标成已交付', async () => {
@@ -70,8 +108,14 @@ test('CLI 失败会阻断下游，任务不会被标成已交付', async () => {
   const failed = store.getTask(task.id);
   assert.equal(ok, false);
   assert.equal(failed.status, 'error');
-  assert.equal(failed.plan[0].status, 'error');
-  assert.ok(failed.plan.slice(1).every((s) => s.status === 'blocked'));
+  // 讨论阶段可以靠评分完成裁决，但实施阶段一旦失败必须阻断下游
+  assert.equal(failed.plan.find((s) => s.id === 'debate').status, 'done');
+  assert.equal(failed.plan.find((s) => s.id === 'plan').status, 'error');
+  assert.ok(
+    ['design', 'implement', 'test-design', 'review'].every(
+      (id) => failed.plan.find((s) => s.id === id).status === 'blocked',
+    ),
+  );
 
   store.updateAgent(planner.id, { mode: before.mode, cli: before.cli, seat: before.seat });
 });
@@ -94,6 +138,11 @@ test('停止后不会被旧执行覆盖，也不会留下运行锁', async () =>
   assert.equal(stopped.status, 'stopped');
   assert.equal(isRunning(task.id), false);
   assert.equal(stopped.plan[0].status, 'stopped');
+  assert.equal(stopped.debate.status, 'stopped', '中途停止时讨论状态也要收口');
+  assert.ok(
+    (stopped.debate.proposals || []).every((p) => p.status !== 'running'),
+    '停止后不应留下永远“提案中”的卡片',
+  );
 
   store.updateAgent(planner.id, { mode: before.mode, cli: before.cli, seat: before.seat });
 });
