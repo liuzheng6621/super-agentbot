@@ -7,7 +7,8 @@ import { probeClis, spawnCli } from './adapters.mjs';
 import { adoptInstalledClis } from './adopt.mjs';
 
 const PORT = Number(process.env.PORT || 8787);
-const HOST = process.env.HOST || '127.0.0.1';
+// 本地桌面场景只监听回环；被托管平台注入 PORT 时（容器 / 云沙箱）需要对外绑定
+const HOST = process.env.HOST || (process.env.PORT ? '0.0.0.0' : '127.0.0.1');
 const PUBLIC_DIR = path.join(ROOT, 'public');
 
 const MIME = {
