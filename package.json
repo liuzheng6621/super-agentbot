@@ -1,0 +1,17 @@
+{
+  "name": "agentforge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AgentForge - 多智能体开发协作平台（可接入本机 codex / dsh / workbuddy / claude 等 CLI）",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "start": "node server/index.mjs",
+    "dev": "node --watch server/index.mjs",
+    "desktop": "node desktop/launcher.mjs",
+    "install-desktop": "node desktop/install.mjs",
+    "icon": "node desktop/make-icon.mjs"
+  }
+}

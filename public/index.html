@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#fff4d6" />
+    <meta name="color-scheme" content="light" />
+    <title>AGENTFORGE · 多智能体开发协作台</title>
+    <meta
+      name="description"
+      content="把一句话需求交给一支会协作的 AI 研发团队：规划、架构、实现、测试、评审全程可见，可接入本机 codex / dsh / workbuddy / claude 等 CLI。"
+    />
+    <link rel="icon" type="image/png" href="/icon-256.png" />
+    <link rel="apple-touch-icon" href="/icon-256.png" />
+    <link rel="preload" href="/fonts/pixelify-sans-700.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/fonts/zcool-kuaile-subset.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page" id="page">
+      <div class="app">
+        <!-- ================= 左侧：团队成员 ================= -->
+        <aside class="rail" id="rail">
+          <div class="brand">
+            <span class="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 32 32" width="22" height="22">
+                <path d="M7 23l9-14 9 14" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="square" />
+                <rect x="14" y="24" width="4" height="4" fill="currentColor" />
+              </svg>
+            </span>
+            <span class="brand-name">AGENTFORGE<span class="brand-dot">.</span></span>
+          </div>
+
+          <button class="btn btn-primary btn-block" id="newTaskBtn">
+            <span class="plus" aria-hidden="true">+</span> 新建协作任务
+          </button>
+
+          <section class="rail-section">
+            <header class="rail-head">
+              <span>团队 / CREW</span>
+              <em id="agentCount">00</em>
+            </header>
+            <div class="agent-list" id="agentList"></div>
+            <button class="link-btn" id="addAgentBtn">+ 接入新的智能体</button>
+          </section>
+
+          <section class="rail-section">
+            <header class="rail-head">
+              <span>本机 CLI</span>
+              <em id="probeState">未探测</em>
+            </header>
+            <div class="probe-list" id="probeList">
+              <p class="hint">扫描本机 claude / codex / kimi / gemini 等命令行工具，一键挂成智能体。</p>
+            </div>
+            <button class="link-btn" id="probeBtn">扫描本机 CLI</button>
+            <button class="link-btn" id="adoptBtn">全部接管</button>
+          </section>
+
+          <section class="rail-section grow">
+            <header class="rail-head">
+              <span>历史任务</span>
+              <em id="taskCount">00</em>
+            </header>
+            <div class="task-list" id="taskList"></div>
+          </section>
+
+          <div class="rail-foot">
+            <span class="dot-live" id="connDot"></span>
+            <span id="connState">连接中…</span>
+            <button type="button" class="quit-btn" id="quitBtn" hidden>退出</button>
+          </div>
+        </aside>
+
+        <!-- ================= 中间：协作现场 ================= -->
+        <main class="stage">
+          <header class="topbar">
+            <button class="icon-btn only-mobile" id="railToggle" aria-label="打开侧栏">☰</button>
+            <div class="topbar-main">
+              <p class="topbar-kicker">CONTROL ROOM / <span id="topbarCode">IDLE</span></p>
+              <div class="topbar-title" id="topbarTitle">未选择任务</div>
+              <div class="topbar-sub" id="topbarSub">描述一个目标，团队会自己分工</div>
+            </div>
+            <div class="topbar-actions">
+              <span class="pill" id="statusPill" data-status="idle">待命</span>
+              <button class="btn btn-ghost" id="runBtn" hidden>重新编排</button>
+              <button class="btn btn-ghost danger" id="stopBtn" hidden>停止</button>
+              <button class="shift-switch" id="shiftBtn" aria-pressed="false" aria-label="切换夜巡模式">
+                <span class="shift-icon" aria-hidden="true">☾</span>
+                <span class="shift-copy"><small>SHIFT</small><b id="shiftLabel">DAY</b></span>
+                <span class="shift-track" aria-hidden="true"><i></i></span>
+              </button>
+              <button class="icon-btn only-mobile" id="inspectorToggle" aria-label="打开编排面板">≡</button>
+            </div>
+          </header>
+
+          <div class="ticker" aria-hidden="true">
+            <div class="ticker-track">
+              <span>规划 PLANNER</span><b>✳</b><span>架构 ARCHITECT</span><b>✳</b><span>实现 CODER</span><b>✳</b>
+              <span>测试 TESTER</span><b>✳</b><span>评审 REVIEWER</span><b>✳</b><span>产物 ARTIFACTS</span><b>✳</b>
+              <span>规划 PLANNER</span><b>✳</b><span>架构 ARCHITECT</span><b>✳</b><span>实现 CODER</span><b>✳</b>
+              <span>测试 TESTER</span><b>✳</b><span>评审 REVIEWER</span><b>✳</b><span>产物 ARTIFACTS</span><b>✳</b>
+            </div>
+          </div>
+
+          <div class="scroll" id="scroll">
+            <!-- 空态 -->
+            <section class="hero" id="hero">
+              <span class="hero-side" aria-hidden="true">AUTO ORCHESTRATION · V1.0</span>
+              <p class="eyebrow">
+                <span class="eyebrow-mark"></span>
+                AGENTFORGE CONTROL ROOM
+                <span class="eyebrow-id">NO. 001</span>
+              </p>
+              <h1>多智能体<br />开发协作台</h1>
+              <span class="title-stamp">协作版</span>
+              <p class="lead">
+                规划师拆工序，架构师定契约，工程师落代码，测试补边界，评审卡质量门。
+                全过程实时可见，产物落在真实工作区里。
+              </p>
+
+              <div class="hero-compose">
+                <p class="compose-label">TARGET / 你的目标</p>
+                <textarea id="heroInput" rows="3" placeholder="例如：做一个支持并发安全的待办清单 API，带单元测试和技术方案文档"></textarea>
+                <div class="hero-compose-foot">
+                  <span class="kbd-hint"><kbd>Ctrl</kbd><kbd>↵</kbd> 直接开工</span>
+                  <button class="btn btn-primary" id="heroStart">开工 →</button>
+                </div>
+              </div>
+
+              <div class="chips" id="suggestions">
+                <button class="chip">做一个用户登录与鉴权模块，含 JWT 与测试</button>
+                <button class="chip">做一个实时聊天室的消息存储与推送服务</button>
+                <button class="chip">做一个数据看板的图表组件与筛选逻辑</button>
+                <button class="chip">做一个文件上传服务，支持分片与断点续传</button>
+              </div>
+
+              <div class="hero-stats" id="heroStats">
+                <div><strong id="statAgents">00</strong><span>在岗成员</span></div>
+                <div><strong id="statTasks">00</strong><span>协作任务</span></div>
+                <div><strong id="statFiles">00</strong><span>产物文件</span></div>
+              </div>
+
+              <div class="hero-team" id="heroTeam"></div>
+            </section>
+
+            <!-- 时间线 -->
+            <section class="timeline" id="timeline" hidden></section>
+            <div class="scroll-pad"></div>
+          </div>
+
+          <!-- 输入区 -->
+          <footer class="composer">
+            <div class="composer-box" id="composerBox">
+              <textarea id="input" rows="1" placeholder="描述你的目标，回车发起协作…" disabled></textarea>
+              <div class="composer-bar">
+                <button type="button" class="dir-pick" id="dirPick" title="选一个已有的项目文件夹，让下一次开工在里面干活">
+                  <span class="dir-ico">📁</span>
+                  <span class="dir-label" id="dirLabel">自动新建工作区</span>
+                </button>
+                <div class="mention-list" id="mentionList"></div>
+                <div class="composer-right">
+                  <span class="tip" id="composerTip">自动编排 · 5 位成员</span>
+                  <button class="send-btn" id="sendBtn" aria-label="发送" disabled>
+                    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+                      <path d="M3 11l18-8-7 9 7 9-18-8z" fill="currentColor" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </footer>
+        </main>
+
+        <!-- ================= 右侧：编排 / 产物 ================= -->
+        <aside class="inspector" id="inspector">
+          <div class="insp-head">
+            <div class="tabs" id="tabs">
+              <button class="tab active" data-tab="plan">执行链路</button>
+              <button class="tab" data-tab="files">产物</button>
+              <button class="tab" data-tab="stats">统计</button>
+            </div>
+            <button class="icon-btn only-mobile" id="inspectorClose" aria-label="关闭">×</button>
+          </div>
+
+          <div class="insp-body">
+            <div class="pane" id="pane-plan">
+              <div class="plan-list" id="planList">
+                <p class="hint">任务开始后，这里会显示每道工序的状态。</p>
+              </div>
+            </div>
+
+            <div class="pane" id="pane-files" hidden>
+              <div class="file-list" id="fileList">
+                <p class="hint">还没有产物。智能体写入的文件会出现在这里。</p>
+              </div>
+              <div class="file-view" id="fileView" hidden>
+                <div class="file-view-head">
+                  <span id="fileViewPath">—</span>
+                  <button class="icon-btn" id="fileClose">×</button>
+                </div>
+                <pre><code id="fileViewCode"></code></pre>
+              </div>
+            </div>
+
+            <div class="pane" id="pane-stats" hidden>
+              <div class="stat-grid" id="statGrid"></div>
+              <div class="hook-card">
+                <h4>外部触发 / BOT HOOK</h4>
+                <p>任何系统都能用一个 HTTP 请求把任务丢进来，团队自动开工。</p>
+                <code class="hook-url" id="hookUrl">—</code>
+                <div class="hook-actions">
+                  <button class="btn btn-ghost sm" id="copyHook">复制地址</button>
+                  <button class="btn btn-ghost sm" id="showCurl">查看 curl</button>
+                </div>
+                <pre class="curl" id="curlBox" hidden></pre>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+
+      <div class="mask" id="mask"></div>
+
+      <!-- 新建智能体 -->
+      <dialog class="modal" id="agentModal">
+        <form method="dialog" class="modal-inner" id="agentForm">
+          <header class="modal-head">
+            <h3 id="agentModalTitle">接入新的智能体</h3>
+            <button type="button" class="icon-btn" data-close-modal aria-label="关闭">×</button>
+          </header>
+          <div class="modal-body">
+            <label class="field">
+              <span>名称</span>
+              <input name="name" placeholder="例如 Codex" required maxlength="16" />
+            </label>
+            <div class="field-row">
+              <label class="field">
+                <span>角色</span>
+                <select name="role">
+                  <option value="planner">规划师</option>
+                  <option value="architect">架构师</option>
+                  <option value="coder" selected>实现工程师</option>
+                  <option value="tester">测试工程师</option>
+                  <option value="reviewer">代码评审</option>
+                </select>
+              </label>
+              <label class="field narrow">
+                <span>配色</span>
+                <input name="color" type="color" value="#ff5538" />
+              </label>
+            </div>
+            <label class="field">
+              <span>运行模式</span>
+              <select name="mode" id="modeSelect">
+                <option value="sim">模拟（内置，无需 API）</option>
+                <option value="cli">真实 CLI（调用本机命令）</option>
+              </select>
+            </label>
+            <div class="cli-fields" id="cliFields" hidden>
+              <label class="field">
+                <span>命令</span>
+                <input name="command" placeholder="codex / dsh / workbuddy / claude" />
+              </label>
+              <label class="field">
+                <span>参数模板<em>用 {{prompt}} 占位提示词</em></span>
+                <input name="args" placeholder="exec {{prompt}}" />
+              </label>
+              <p class="hint">命令会在任务工作区目录中执行，写入的文件会自动收录为产物。</p>
+            </div>
+          </div>
+          <footer class="modal-foot">
+            <button type="button" class="btn btn-ghost danger" id="agentDelete" hidden>移出团队</button>
+            <button type="button" class="btn btn-ghost" data-close-modal>取消</button>
+            <button class="btn btn-primary" value="confirm" id="agentSubmit">加入团队</button>
+          </footer>
+        </form>
+      </dialog>
+
+      <dialog class="modal" id="dirModal">
+        <div class="modal-inner">
+          <header class="modal-head">
+            <h3>选择工作目录</h3>
+            <button type="button" class="icon-btn" data-close-dir aria-label="关闭">×</button>
+          </header>
+          <div class="modal-body">
+            <div class="dir-bar">
+              <button type="button" class="link-btn" id="dirUp">↑ 上一级</button>
+              <span class="dir-path" id="dirPath">我的电脑</span>
+            </div>
+            <div class="dir-list" id="dirList"></div>
+            <p class="hint">选已有目录：所有 CLI 成员都在这里执行，改动也落在这里；不选则自动新建独立工作区。</p>
+          </div>
+          <footer class="modal-foot">
+            <button type="button" class="btn btn-ghost" id="dirReset">用自动工作区</button>
+            <button type="button" class="btn btn-primary" id="dirConfirm">用这个目录</button>
+          </footer>
+        </div>
+      </dialog>
+
+      <div class="toast-wrap" id="toastWrap"></div>
+    </div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
