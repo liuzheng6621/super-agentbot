@@ -113,7 +113,7 @@ Windows 下双击 `安装到桌面.bat`，桌面与开始菜单会生成 `AGENTF
 | --- | --- | --- |
 | `GET` | `/api/state` | 全量状态（团队 / 任务 / 设置 / 当前任务） |
 | `POST` | `/api/tasks` | `{ goal, autoRun? }` 创建任务，默认自动开工 |
-| `GET` | `/api/tasks/:id` | 任务详情（消息、工序、产物） |
+| `GET` | `/api/tasks/:id` | 任务详情（消息、工序、产物、辩论记录） |
 | `POST` | `/api/tasks/:id/run` | 重新编排 |
 | `POST` | `/api/tasks/:id/stop` | 停止执行 |
 | `POST` | `/api/tasks/:id/chat` | `{ text }` 群聊，支持 `@成员名` |
@@ -125,7 +125,6 @@ Windows 下双击 `安装到桌面.bat`，桌面与开始菜单会生成 `AGENTF
 | `POST` | `/api/agents/adopt` | 扫描并接入可用 CLI 到工具池 |
 | `POST` | `/api/agents/rebalance` | 按角色偏好把 CLI 重新分派到主执行席位 |
 | `POST` | `/api/agents/:id/test` | 冒烟测试 CLI 连通性 |
-| `POST` | `/api/agents/adopt` | 批量接入已检测到的 CLIs |
 | `GET` | `/api/probe` | 扫描本机 CLI |
 | `GET` | `/api/fs?path=` | 浏览本机目录（「选文件夹开工」用） |
 | `GET` | `/api/stream` | SSE 事件流 |
@@ -174,6 +173,7 @@ Token 显示在界面右侧「统计」面板，也可从 `data/db.json` 的 `se
 │   └── screenshot.png
 ├── tests/
 │   ├── dag.test.mjs
+│   ├── debate.test.mjs
 │   └── orchestrator.test.mjs
 ├── 安装到桌面.bat
 ├── 卸载桌面快捷方式.bat
@@ -191,7 +191,7 @@ Token 显示在界面右侧「统计」面板，也可从 `data/db.json` 的 `se
 npm test
 ```
 
-覆盖依赖图并行、失败传播、环路检测、取消、五席位分工、完整模拟协作、质量门返工、CLI 失败禁止误交付、停止竞态与评审结论解析。
+覆盖依赖图并行、失败传播、环路检测、取消、五席位分工、完整模拟协作、质量门返工、CLI 失败禁止误交付、停止竞态、评审结论解析，以及辩论阶段的评分解析、排名规则与讨论组构成。
 
 ## License
 
