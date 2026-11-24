@@ -13,14 +13,27 @@ export async function* streamText(text, { minMs = 700, maxMs = 3200, speed = 1, 
   for (let i = 0; i < text.length; i += size) chunks.push(text.slice(i, i + size));
   const delay = total / Math.max(1, chunks.length);
   for (const chunk of chunks) {
-    if (signal?.aborted) return;
-    await sleep(delay);
+    await sleep(delay, signal);
     yield chunk;
   }
 }
 
-export function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+export function sleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException('The operation was aborted', 'AbortError'));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException('The operation was aborted', 'AbortError'));
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -109,10 +122,12 @@ export function spawnCli(agent, prompt, { cwd, onChunk, timeout = 180000, signal
     let stdout = '';
     let stderr = '';
     let settled = false;
+    let onAbort = null;
     const finish = (code, err) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener('abort', onAbort);
       resolve({ code, stdout, stderr: stderr + (err ? String(err) : ''), elapsed: Date.now() - started });
     };
 
@@ -133,14 +148,12 @@ export function spawnCli(agent, prompt, { cwd, onChunk, timeout = 180000, signal
     });
     child.on('close', (code) => finish(code ?? 0));
     if (signal) {
-      if (signal.aborted) {
+      onAbort = () => {
         killTree(child);
         finish(-4, '已取消');
-      }
-      signal.addEventListener('abort', () => {
-        killTree(child);
-        finish(-4, '已取消');
-      });
+      };
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
     }
   });
 }
@@ -191,6 +204,8 @@ const CANDIDATES = [
  */
 export function resolveCommand(command) {
   try {
+    const raw = String(command || '').trim();
+    if (raw && (path.isAbsolute(raw) || /[\\/]/.test(raw)) && fs.existsSync(raw)) return path.resolve(raw);
     if (process.platform === 'win32') {
       const res = spawnSync('where.exe', [command], { encoding: 'utf8', timeout: 5000, windowsHide: true });
       if (res.status === 0) {

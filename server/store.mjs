@@ -3,11 +3,22 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 
 export const ROOT = path.resolve(import.meta.dirname, '..');
-export const DATA_DIR = path.join(ROOT, 'data');
+export const DATA_DIR = process.env.AGENTFORGE_DATA_DIR
+  ? path.resolve(process.env.AGENTFORGE_DATA_DIR)
+  : path.join(ROOT, 'data');
 export const WORKSPACE_DIR = path.join(DATA_DIR, 'workspaces');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 
 const MAX_MESSAGES = 400;
+
+export const ROLE_ORDER = ['planner', 'architect', 'coder', 'tester', 'reviewer'];
+export const ROLE_LABEL = {
+  planner: '规划',
+  architect: '架构',
+  coder: '实现',
+  tester: '测试',
+  reviewer: '评审',
+};
 
 /** 默认团队：覆盖「规划 → 架构 → 实现 → 测试 → 评审」完整链路 */
 function defaultAgents() {
@@ -20,6 +31,7 @@ function defaultAgents() {
     tagline,
     skills,
     mode: 'sim',
+    seat: true,
     status: 'idle',
     activity: '',
     cli: { command: '', args: [], cwd: '' },
@@ -43,8 +55,21 @@ function emptyDb() {
       hookToken: randomUUID().replace(/-/g, '').slice(0, 24),
       defaultMode: 'auto',
       simSpeed: 1,
+      maxConcurrency: 2,
+      maxRepairRounds: 1,
+      maxStepAttempts: 2,
     },
   };
+}
+
+/** 老数据没有席位概念：同一角色只保留第一个成员，其余自动归入工具池。 */
+function normalizeSeats(agents) {
+  const seated = new Set();
+  for (const agent of agents) {
+    if (agent.seat === undefined) agent.seat = !seated.has(agent.role);
+    if (agent.seat && !seated.has(agent.role)) seated.add(agent.role);
+    else agent.seat = false;
+  }
 }
 
 class Store {
@@ -66,14 +91,28 @@ class Store {
           settings: { ...emptyDb().settings, ...(raw.settings || {}) },
         };
         // 运行状态不跨进程保留
+        normalizeSeats(this.db.agents);
         for (const a of this.db.agents) {
           a.status = 'idle';
           a.activity = '';
         }
+        let recovered = false;
         for (const t of this.db.tasks) {
-          if (t.status === 'running') t.status = 'stopped';
+          if (t.status === 'running' || t.status === 'stopping') {
+            t.status = 'stopped';
+            t.endedAt ||= Date.now();
+            recovered = true;
+          }
+          for (const s of t.plan || []) {
+            if (s.status === 'running' || s.status === 'retrying' || s.status === 'queued') {
+              s.status = 'stopped';
+              s.note ||= '服务重启时中断';
+              recovered = true;
+            }
+          }
           for (const m of t.messages || []) if (!m.done) m.done = true;
         }
+        if (recovered) this.flush();
       } else {
         this.save();
       }
@@ -84,7 +123,8 @@ class Store {
   }
 
   save() {
-    clearTimeout(this._saveTimer);
+    // 流式输出期间持续调用 save()，不能被反复重置成永远不落盘。
+    if (this._saveTimer) return;
     this._saveTimer = setTimeout(() => this.flush(), 400);
   }
 
@@ -128,19 +168,30 @@ class Store {
   }
 
   findAgentByRole(role) {
-    return this.db.agents.find((a) => a.role === role);
+    return this.db.agents.find((a) => a.role === role && a.seat !== false);
+  }
+
+  findAgentByNameOrRole(key) {
+    const needle = String(key || '').toLowerCase();
+    return this.db.agents.find(
+      (a) => a.name.toLowerCase() === needle || a.role.toLowerCase() === needle || a.title === key,
+    );
   }
 
   addAgent(patch) {
+    const role = patch.role || 'coder';
+    const hasSeat = this.db.agents.some((a) => a.role === role && a.seat !== false);
     const agent = {
       id: randomUUID(),
       name: patch.name || 'Agent',
-      role: patch.role || 'coder',
+      role,
       title: patch.title || '自定义智能体',
       color: patch.color || '#818cf8',
       tagline: patch.tagline || '',
       skills: patch.skills || [],
       mode: patch.mode === 'cli' ? 'cli' : 'sim',
+      // 同一角色默认只有一个主执行席位，额外接入的 CLI 进入工具池。
+      seat: patch.seat === true ? true : !hasSeat,
       status: 'idle',
       activity: '',
       cli: {
@@ -151,19 +202,56 @@ class Store {
       createdAt: Date.now(),
       stats: { runs: 0, tokens: 0 },
     };
+    if (agent.seat) this.demoteRolePeers(role, agent.id);
     this.db.agents.push(agent);
     this.save();
     this.broadcast({ type: 'agents.changed' });
     return agent;
   }
 
+  demoteRolePeers(role, keepId) {
+    for (const a of this.db.agents) {
+      if (a.role === role && a.id !== keepId) a.seat = false;
+    }
+  }
+
   updateAgent(id, patch) {
     const agent = this.getAgent(id);
     if (!agent) return null;
+    const prevRole = agent.role;
+    const prevSeat = agent.seat;
     const prevCli = { ...(agent.cli || {}) };
     Object.assign(agent, patch, { id: agent.id });
     // 先把旧 cli 存下来再合并，否则 Object.assign 已经把 agent.cli 覆盖成新对象了
     if (patch.cli) agent.cli = { ...prevCli, ...patch.cli };
+    const role = agent.role;
+    if (patch.seat === true) {
+      this.demoteRolePeers(role, agent.id);
+      agent.seat = true;
+    } else if (patch.role && role !== prevRole) {
+      // 换到一个空角色时自动接席；目标角色已有主执行人则进入工具池。
+      agent.seat = patch.seat === false ? false : !this.db.agents.some(
+        (a) => a.id !== id && a.role === role && a.seat !== false,
+      );
+      if (agent.seat) this.demoteRolePeers(role, agent.id);
+    }
+    // 主执行人换岗后，旧角色从工具池补位；取消席位时若无人可补，则保留原席位。
+    if (prevSeat && role !== prevRole) {
+      const oldRoleSeat = this.db.agents.find(
+        (a) => a.id !== id && a.role === prevRole && a.seat !== false,
+      );
+      if (!oldRoleSeat) {
+        const replacement = this.db.agents.find((a) => a.id !== id && a.role === prevRole);
+        if (replacement) replacement.seat = true;
+      }
+    }
+    if (prevSeat && role === prevRole && agent.seat === false) {
+      const replacement = this.db.agents.find(
+        (a) => a.id !== id && a.role === prevRole && a.seat === false,
+      );
+      if (replacement) replacement.seat = true;
+      else agent.seat = true;
+    }
     // 从 CLI 切回模拟时，把上次失败留下的 error 状态清掉
     if (patch.mode === 'sim') {
       agent.status = 'idle';
@@ -175,14 +263,17 @@ class Store {
   }
 
   removeAgent(id) {
-    const before = this.db.agents.length;
+    const target = this.getAgent(id);
+    if (!target) return false;
     this.db.agents = this.db.agents.filter((a) => a.id !== id);
-    if (this.db.agents.length !== before) {
-      this.save();
-      this.broadcast({ type: 'agents.changed' });
-      return true;
+    // 删掉主执行人后，从同角色的工具池里自动补位，避免工序找不到人。
+    if (target.seat !== false) {
+      const next = this.db.agents.find((a) => a.role === target.role);
+      if (next) next.seat = true;
     }
-    return false;
+    this.save();
+    this.broadcast({ type: 'agents.changed' });
+    return true;
   }
 
   removeAgentReferences(id) {
@@ -249,6 +340,9 @@ class Store {
       plan: [],
       messages: [],
       artifacts: [],
+      runId: null,
+      repairRound: 0,
+      quality: { status: 'pending' },
       stats: { tokens: 0, agentRuns: 0, files: 0, ms: 0 },
       workspace: root,
       // 用已有目录开工时，不替用户新建/改动它的目录结构
@@ -270,6 +364,9 @@ class Store {
       status: task.status,
       createdAt: task.createdAt,
       endedAt: task.endedAt,
+      runId: task.runId || null,
+      repairRound: task.repairRound || 0,
+      quality: task.quality || { status: 'pending' },
       stats: task.stats,
       steps: task.plan.length,
       doneSteps: task.plan.filter((s) => s.status === 'done').length,
@@ -323,6 +420,7 @@ class Store {
     this.broadcast({
       type: 'message.start',
       taskId,
+      runId: task.runId || null,
       message: { ...message, text: message.done ? message.text : '' },
     });
     this.save();
@@ -340,7 +438,7 @@ class Store {
       if (agent) agent.stats.tokens += Math.ceil(delta.length / 2);
     }
     task.stats.tokens += Math.ceil(delta.length / 2);
-    this.broadcast({ type: 'message.delta', taskId, id: messageId, delta });
+    this.broadcast({ type: 'message.delta', taskId, runId: task.runId || null, id: messageId, delta });
   }
 
   /** 直接改写整条消息（用于撤掉「等待输出」这类临时提示） */
@@ -350,7 +448,7 @@ class Store {
     const msg = task.messages.find((m) => m.id === messageId);
     if (!msg) return;
     msg.text = text;
-    this.broadcast({ type: 'message.replace', taskId, id: messageId, text });
+    this.broadcast({ type: 'message.replace', taskId, runId: task.runId || null, id: messageId, text });
   }
 
   endMessage(taskId, messageId, meta = {}) {
@@ -360,7 +458,7 @@ class Store {
     if (!msg) return;
     msg.done = true;
     msg.meta = { ...msg.meta, ...meta };
-    this.broadcast({ type: 'message.end', taskId, id: messageId, meta: msg.meta });
+    this.broadcast({ type: 'message.end', taskId, runId: task.runId || null, id: messageId, meta: msg.meta });
     this.save();
   }
 
@@ -368,16 +466,55 @@ class Store {
   setPlan(taskId, steps) {
     const task = this.getTask(taskId);
     if (!task) return;
-    task.plan = steps.map((s, i) => ({
-      id: `step-${i + 1}`,
-      title: s.title,
-      role: s.role,
-      agentId: s.agentId || '',
-      status: 'pending',
-      note: '',
-    }));
-    this.broadcast({ type: 'plan.updated', taskId, plan: task.plan });
+    const used = new Set();
+    task.plan = steps.map((s, i) => {
+      let id = String(s.id || `step-${i + 1}`);
+      if (used.has(id)) id = `step-${i + 1}-${randomUUID().slice(0, 4)}`;
+      used.add(id);
+      return {
+        id,
+        title: s.title,
+        role: s.role,
+        agentId: s.agentId || '',
+        needs: [...new Set((s.needs || []).filter(Boolean))],
+        outputPaths: s.outputPaths || [],
+        status: 'pending',
+        note: '',
+        attempt: 0,
+        maxAttempts: Math.max(1, Number(s.maxAttempts) || 1),
+        round: Number(s.round) || 0,
+      };
+    });
+    this.broadcast({ type: 'plan.updated', taskId, runId: task.runId, plan: task.plan });
     this.save();
+  }
+
+  appendPlan(taskId, steps) {
+    const task = this.getTask(taskId);
+    if (!task) return [];
+    const used = new Set(task.plan.map((s) => s.id));
+    const added = steps.map((s, i) => {
+      let id = String(s.id || `step-${task.plan.length + i + 1}`);
+      if (used.has(id)) id = `${id}-${randomUUID().slice(0, 4)}`;
+      used.add(id);
+      return {
+        id,
+        title: s.title,
+        role: s.role,
+        agentId: s.agentId || '',
+        needs: [...new Set((s.needs || []).filter(Boolean))],
+        outputPaths: s.outputPaths || [],
+        status: 'pending',
+        note: '',
+        attempt: 0,
+        maxAttempts: Math.max(1, Number(s.maxAttempts) || 1),
+        round: Number(s.round) || 0,
+      };
+    });
+    task.plan.push(...added);
+    this.broadcast({ type: 'plan.updated', taskId, runId: task.runId, plan: task.plan });
+    this.save();
+    return added;
   }
 
   updateStep(taskId, stepId, patch) {
@@ -386,7 +523,7 @@ class Store {
     const step = task.plan.find((s) => s.id === stepId);
     if (!step) return;
     Object.assign(step, patch);
-    this.broadcast({ type: 'plan.updated', taskId, plan: task.plan });
+    this.broadcast({ type: 'plan.updated', taskId, runId: task.runId, plan: task.plan });
     this.save();
   }
 
@@ -395,19 +532,31 @@ class Store {
     const task = this.getTask(taskId);
     if (!task) return;
     const existing = task.artifacts.find((f) => f.path === file.path);
+    let saved;
     if (existing) {
-      Object.assign(existing, { bytes: file.bytes, updatedAt: Date.now(), agentId: file.agentId });
+      Object.assign(existing, {
+        bytes: file.bytes,
+        mtimeMs: file.mtimeMs || Date.now(),
+        lang: file.lang || existing.lang,
+        agentId: file.agentId || existing.agentId,
+        stepId: file.stepId || existing.stepId || '',
+        updatedAt: Date.now(),
+      });
+      saved = existing;
     } else {
-      task.artifacts.push({
+      saved = {
         path: file.path,
         bytes: file.bytes,
+        mtimeMs: file.mtimeMs || Date.now(),
         lang: file.lang || '',
         agentId: file.agentId || '',
+        stepId: file.stepId || '',
         createdAt: Date.now(),
-      });
+      };
+      task.artifacts.push(saved);
     }
     task.stats.files = task.artifacts.length;
-    this.broadcast({ type: 'artifact.added', taskId, file });
+    this.broadcast({ type: 'artifact.added', taskId, runId: task.runId || null, file: { ...saved } });
     this.save();
   }
 }

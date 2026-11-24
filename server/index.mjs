@@ -1,10 +1,10 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { store, ROOT } from './store.mjs';
+import { store, ROOT, DATA_DIR, WORKSPACE_DIR } from './store.mjs';
 import { startTask, stopTask, chat, listWorkspaceFiles, buildContextPack, isRunning } from './orchestrator.mjs';
 import { probeClis, spawnCli } from './adapters.mjs';
-import { adoptInstalledClis } from './adopt.mjs';
+import { adoptInstalledClis, rebalanceTeam } from './adopt.mjs';
 
 const PORT = Number(process.env.PORT || 8787);
 // 本地桌面场景只监听回环；被托管平台注入 PORT 时（容器 / 云沙箱）需要对外绑定
@@ -173,7 +173,7 @@ const server = http.createServer(async (req, res) => {
       const goal = String(body.goal || '').trim();
       const context = buildContextPack({
         goal,
-        workspace: body.workspace || path.join(ROOT, 'data', 'workspaces'),
+        workspace: body.workspace || WORKSPACE_DIR,
         status: 'idle',
         mode: 'auto',
         messages: [],
@@ -196,7 +196,7 @@ const server = http.createServer(async (req, res) => {
           dirs.push({ name: '/', path: '/' });
         }
         dirs.unshift({ name: '用户目录', path: home });
-        dirs.push({ name: 'AgentForge 工作区', path: path.join(ROOT, 'data', 'workspaces') });
+        dirs.push({ name: 'AgentForge 工作区', path: WORKSPACE_DIR });
         return json(res, 200, { path: '', parent: null, dirs });
       }
       const abs = path.resolve(raw);
@@ -221,10 +221,12 @@ const server = http.createServer(async (req, res) => {
       const parent = path.dirname(abs);
       return json(res, 200, { path: abs, parent: parent === abs ? null : parent, dirs });
     }
-    // 一键接管：把本机装着、但还没进团队的 CLI 全部挂成智能体（必须排在 /api/agents/:id 之前）
     if (pathname === '/api/agents/adopt' && method === 'POST') {
       const body = await readBody(req).catch(() => ({}));
       return json(res, 200, await adoptInstalledClis({ dryRun: body?.dryRun === true }));
+    }
+    if (pathname === '/api/agents/rebalance' && method === 'POST') {
+      return json(res, 200, { assignments: rebalanceTeam(), agents: store.agents });
     }
 
     const agentMatch = pathname.match(/^\/api\/agents\/([\w-]+)(\/test)?$/);
@@ -450,6 +452,6 @@ server.listen(PORT, HOST, () => {
   console.log('');
   console.log('  AgentForge · 多智能体开发协作台');
   console.log(`  ➜  http://${HOST}:${PORT}`);
-  console.log(`  ➜  工作区: ${path.join(ROOT, 'data', 'workspaces')}`);
+  console.log(`  ➜  工作区: ${path.join(DATA_DIR, 'workspaces')}`);
   console.log('');
 });

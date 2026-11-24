@@ -215,34 +215,72 @@ function avatarHtml(agent, cls = "") {
   return `<span class="avatar ${cls}" style="--c:${agent.color || "#b8d94f"}">${initials(agent.name)}<i class="dot ${agent.status}"></i></span>`;
 }
 
+function normalizeAgentSeats(agents) {
+  const seated = new Set();
+  return (agents || []).map((a) => {
+    if (typeof a.seat === "boolean") {
+      if (a.seat) seated.add(a.role);
+      return a;
+    }
+    // 兼容旧后端：同一角色只把第一个成员视为主执行席位。
+    const seat = !seated.has(a.role);
+    if (seat) seated.add(a.role);
+    return { ...a, seat };
+  });
+}
+
+function agentRowHtml(a, reserve = false) {
+  const role = reserve ? "工具" : ROLE_META[a.role]?.short || "工具";
+  const command = (a.cli?.command || "").split(/[\\/]/).pop();
+  const detail =
+    a.status === "working" && a.activity
+      ? a.activity
+      : reserve
+        ? command || a.title || "可随时接席"
+        : a.title || a.role;
+  return `<div class="agent-row ${reserve ? "reserve" : "seated"}" data-agent="${a.id}">
+    <span class="avatar" style="--c:${a.color}">${initials(a.name)}<i class="dot ${a.status}"></i></span>
+    <span class="agent-meta">
+      <span class="agent-name">${escapeHtml(a.name)}
+        <i class="tag role" data-role="${reserve ? "tool" : a.role}">${role}</i>
+        <i class="tag ${a.mode === "cli" ? "cli" : ""}">${a.mode === "cli" ? "CLI" : "SIM"}</i>
+      </span>
+      <span class="agent-role">${escapeHtml(detail)}</span>
+    </span>
+    <span class="agent-right">
+      <span class="runs">${pad2(a.stats?.runs || 0)}</span>
+      <button class="agent-edit" data-edit="${a.id}" title="编辑配置">⚙</button>
+    </span>
+  </div>`;
+}
+
 function renderAgents() {
   const wrap = $("#agentList");
-  wrap.innerHTML = S.agents
-    .map(
-      (a) => `<div class="agent-row" data-agent="${a.id}">
-        <span class="avatar" style="--c:${a.color}">${initials(a.name)}<i class="dot ${a.status}"></i></span>
-        <span class="agent-meta">
-          <span class="agent-name">${escapeHtml(a.name)}${
-            a.mode === "cli" ? '<i class="tag cli">CLI</i>' : '<i class="tag">SIM</i>'
-          }</span>
-          <span class="agent-role">${escapeHtml(
-            a.status === "working" && a.activity ? a.activity : a.title || a.role,
-          )}</span>
-        </span>
-        <span class="agent-right">
-          <span class="runs">${pad2(a.stats?.runs || 0)}</span>
-          <button class="agent-edit" data-edit="${a.id}" title="编辑配置">⚙</button>
-        </span>
-      </div>`,
-    )
-    .join("");
-  $("#agentCount").textContent = pad2(S.agents.length);
-  $("#heroTeam").innerHTML = S.agents
+  const seats = S.agents
+    .filter((a) => a.seat !== false)
+    .sort((a, b) => (ROLE_META[a.role]?.order || 9) - (ROLE_META[b.role]?.order || 9));
+  const reserved = S.agents.filter((a) => a.seat === false);
+  const reserveHtml = reserved.length
+    ? `<details class="reserve-group">
+        <summary>工具池 · ${reserved.length}<span>可接席</span></summary>
+        <div class="reserve-list">${reserved.map((a) => agentRowHtml(a, true)).join("")}</div>
+      </details>`
+    : "";
+  wrap.innerHTML = `
+    <div class="agent-group-head">
+      <span>执行席位 · ${seats.length}</span>
+      <em>${reserved.length ? `工具池 ${reserved.length}` : "5 个角色"}</em>
+    </div>
+    <div class="seat-list">${seats.map((a) => agentRowHtml(a)).join("")}</div>
+    ${reserveHtml}
+  `;
+  $("#agentCount").textContent = pad2(seats.length || S.agents.length);
+  $("#heroTeam").innerHTML = seats
     .map(
       (a) => `<span class="hero-agent">
         <span class="avatar" style="--c:${a.color}">${initials(a.name)}</span>
         <span class="ha-name">${escapeHtml(a.name)}</span>
-        <span class="ha-role">${escapeHtml(a.title || a.role)}</span>
+        <span class="ha-role">${escapeHtml(ROLE_META[a.role]?.short || a.title || a.role)}</span>
       </span>`,
     )
     .join("");
@@ -263,7 +301,34 @@ function renderHeroStats() {
 
 /* ---------------- 渲染：任务列表 ---------------- */
 
-const STATUS_TEXT = { idle: "待命", running: "协作中", done: "已交付", stopped: "已停止", error: "出错" };
+const STATUS_TEXT = {
+  idle: "待命",
+  running: "协作中",
+  stopping: "停止中",
+  done: "已交付",
+  stopped: "已停止",
+  error: "出错",
+  needs_attention: "待人工确认",
+};
+
+const ROLE_META = {
+  planner: { short: "规划", order: 1 },
+  architect: { short: "架构", order: 2 },
+  coder: { short: "实现", order: 3 },
+  tester: { short: "测试", order: 4 },
+  reviewer: { short: "评审", order: 5 },
+};
+
+const STEP_STATUS_TEXT = {
+  pending: "等待上游",
+  queued: "排队中",
+  running: "执行中",
+  retrying: "重试中",
+  done: "完成",
+  error: "失败",
+  blocked: "上游中断",
+  stopped: "已停止",
+};
 
 function renderTasks() {
   $("#taskList").innerHTML = S.tasks.length
@@ -291,18 +356,26 @@ function renderTopbar() {
       : t.goal
     : "描述一个目标，团队会自己分工";
   $("#topbarSub").title = t ? t.workspace || "" : "";
-  $("#topbarCode").textContent = t ? (t.status === "running" ? "RUNNING" : t.id.slice(0, 6).toUpperCase()) : "IDLE";
+  $("#topbarCode").textContent = t
+    ? t.status === "running"
+      ? "RUNNING"
+      : t.status === "stopping"
+        ? "STOPPING"
+        : t.id.slice(0, 6).toUpperCase()
+    : "IDLE";
 
   const pill = $("#statusPill");
   pill.dataset.status = t ? t.status : "idle";
   pill.textContent = t ? STATUS_TEXT[t.status] || t.status : "待命";
 
   // 只认 status：taskDetail.running 是首次拉取时的快照，任务结束后不会自动失效
-  const isRunning = !!t && t.status === "running";
-  $("#stopBtn").hidden = !isRunning;
-  $("#runBtn").hidden = !t || isRunning;
+  const busy = !!t && (t.status === "running" || t.status === "stopping");
+  $("#stopBtn").hidden = !busy || t?.status === "stopping";
+  $("#runBtn").hidden = !t || busy;
 
-  $("#composerTip").textContent = t ? "群聊 · @成员 指定回复" : `自动编排 · ${S.agents.length} 位成员`;
+  $("#composerTip").textContent = t
+    ? "群聊 · @成员 指定回复"
+    : `自动编排 · ${S.agents.filter((a) => a.seat !== false).length} 个席位`;
   $("#input").disabled = false;
   $("#input").placeholder = t
     ? "跟团队补充需求，或 @某位成员 单独拉他进来…"
@@ -381,22 +454,59 @@ function scrollToBottom(force = false) {
 
 function renderPlan() {
   const wrap = $("#planList");
+  const overview = $("#planOverview");
   const t = S.task;
   if (!t || !t.plan?.length) {
+    if (overview) overview.hidden = true;
     wrap.innerHTML = '<p class="hint">任务开始后，这里会显示每道工序的状态。</p>';
     return;
   }
+
+  const indexOf = new Map(t.plan.map((step, i) => [step.id, i + 1]));
+  const qualityText =
+    t.quality?.status === "passed"
+      ? "质量门通过"
+      : t.quality?.status === "failed"
+        ? "质量门未通过"
+        : t.quality?.status === "skipped"
+          ? "评审代质量门"
+          : "质量门待执行";
+  if (overview) {
+    overview.hidden = false;
+    overview.innerHTML = `
+      <span class="po-mode">DAG · 自动编排</span>
+      <b>${t.plan.length} 道工序</b>
+      <span>${t.repairRound ? `返工 ${t.repairRound} 轮` : "首轮执行"}</span>
+      <span class="po-quality" data-quality="${t.quality?.status || "pending"}">${qualityText}</span>`;
+  }
+
   wrap.innerHTML = t.plan
     .map((step, i) => {
       const agent = S.agents.find((a) => a.id === step.agentId);
-      return `<div class="step" data-status="${step.status}">
-        <span class="step-num">${step.status === "done" ? "✓" : pad2(i + 1)}</span>
-        <div class="step-title">${escapeHtml(step.title)}</div>
+      const role = ROLE_META[step.role]?.short || step.role;
+      const deps = (step.needs || [])
+        .map((id) => indexOf.get(id))
+        .filter(Boolean)
+        .map((n) => `#${pad2(n)}`)
+        .join(" ");
+      const parallel =
+        t.plan.filter((s) => JSON.stringify(s.needs || []) === JSON.stringify(step.needs || [])).length > 1;
+      const extras = [
+        deps ? `依赖 ${deps}` : "",
+        parallel ? "并行" : "",
+        step.attempt > 1 ? `尝试 ${step.attempt}/${step.maxAttempts || 2}` : "",
+        step.round ? `R${step.round} 返工` : "",
+      ].filter(Boolean);
+      const icon = step.status === "done" ? "✓" : step.status === "blocked" ? "×" : pad2(i + 1);
+      return `<div class="step" data-status="${step.status}" data-role="${step.role}">
+        <span class="step-num">${icon}</span>
+        <div class="step-title"><i class="step-role">${role}</i>${escapeHtml(step.title)}</div>
         <div class="step-sub">
           ${agent ? `<span class="s-owner" style="--c:${agent.color}">${escapeHtml(agent.name)}</span>` : "<span>未指派</span>"}
           <span>·</span>
-          <span>${escapeHtml(step.note || STATUS_TEXT[step.status] || "")}</span>
+          <span>${escapeHtml(step.note || STEP_STATUS_TEXT[step.status] || "")}</span>
         </div>
+        ${extras.length ? `<div class="step-deps">${extras.map((e) => `<span>${escapeHtml(e)}</span>`).join("")}</div>` : ""}
       </div>`;
     })
     .join("");
@@ -434,6 +544,17 @@ function renderStats() {
     ["累计 TOKENS", (t.stats?.tokens || 0).toLocaleString()],
     ["协作轮次", pad2(t.stats?.agentRuns || t.messages?.filter((m) => m.agentId !== "user").length || 0)],
     ["产物文件", pad2(t.artifacts?.length || 0)],
+    ["返工轮次", pad2(t.repairRound || 0)],
+    [
+      "质量门",
+      t.quality?.status === "passed"
+        ? "PASS"
+        : t.quality?.status === "failed"
+          ? "FAIL"
+          : t.quality?.status === "skipped"
+            ? "评审代判"
+            : "待执行",
+    ],
     ["总耗时", fmtMs(t.stats?.ms || (t.endedAt && t.createdAt ? t.endedAt - t.createdAt : 0))],
   ];
   grid.innerHTML = items
@@ -533,6 +654,23 @@ async function selectTask(id) {
   }
 }
 
+let syncingTask = false;
+async function syncCurrentTask() {
+  if (!S.task || syncingTask) return;
+  syncingTask = true;
+  const id = S.task.id;
+  try {
+    const { task } = await api(`/api/tasks/${id}`);
+    if (!S.task || S.task.id !== id) return;
+    S.task = task;
+    renderAll();
+  } catch {
+    /* SSE 重连后再试 */
+  } finally {
+    syncingTask = false;
+  }
+}
+
 async function createTask(goal) {
   const text = String(goal || "").trim();
   if (text.length < 2) {
@@ -586,6 +724,8 @@ function connect() {
   es.onopen = () => {
     $("#connState").textContent = "已连接 · LIVE";
     $("#connDot").classList.add("on");
+    // SSE 断线期间可能错过工序和产物事件，重连后补一次全量当前任务。
+    if (S.task) syncCurrentTask();
   };
   es.onerror = () => {
     $("#connState").textContent = "重连中…";
@@ -605,6 +745,9 @@ function connect() {
 function handleEvent(ev) {
   const cur = S.task;
 
+  // 停止后立刻重跑时，旧 run 的迟到事件不能覆盖新 run。
+  if (ev.runId && cur && cur.id === ev.taskId && cur.runId && ev.runId !== cur.runId) return;
+
   switch (ev.type) {
     case "task.created": {
       if (!S.tasks.find((t) => t.id === ev.task.id)) S.tasks.unshift(ev.task);
@@ -618,6 +761,7 @@ function handleEvent(ev) {
       if (cur && cur.id === ev.taskId) {
         Object.assign(cur, ev.patch);
         renderTopbar();
+        renderPlan();
         renderStats();
       }
       renderTasks();
@@ -685,7 +829,9 @@ function handleEvent(ev) {
     }
     case "artifact.added": {
       if (cur && cur.id === ev.taskId) {
-        if (!cur.artifacts.some((f) => f.path === ev.file.path)) cur.artifacts.push(ev.file);
+        const existing = cur.artifacts.find((f) => f.path === ev.file.path);
+        if (existing) Object.assign(existing, ev.file);
+        else cur.artifacts.push(ev.file);
         renderFiles();
         renderStats();
         const summary = S.tasks.find((t) => t.id === ev.taskId);
@@ -726,7 +872,7 @@ function handleEvent(ev) {
 async function refreshAgents() {
   try {
     const { agents } = await api("/api/agents");
-    S.agents = agents;
+    S.agents = normalizeAgentSeats(agents);
     renderAgents();
     renderPlan();
   } catch {
@@ -774,7 +920,8 @@ async function adoptAll() {
     const { created, skipped } = await api("/api/agents/adopt", { method: "POST", body: {} });
     await refreshAgents();
     if (created.length) {
-      toast(`已接管 ${created.length} 个：${created.map((c) => c.name).join("、")}`, "ok");
+      const reserve = created.filter((c) => c.reserve).length;
+      toast(`已接入 ${created.length} 个 CLI${reserve ? `，${reserve} 个进入工具池` : ""}`, "ok");
     } else {
       const dup = skipped.filter((s) => s.reason === "已在团队中").length;
       toast(dup ? "装了的 CLI 都已在团队里" : "没有发现可接管的新 CLI", "");
@@ -782,6 +929,32 @@ async function adoptAll() {
     await probeClis();
   } catch (err) {
     toast(`接管失败：${err.message}`, "err");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
+}
+
+async function smartRebalance() {
+  const btn = $("#rebalanceBtn");
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "分派中…";
+  try {
+    const { assignments } = await api("/api/agents/rebalance", { method: "POST", body: {} });
+    await refreshAgents();
+    if (assignments.length) {
+      toast(
+        `已分派 ${assignments.length} 个席位：${assignments
+          .map((a) => `${ROLE_META[a.role]?.short || a.role} ${a.name}`)
+          .join(" · ")}`,
+        "ok",
+      );
+    } else {
+      toast("还没有可分工的 CLI，请先扫描并接入", "");
+    }
+  } catch (err) {
+    toast(`分工失败：${err.message}`, "err");
   } finally {
     btn.disabled = false;
     btn.textContent = label;
@@ -935,11 +1108,13 @@ function openAgentModal(agent = null, preset = null) {
     f("mode").value = agent.mode === "cli" ? "cli" : "sim";
     f("command").value = agent.cli?.command || "";
     f("args").value = (agent.cli?.args || []).join(" ");
+    f("seat").checked = agent.seat !== false;
   } else if (preset) {
     f("name").value = preset.name || "";
     f("mode").value = "cli";
     f("command").value = preset.command || "";
     f("args").value = preset.args || "run {{prompt}}";
+    f("seat").checked = false;
   }
 
   $("#agentModalTitle").textContent = agent ? `编辑 · ${agent.name}` : "接入新的智能体";
@@ -1091,6 +1266,7 @@ function bind() {
       color: String(fd.get("color") || "#ff5538"),
       title: ROLE_TITLE[role] || "自定义智能体",
       mode,
+      seat: fd.get("seat") === "on",
       cli: { command, args: argsStr ? argsStr.split(/\s+/) : [] },
     };
     try {
@@ -1196,6 +1372,7 @@ function bind() {
   /* 探测 */
   $("#probeBtn").addEventListener("click", probeClis);
   $("#adoptBtn").addEventListener("click", adoptAll);
+  $("#rebalanceBtn").addEventListener("click", smartRebalance);
 
   /* 工作目录 */
   $("#dirPick").addEventListener("click", openDirModal);
@@ -1278,7 +1455,7 @@ async function boot() {
 
   try {
     const state = await api("/api/state");
-    S.agents = state.agents;
+    S.agents = normalizeAgentSeats(state.agents);
     S.tasks = state.tasks;
     S.settings = state.settings || {};
     if (state.activeTask) S.task = state.activeTask;

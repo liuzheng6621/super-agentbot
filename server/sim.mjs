@@ -27,11 +27,41 @@ export function pickModule(goal) {
 export function planFor(goal) {
   const mod = pickModule(goal);
   return [
-    { title: `需求拆解与验收标准：${goal.slice(0, 40)}`, role: 'planner' },
-    { title: `${mod.label}技术方案与接口契约`, role: 'architect' },
-    { title: `实现 ${mod.name} 模块主链路`, role: 'coder' },
-    { title: `测试用例设计与边界覆盖`, role: 'tester' },
-    { title: `代码评审与质量门`, role: 'reviewer' },
+    {
+      id: 'plan',
+      title: `需求拆解与验收标准：${goal.slice(0, 40)}`,
+      role: 'planner',
+      needs: [],
+      outputPaths: [],
+    },
+    {
+      id: 'design',
+      title: `${mod.label}技术方案与接口契约`,
+      role: 'architect',
+      needs: ['plan'],
+      outputPaths: [`docs/${mod.name}-design.md`],
+    },
+    {
+      id: 'implement',
+      title: `实现 ${mod.name} 模块主链路`,
+      role: 'coder',
+      needs: ['design'],
+      outputPaths: [`src/${mod.name}.js`],
+    },
+    {
+      id: 'test-design',
+      title: '测试用例设计与边界覆盖',
+      role: 'tester',
+      needs: ['design'],
+      outputPaths: [`tests/${mod.name}.test.js`],
+    },
+    {
+      id: 'review',
+      title: '代码评审与质量门',
+      role: 'reviewer',
+      needs: ['implement', 'test-design'],
+      outputPaths: [],
+    },
   ];
 }
 
@@ -58,8 +88,10 @@ function plannerText({ goal, mod }) {
 |---|------|------|--------|----------|
 | 1 | 技术方案与接口契约 | Forge | \`docs/${mod.name}-design.md\` | 无 |
 | 2 | 主链路实现 | Kilo | \`src/${mod.name}.js\` | 依赖 1 |
-| 3 | 测试覆盖 | Probe | \`tests/${mod.name}.test.js\` | 依赖 2 |
+| 3 | 测试设计 | Probe | \`tests/${mod.name}.test.js\` | 依赖 1 |
 | 4 | 评审与质量门 | Lens | 评审结论 | 依赖 2 / 3 |
+
+> 第 2、3 道工序并行：Kilo 写实现，Probe 同步设计测试；汇合后真实执行测试质量门，再由 Lens 复评。
 
 ### 三、风险预判
 - **接口漂移**：方案阶段先把契约写死，实现阶段不允许私自改字段名。
@@ -67,8 +99,8 @@ function plannerText({ goal, mod }) {
 - **过度设计**：本轮不引入数据库与鉴权体系，用内存态 + 可替换 repository 兜住。
 
 ### 四、我的编排决策
-先让 **Forge** 出方案 → **Kilo** 并行开工 → **Probe** 跟测 → **Lens** 卡门。
-任何一步失败，我会重新拆解并回收上下文，不需要你重新描述需求。
+先让 **Forge** 定契约 → **Kilo / Probe** 两路并行 → 汇合后执行质量门 → **Lens** 评审。
+任何一步失败，我会阻断依赖它的下游；评审未通过则自动返工复评，不需要你重新描述需求。
 
 现在开始分派。
 `);
@@ -113,7 +145,20 @@ interface ${mod.name.charAt(0).toUpperCase() + mod.name.slice(1)}Service {
 `);
 }
 
-function coderText({ goal, mod }) {
+function coderText({ goal, mod, outputs = {} }) {
+  const repairRound = Number(outputs.repairRound || 0);
+  if (repairRound > 0) {
+    return wrap(`
+收到评审反馈，本轮只修**阻塞项**，不扩大改动范围。
+
+### 修复内容
+- 写操作统一进入串行队列，避免并发 read-modify-write 丢更新。
+- 对外错误只保留稳定错误码与中文提示，不再暴露内部堆栈。
+- 回归用例已交给 Probe 复跑，修复不改变既有接口契约。
+
+当前是第 ${repairRound} 轮返工，已按评审单逐项收口。
+`);
+  }
   return wrap(`
 按契约实现，先跑通主链路，同时把边界挡在入口。
 
@@ -124,13 +169,30 @@ function coderText({ goal, mod }) {
 - \`close\` 做了幂等，重复关闭不报错只返回当前态。
 - 标题超过 120 字符直接拒绝，不做静默截断（避免调用方以为存进去了）。
 
-主链路自测通过，已交给 Probe 跟测。
+主链路自测通过，已进入与测试设计的汇合点。
 `);
 }
 
-function testerText({ goal, mod }) {
+function testerText({ goal, mod, outputs = {} }) {
+  const repairRound = Number(outputs.repairRound || 0);
+  if (repairRound > 0) {
+    return wrap(`
+回归完成。本轮只验证修复项，同时重跑原有边界用例。
+
+### 回归结果
+| 编号 | 场景 | 结果 |
+|------|------|------|
+| T1 | 正常创建 | 通过 |
+| T2 | 空标题 | 通过 |
+| T3 | 超长标题 | 通过 |
+| T4 | 关闭幂等 | 通过 |
+| T5 | 并发创建不丢更新 | 通过 |
+
+阻塞项已全部关闭，未发现新增回归。可交给 Lens 复评。
+`);
+  }
   return wrap(`
-拿到实现，先从「哪里最容易炸」入手，再补正常路径。
+拿到契约后先设计测试，与实现并行推进；实现落地后再执行同一套用例。
 
 ### 用例矩阵
 | 编号 | 场景 | 输入 | 期望 |
@@ -139,18 +201,38 @@ function testerText({ goal, mod }) {
 | T2 | 空标题 | \`{title:"  "}\` | 抛 \`E_TITLE_REQUIRED\` |
 | T3 | 超长标题 | 121 字符 | 抛 \`E_TITLE_TOO_LONG\` |
 | T4 | 关闭幂等 | 连续 \`close\` 两次 | 两次成功，状态一致 |
-| T5 | 关键词筛选 | \`keyword:"周"\` | 只返回匹配项 |
+| T5 | 并发创建 | 20 条并发 | 全部保留，不丢更新 |
 
-### 发现的问题
-1. **[P1]** \`list({keyword})\` 对大小写敏感，中文没问题但英文标签搜不到 → 建议 \`toLowerCase\` 归一。
-2. **[P2]** \`tags\` 未去重，\`["a","a"]\` 会原样存进去。
-3. **[P3]** 空数组返回 \`null\` 而不是 \`[]\`，调用方要额外判空。
+### 风险
+1. **[P1]** \`list({keyword})\` 对大小写敏感，需要归一。
+2. **[P2]** \`tags\` 未去重。
 
-除 P1 外都不阻塞上线。P1 已回抛给 Kilo 修。
+测试文件已生成，等待实现汇合后由质量门实际执行。
 `);
 }
 
-function reviewerText({ goal, mod }) {
+function reviewerText({ goal, mod, outputs = {} }) {
+  const repairRound = Number(outputs.repairRound || 0);
+  const quality = outputs.quality || {};
+  if (repairRound > 0 && quality.status !== 'failed') {
+    return wrap(`
+复评完成。上一轮两个 Blocker 都已按评审单关闭，自动化用例全绿。
+
+### 结论：**通过**
+
+### 已关闭
+- **B1｜并发写**：写路径已串行化，并发用例通过。
+- **B2｜错误信息泄漏**：对外只返回错误码与中文文案，堆栈不再外泄。
+
+### 遗留建议（不阻塞）
+- S1：后续可把 \`create\` 里的校验与归一拆成独立函数。
+- S2：魔法数字统一提为常量。
+
+可以交付。第 ${repairRound} 轮返工闭环完成。
+
+VERDICT: PASS
+`);
+  }
   return wrap(`
 评审完成。整体结构是干净的，但有几个点必须在上线前改掉。
 
@@ -163,24 +245,30 @@ function reviewerText({ goal, mod }) {
 ### 建议改（Should）
 - **S1**：\`domain\` 里有个 47 行的 \`create\`，能拆出 \`validate\` 与 \`normalize\` 两段，可读性会好很多。
 - **S2**：魔法数字 \`120\` 提为常量 \`MAX_TITLE_LEN\`。
-- **S3**：\`list\` 的过滤逻辑抽成纯函数，才有办法单测。
 
 ### 做得好
 - 错误码体系完整，调用方可以精准分支。
 - 幂等设计到位，重试是安全的。
 
-Kilo 改完 B1、B2 后我再复评一次，预计一轮就能过。
+${quality.status === 'failed' ? '自动化测试未通过，必须先修复失败用例。' : ''}
+
+Kilo 改完 B1、B2 后我再复评一次。
+
+VERDICT: FAIL
 `);
 }
 
-function summaryText({ goal, mod, outputs }) {
+function summaryText({ goal, mod, outputs = {} }) {
+  const passed = outputs.passed !== false;
+  const repairRound = Number(outputs.repairRound || 0);
   const done = ['方案文档', `${mod.name} 模块实现`, '自动化测试', '评审结论'];
   return wrap(`
-## 交付完成
+## ${passed ? '交付完成' : '需要人工确认'}
 
 **目标**：${goal}
 
-本轮 ${done.length} 项工序全部走完，协作链路没有回退重跑。
+本轮 ${done.length} 项工序全部走完${repairRound ? `，经过 ${repairRound} 轮返工复评` : ''}。
+质量门${passed ? '已通过' : '仍未通过，不能按完成交付'}。
 
 ### 产物
 ${done.map((d, i) => `${i + 1}. ${d}`).join('\n')}
