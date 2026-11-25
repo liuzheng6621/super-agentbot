@@ -10,8 +10,9 @@ const MODULE_HINTS = [
   [/(聊天|消息|对话|chat|message|im\b|客服)/i, 'chat', '实时消息'],
   [/(搜索|检索|search|query|筛选)/i, 'search', '搜索检索'],
   [/(图表|可视|看板|chart|dashboard|报表|数据大屏)/i, 'chart', '数据可视化'],
-  [/(上传|文件|附件|upload|file|网盘)/i, 'upload', '文件上传'],
-  [/(待办|任务|todo|清单|kanban|看板)/i, 'todo', '任务清单'],
+  // 裸「文件」会把「确认文件存在」「读文件」也算成上传需求，只保留明确的传输语义
+  [/(上传|附件|网盘|download|upload|file\s*upload)/i, 'upload', '文件上传'],
+  [/(待办|任务清单|todo|kanban|看板)/i, 'todo', '任务清单'],
   [/(用户|账号|profile|会员|后台|admin)/i, 'account', '用户与权限'],
   [/(爬虫|采集|抓取|crawler|scrape)/i, 'crawler', '数据采集'],
   [/(api|接口|服务端|后端|server|微服务)/i, 'service', '服务端接口'],

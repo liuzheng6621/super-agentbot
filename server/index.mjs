@@ -470,6 +470,17 @@ process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);
 process.once('exit', () => store.flush());
 
+// 端口被占用时 Node 只会抛一个裸 EADDRINUSE 并静默退出，容易误判成「启动成功但页面打不开」
+server.on('error', (err) => {
+  if (err && err.code === 'EADDRINUSE') {
+    console.error(`  ✗ 端口 ${PORT} 已被占用：本机可能已有一个 AgentForge 在运行。`);
+    console.error('    先关掉旧进程（或设 PORT=xxxx 换端口）再启动。');
+    process.exit(2);
+  }
+  console.error('  ✗ 服务启动失败: ' + (err && err.message));
+  process.exit(1);
+});
+
 server.listen(PORT, HOST, () => {
   console.log('');
   console.log('  AgentForge · 多智能体开发协作台');

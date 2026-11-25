@@ -417,6 +417,8 @@ class Store {
       s.maxStepAttempts = clamp(patch.maxStepAttempts, 1, 3, s.maxStepAttempts);
     if (patch.simSpeed !== undefined)
       s.simSpeed = clamp(patch.simSpeed, 1, 20, s.simSpeed);
+    if (patch.defaultMode !== undefined && ['auto', 'cli', 'sim'].includes(patch.defaultMode))
+      s.defaultMode = patch.defaultMode;
     this.flush();
     this.broadcast({ type: 'settings.changed', settings: { ...s } });
     return { ...s };

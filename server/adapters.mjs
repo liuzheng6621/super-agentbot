@@ -79,7 +79,16 @@ export function spawnCli(agent, prompt, { cwd, onChunk, timeout = 180000, signal
     const passByStdin = !declaredArgs.some((a) => String(a).includes('{{prompt}}'));
 
     const runCwd = cwd || agent.cli.cwd || process.cwd();
-    const env = { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' };
+    const env = {
+      ...process.env,
+      FORCE_COLOR: '0',
+      NO_COLOR: '1',
+      // Python 系 CLI（trae-cli / aider / goose）在中文 Windows 的 GBK 代码页下打 emoji 会崩，统一给 UTF-8
+      PYTHONUTF8: '1',
+      PYTHONIOENCODING: 'utf-8',
+      // 单个 CLI 的自定义环境变量（如 gemini 的 GEMINI_API_KEY / GOOGLE_GEMINI_BASE_URL）
+      ...(agent.cli.env || {}),
+    };
     const resolved = resolveCommand(agent.cli.command);
     // 真 .exe 直连：Node 用宽字符命令行传参，中文不会被代码页吃掉，也没有引号转义问题
     const direct = resolved && !/\.(cmd|bat|ps1)$/i.test(resolved);
@@ -179,23 +188,35 @@ function killTree(child) {
 /* 本机 CLI 探测                                                        */
 /* ------------------------------------------------------------------ */
 
+// 本机 magpie 网关的可用模型：各 CLI 默认模型会落到 codar 等失效 provider 上，统一钉一个健康档
+const MAGPIE_MODEL = process.env.AGENTFORGE_MODEL || 'trae-cn/glm-5.3-flash';
+
+// 非交互（-p / exec）下没有人在旁边点「允许」，各 CLI 默认会把写盘动作判成待审批并卡死。
+// 这里逐家给一次性的免审批开关，作用域都限定在被调用的工作区。
 const CANDIDATES = [
-  { command: 'claude', label: 'Claude Code', args: ['-p', '{{prompt}}', '--output-format', 'text'] },
+  { command: 'claude', label: 'Claude Code', args: ['-p', '{{prompt}}', '--output-format', 'text', '--model', MAGPIE_MODEL, '--permission-mode', 'bypassPermissions'] },
   // codex 在非 git 目录会直接拒绝执行，沙箱限定为工作区可写
-  { command: 'codex', label: 'Codex CLI', args: ['exec', '--skip-git-repo-check', '--sandbox', 'workspace-write', '{{prompt}}'] },
-  { command: 'opencode', label: 'OpenCode', args: ['run', '--auto', '{{prompt}}'] },
+  { command: 'codex', label: 'Codex CLI', args: ['exec', '--skip-git-repo-check', '--sandbox', 'workspace-write', '-c', `model=${MAGPIE_MODEL}`, '{{prompt}}'] },
+  // 下面这些命令在本机是 .cmd/.ps1 包装器，只能过 cmd.exe：prompt 一律改走 stdin。
+  // 理由：cmd.exe 会把参数里的换行当成命令分隔符，多行 prompt 一旦进了命令行，
+  // 后面的 flag（如 gemini 的 --skip-trust）就被截断，实测报「not running in a trusted directory」。
+  { command: 'opencode', label: 'OpenCode', args: ['run', '--auto'] },
   { command: 'cursor-agent', label: 'Cursor Agent', args: ['-p', '{{prompt}}'] },
   { command: 'copilot', label: 'Copilot CLI', args: ['-p', '{{prompt}}'] },
   { command: 'cn', label: 'Continue CLI', args: ['-p', '{{prompt}}'] },
-  { command: 'dsh', label: 'DSH Agent', args: ['headless', '{{prompt}}'] },
+  // dsh 的 headless 用「-」表示从 stdin 读任务
+  { command: 'dsh', label: 'DSH Agent', args: ['headless', '--permission-mode', 'workspace-write', '--approval-policy', 'never', '-'], healthTimeout: 90000 },
+  // kimi 只有「-p <文本>」一种喂法（-p 必须带值，无参数会进交互界面，实测 stdin 也不支持），
+  // 因此它没法像上面几家那样绕开 cmd 引号：多行 prompt 会被 cmd.exe 截断，只适合单行任务。
   { command: 'kimi', label: 'Kimi Code', args: ['-p', '{{prompt}}', '--output-format', 'text'] },
-  { command: 'trae-cli', label: 'Trae Agent', args: ['run', '{{prompt}}'] },
+  // Python 写的 CLI 需要 UTF-8 环境，否则 rich 控制台在 GBK 代码页下打 ✅ 会直接抛 UnicodeEncodeError
+  { command: 'trae-cli', label: 'Trae Agent', args: ['run', '--config-file', `${process.env.USERPROFILE || process.env.HOME}/.trae-cli/config.json`, '{{prompt}}'], healthTimeout: 60000 },
   // workbuddy 是业务系统 CLI（jobs/crm/mcp），没有一次性提示词入口，不能当编排成员用
-  { command: 'crush', label: 'Crush', args: ['run', '{{prompt}}'] },
+  { command: 'crush', label: 'Crush', args: ['run', '-y'] },
   { command: 'goose', label: 'Goose', args: ['run', '-t', '{{prompt}}'] },
-  { command: 'aider', label: 'Aider', args: ['--message', '{{prompt}}', '--yes'] },
-  { command: 'gemini', label: 'Gemini CLI', args: ['-p', '{{prompt}}'] },
-  { command: 'qwen', label: 'Qwen Code', args: ['-p', '{{prompt}}'] },
+  { command: 'aider', label: 'Aider', args: ['--message', '{{prompt}}', '--yes', '--openai-api-base', 'http://127.0.0.1:3425/v1', '--openai-api-key', 'magpie', '--model', `openai/${MAGPIE_MODEL}`, '--no-git'] },
+  { command: 'gemini', label: 'Gemini CLI', args: ['--skip-trust', '--approval-mode', 'yolo', '-m', MAGPIE_MODEL], env: { GEMINI_API_KEY: 'magpie', GOOGLE_GEMINI_BASE_URL: 'http://127.0.0.1:3425' } },
+  { command: 'qwen', label: 'Qwen Code', args: ['--approval-mode', 'yolo', '--auth-type', 'openai', '--openai-api-key', 'magpie', '--openai-base-url', 'http://127.0.0.1:3425/v1', '-m', MAGPIE_MODEL] },
   { command: 'ollama', label: 'Ollama', args: ['run', 'qwen2.5-coder', '{{prompt}}'] },
 ];
 

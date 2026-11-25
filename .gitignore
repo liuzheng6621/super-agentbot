@@ -9,3 +9,12 @@ shot.png
 # 本地 agent 工作区数据
 .workbuddy/
 *.genie
+trajectories/
+.aider.chat.history.md
+.aider.input.history
+.tmp-*
+shot-team.png
+.tmp-e2e/
+shot-e2e.png
+dsh-probe.err
+shot-new.png

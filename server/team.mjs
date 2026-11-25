@@ -18,11 +18,11 @@ const ROLE_TITLE = {
 
 /** 角色偏好：同一 CLI 也能兼任多个席位，但尽量让不同角色用不同工具 */
 const ROLE_PREFERENCES = {
-  planner: ['claude', 'qwen', 'gemini', 'kimi', 'opencode', 'codex', 'aider'],
-  architect: ['gemini', 'claude', 'kimi', 'qwen', 'opencode', 'codex', 'aider'],
-  coder: ['codex', 'opencode', 'aider', 'crush', 'qwen', 'gemini', 'claude'],
-  tester: ['opencode', 'crush', 'qwen', 'gemini', 'codex', 'aider'],
-  reviewer: ['claude', 'kimi', 'qwen', 'gemini', 'opencode', 'codex', 'aider'],
+  planner: ['claude', 'dsh', 'qwen', 'gemini', 'kimi', 'opencode', 'codex', 'aider'],
+  architect: ['gemini', 'claude', 'dsh', 'kimi', 'qwen', 'opencode', 'codex', 'aider'],
+  coder: ['codex', 'opencode', 'trae-cli', 'dsh', 'aider', 'crush', 'qwen', 'gemini', 'claude'],
+  tester: ['opencode', 'dsh', 'trae-cli', 'crush', 'qwen', 'gemini', 'codex', 'aider'],
+  reviewer: ['claude', 'dsh', 'trae-cli', 'kimi', 'qwen', 'gemini', 'opencode', 'codex', 'aider'],
 };
 
 const BUILTIN_NAMES = new Set(['Nova', 'Forge', 'Kilo', 'Probe', 'Lens']);
@@ -49,7 +49,9 @@ export function judgeHealth(res) {
   const err = (res.stderr || '').trim();
   const blob = `${out} ${err}`;
   const fatal = FATAL.test(blob) || /not allowed|unauthorized/i.test(blob);
-  const hasReply = out.length > 0 && out.length < 400;
+  // 体检题就是「Reply with exactly: OK」：答出 OK 即算有回复，不管它包了多少装饰（trae-cli 会打一整套表格）
+  const answered = /(^|[\s│|:=])OK($|[\s│|.,;])/m.test(out);
+  const hasReply = out.length > 0 && (out.length < 400 || answered);
   // codex 这类 CLI 会吐完结果后继续等 stdin 直到超时：有回复就算可用，但如实标注
   const softOk = res.code === -3 && hasReply && !fatal;
   const ok = ((res.code === 0 && hasReply) || softOk) && !fatal;
@@ -113,6 +115,8 @@ export function collectCandidates(probed, agents = store.agents, cache = store.d
       label: c.label,
       path: c.path || c.command,
       args: c.args,
+      env: c.env,
+      healthTimeout: c.healthTimeout,
       health: healthByKey.get(key) || null,
     });
   }
@@ -129,9 +133,10 @@ export async function checkCandidates(candidates, { timeout = HEALTH_TIMEOUT, co
       await Promise.all(
         batch.map(async (c) => {
           const res = await spawnCli(
-            { cli: { command: c.path, args: c.args, cwd: '' } },
+            { cli: { command: c.path, args: c.args, env: c.env, cwd: '' } },
             HEALTH_PROMPT,
-            { timeout, cwd: work },
+            // 慢启动的 CLI（trae-cli 这类 Python agent）自带更长的体检预算
+            { timeout: c.healthTimeout || timeout, cwd: work },
           );
           c.health = judgeHealth(res);
         }),
@@ -211,7 +216,7 @@ export async function ensureRealTeam({ force = false, refreshHealth = false } = 
       mode: 'cli',
       builtin: false,
       seat: true,
-      cli: { command: candidate.path, args: candidate.args, cwd: '' },
+      cli: { command: candidate.path, args: candidate.args, env: candidate.env, cwd: '' },
       health: candidate.health,
     };
     store.updateAgent(seat.id, patch);
