@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { estimateTokens } from './tokens.mjs';
 
 export const ROOT = path.resolve(import.meta.dirname, '..');
 export const DATA_DIR = process.env.AGENTFORGE_DATA_DIR
@@ -482,11 +483,12 @@ class Store {
     const msg = task.messages.find((m) => m.id === messageId);
     if (!msg) return;
     msg.text += delta;
+    const deltaTokens = estimateTokens(delta);
     if (msg.agentId) {
       const agent = this.getAgent(msg.agentId);
-      if (agent) agent.stats.tokens += Math.ceil(delta.length / 2);
+      if (agent) agent.stats.tokens += deltaTokens;
     }
-    task.stats.tokens += Math.ceil(delta.length / 2);
+    task.stats.tokens += deltaTokens;
     this.broadcast({ type: 'message.delta', taskId, runId: task.runId || null, id: messageId, delta });
   }
 
@@ -664,6 +666,7 @@ class Store {
       Object.assign(existing, {
         bytes: file.bytes,
         mtimeMs: file.mtimeMs || Date.now(),
+        version: file.version || existing.version || '',
         lang: file.lang || existing.lang,
         agentId: file.agentId || existing.agentId,
         stepId: file.stepId || existing.stepId || '',
@@ -675,6 +678,7 @@ class Store {
         path: file.path,
         bytes: file.bytes,
         mtimeMs: file.mtimeMs || Date.now(),
+        version: file.version || '',
         lang: file.lang || '',
         agentId: file.agentId || '',
         stepId: file.stepId || '',

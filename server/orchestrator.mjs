@@ -4,6 +4,8 @@ import { store, randomUUID, ROLE_LABEL } from './store.mjs';
 import * as sim from './sim.mjs';
 import { streamText, spawnCli, sleep } from './adapters.mjs';
 import { runDag, throwIfAborted } from './dag.mjs';
+import { writeFileAtomic, versionOf, spillText } from './fs.mjs';
+import { estimateTokens } from './tokens.mjs';
 
 /** taskId -> { runId, controller, stopping } */
 const running = new Map();
@@ -36,13 +38,13 @@ function safeJoin(root, rel) {
 
 export function writeWorkspaceFile(task, relPath, content, meta = {}) {
   const abs = safeJoin(task.workspace, relPath);
-  fs.mkdirSync(path.dirname(abs), { recursive: true });
-  fs.writeFileSync(abs, content, 'utf8');
+  writeFileAtomic(abs, content);
   const stat = fs.statSync(abs);
   store.addArtifact(task.id, {
     path: relPath,
     bytes: Buffer.byteLength(content),
     mtimeMs: stat.mtimeMs,
+    version: versionOf(abs) || '',
     lang: path.extname(relPath).slice(1) || 'text',
     agentId: meta.agentId || '',
     stepId: meta.stepId || '',
@@ -83,8 +85,14 @@ export function listWorkspaceFiles(task) {
         if (out.length >= MAX_SCAN_FILES) return;
       } else {
         try {
-          const stat = fs.statSync(path.join(dir, e.name));
-          out.push({ path: rel, bytes: stat.size, mtimeMs: stat.mtimeMs });
+          // bigint 才能拿到纳秒级 mtime：同毫秒内的等长改写也能识别
+          const stat = fs.statSync(path.join(dir, e.name), { bigint: true });
+          out.push({
+            path: rel,
+            bytes: Number(stat.size),
+            mtimeMs: Number(stat.mtimeMs),
+            mtimeNs: stat.mtimeNs.toString(),
+          });
         } catch {
           /* 单个文件读不到就算了 */
         }
@@ -123,12 +131,24 @@ export function buildContextPack(task, { maxMessages = 8, maxFiles = 80 } = {}) 
   };
 }
 
-export function buildContextBlock(context, step = '') {
+/**
+ * 稳定区：整个任务期间不变的部分（目标、工作区）。
+ * 必须放在 prompt 最前面——提供方的前缀缓存按内容前缀命中，
+ * 第一位就变等于每次调用都从零开始算。
+ */
+export function stableBlock(context) {
+  if (!context) return '';
+  return ['# 项目上下文', `- 目标: ${context.goal}`, `- 工作区: ${context.workspace}`].join('\n');
+}
+
+/**
+ * 易变区：状态、工序账本、最近摘要、文件清单，每一步都会变。
+ * 必须放在 prompt 末尾，否则它前面的所有内容都跟着失效。
+ */
+export function volatileBlock(context, step = '') {
   if (!context) return '';
   return [
-    '# 项目上下文',
-    `- 目标: ${context.goal}`,
-    `- 工作区: ${context.workspace}`,
+    '# 项目上下文（实时）',
     `- 状态: ${context.status}`,
     step ? `- 当前工序: ${step}` : '',
     '',
@@ -150,6 +170,7 @@ export function buildContextBlock(context, step = '') {
     .filter(Boolean)
     .join('\n');
 }
+
 
 /* ------------------------------------------------------------------ */
 /* 成员状态                                                             */
@@ -266,25 +287,27 @@ async function cliMessage(task, agent, prompt, { kind = 'text', signal, timeout 
     );
   }
   store.endMessage(task.id, msg.id, {
-    tokens: Math.ceil((res.stdout || '').length / 3),
+    tokens: estimateTokens(res.stdout),
     ms: res.elapsed,
     exitCode: res.code,
   });
 
-  // 收集 CLI 新增/修改的文件；mtime + size 能识别等长改写
+  // 收集 CLI 新增/修改的文件：先按 size + 纳秒 mtime 粗筛，命中项再算内容版本。
+  // 内容没变就不重复记 artifact——CLI 把同一个文件重写一遍不该算一次产出。
   const after = listWorkspaceFiles(task);
   for (const f of after) {
     const prev = before.get(f.path);
-    if (!prev || prev.bytes !== f.bytes || prev.mtimeMs !== f.mtimeMs) {
-      store.addArtifact(task.id, {
-        path: f.path,
-        bytes: f.bytes,
-        mtimeMs: f.mtimeMs,
-        lang: path.extname(f.path).slice(1),
-        agentId: agent.id,
-        stepId: agent.currentStepId || '',
-      });
-    }
+    const touched = !prev || prev.bytes !== f.bytes || prev.mtimeNs !== f.mtimeNs;
+    if (!touched) continue;
+    store.addArtifact(task.id, {
+      path: f.path,
+      bytes: f.bytes,
+      mtimeMs: f.mtimeMs,
+      version: versionOf(path.join(task.workspace, f.path)) || '',
+      lang: path.extname(f.path).slice(1),
+      agentId: agent.id,
+      stepId: agent.currentStepId || '',
+    });
   }
 
   const failed = res.code !== 0 && res.code !== -4;
@@ -305,21 +328,41 @@ function clip(text, max = 6000) {
   return `${value.slice(0, head)}\n\n…（中间省略 ${value.length - head - tail} 字）…\n\n${value.slice(-tail)}`;
 }
 
-function dependencyText(step, outputs) {
+/** 超过这个长度就不再整段塞进 prompt，改为落盘 + 句柄。 */
+const SPILL_AT = 8000;
+
+/** 上游产物正文：短就全文，长就落盘，只给摘录 + 只读路径。 */
+function dependencyBody(task, out) {
+  const text = String(out.text || '');
+  if (text.length <= SPILL_AT) return text;
+  const ref = spillText({
+    taskId: task.id,
+    name: `${out.role || 'step'}-${out.id || out.title || 'out'}`,
+    content: text,
+  });
+  return [
+    `（上游产物共 ${text.length} 字，完整原文已存为文件，不要凭下面的摘录猜细节）`,
+    `只读路径: ${ref.locator}`,
+    '',
+    clip(text, 1600),
+  ].join('\n');
+}
+
+function dependencyText(task, step, outputs) {
   if (!step?.needs?.length) return '无（可以从项目上下文开始）';
   return step.needs
     .map((id) => {
       const out = outputs.get(id);
       if (!out) return `## ${id}\n（上游未产出）`;
-      return `## ${ROLE_LABEL[out.role] || out.role} · ${out.name}\n工序：${out.title}\n\n${clip(out.text)}`;
+      return `## ${ROLE_LABEL[out.role] || out.role} · ${out.name}\n工序：${out.title}\n\n${dependencyBody(task, out)}`;
     })
     .join('\n\n---\n\n');
 }
 
-function buildPrompt(task, agent, step, depsText, context, extra = {}) {
+export function buildPrompt(task, agent, step, depsText, context, extra = {}) {
   const role = step?.role || agent.role;
   const lines = [
-    buildContextBlock(context, step?.title || ''),
+    stableBlock(context),
     `你是「${agent.name}」，团队中的${agent.title}。`,
     '',
     '# 项目目标',
@@ -360,12 +403,14 @@ function buildPrompt(task, agent, step, depsText, context, extra = {}) {
   } else {
     lines.push('4. 结尾用一行「下一步建议：…」收口。');
   }
+  // 易变内容永远放最后：前面越稳定，提供方的前缀缓存命中越长
+  lines.push('', volatileBlock(context, step?.title || ''));
   return lines.filter((line) => line !== '').join('\n');
 }
 
 function buildPlanPrompt(agent, task, context = null) {
   return [
-    buildContextBlock(context, '需求拆解'),
+    stableBlock(context),
     `你是「${agent.name}」，团队里的${agent.title}。`,
     '',
     '# 项目目标',
@@ -376,12 +421,14 @@ function buildPlanPrompt(agent, task, context = null) {
     '团队已有规划、架构、实现、测试、评审五个执行席位，不要把所有工作都分给实现工程师。',
     '',
     '不要写业务代码，不要客套。中文 Markdown，结尾用一行「下一步建议：…」收口。',
+    '',
+    volatileBlock(context, '需求拆解'),
   ].join('\n');
 }
 
 function buildSummaryPrompt(agent, task, outputs, context, extra = {}) {
   return [
-    buildContextBlock(context, '交付收口'),
+    stableBlock(context),
     `你是「${agent.name}」，团队里的${agent.title}。本轮协作已结束，由你做交付收口。`,
     '',
     '# 项目目标',
@@ -399,6 +446,8 @@ function buildSummaryPrompt(agent, task, outputs, context, extra = {}) {
     '',
     '# 你的任务',
     '给出交付结论、遗留风险，以及需要用户拍板的 3 件事。不要宣称未通过的工序已经完成。中文 Markdown。',
+    '',
+    volatileBlock(context, '交付收口'),
   ]
     .filter(Boolean)
     .join('\n');
@@ -537,7 +586,7 @@ export function rankProposals(proposals = []) {
 
 function buildProposalPrompt(task, agent, angle, context) {
   return [
-    buildContextBlock(context, `方案提案 · ${angle.label}`),
+    stableBlock(context),
     `你是「${agent.name}」，团队里的${agent.title || ROLE_LABEL[agent.role] || '成员'}。`,
     '',
     '# 项目目标',
@@ -556,6 +605,8 @@ function buildProposalPrompt(task, agent, angle, context) {
     '# 硬约束',
     '- 只输出方案文本，不要创建、修改、删除任何文件。',
     '- 不要写完整代码，不要客套话，中文 Markdown，800 字以内。',
+    '',
+    volatileBlock(context, `方案提案 · ${angle.label}`),
   ]
     .filter(Boolean)
     .join('\n');
@@ -1087,7 +1138,7 @@ async function executeSteps(task, steps, { outputs, speed, signal }) {
         extra.quality = await runQualityGate(latest, step, signal);
       }
       const context = buildContextPack(latest);
-      const depsText = dependencyText(step, outputs);
+      const depsText = dependencyText(latest, step, outputs);
       const prompt = buildPrompt(latest, agent, step, depsText, context, extra);
       const simOutputs = {
         ...Object.fromEntries([...outputs].map(([id, value]) => [id, value.text])),
