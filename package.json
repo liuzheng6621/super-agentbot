@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node server/index.mjs",
     "dev": "node --watch server/index.mjs",
-    "test": "node --test tests/dag.test.mjs tests/orchestrator.test.mjs tests/debate.test.mjs",
+    "test": "node --test tests/*.test.mjs",
     "desktop": "node desktop/launcher.mjs",
     "install-desktop": "node desktop/install.mjs",
     "icon": "node desktop/make-icon.mjs"

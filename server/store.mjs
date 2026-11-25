@@ -31,6 +31,8 @@ function defaultAgents() {
     tagline,
     skills,
     mode: 'sim',
+    // 内置演示席位：服务启动后会用本机真实 CLI 顶替（见 server/team.mjs）
+    builtin: true,
     seat: true,
     status: 'idle',
     activity: '',
@@ -202,6 +204,8 @@ class Store {
       tagline: patch.tagline || '',
       skills: patch.skills || [],
       mode: patch.mode === 'cli' ? 'cli' : 'sim',
+      builtin: false,
+      health: patch.health || null,
       // 同一角色默认只有一个主执行席位，额外接入的 CLI 进入工具池。
       seat: patch.seat === true ? true : !hasSeat,
       status: 'idle',
@@ -325,7 +329,7 @@ class Store {
     return this.db.tasks.find((t) => t.id === id);
   }
 
-  createTask({ goal, mode = 'auto', workspace = '' }) {
+  createTask({ goal, mode = 'auto', workspace = '', debate = null }) {
     const id = randomUUID();
     let root = path.join(WORKSPACE_DIR, id);
     let external = false;
@@ -346,6 +350,8 @@ class Store {
       title: goal.length > 26 ? goal.slice(0, 26) + '…' : goal,
       goal,
       mode,
+      // 工作流模式：null 跟随全局设置，debate 先讨论后实施，direct 直接开工
+      flowMode: debate === 'direct' || debate === 'debate' ? debate : null,
       status: 'idle',
       createdAt: Date.now(),
       endedAt: null,
@@ -374,6 +380,7 @@ class Store {
       title: task.title,
       goal: task.goal,
       mode: task.mode,
+      flowMode: task.flowMode || null,
       status: task.status,
       createdAt: task.createdAt,
       endedAt: task.endedAt,
@@ -386,6 +393,33 @@ class Store {
       messages: task.messages.length,
       files: task.artifacts.length,
     };
+  }
+
+  /** 工作流参数：只开放安全字段，逐项夹紧范围，改完广播给所有已连接界面。 */
+  updateSettings(patch = {}) {
+    const clamp = (v, min, max, fallback) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : fallback;
+    };
+    const s = this.db.settings;
+    if (typeof patch.debateEnabled === 'boolean') s.debateEnabled = patch.debateEnabled;
+    if (patch.debateParticipants !== undefined)
+      s.debateParticipants = clamp(patch.debateParticipants, 2, 6, s.debateParticipants);
+    if (patch.debatePoolSeats !== undefined)
+      s.debatePoolSeats = clamp(patch.debatePoolSeats, 0, 3, s.debatePoolSeats);
+    if (patch.debateConcurrency !== undefined)
+      s.debateConcurrency = clamp(patch.debateConcurrency, 1, 4, s.debateConcurrency);
+    if (patch.maxConcurrency !== undefined)
+      s.maxConcurrency = clamp(patch.maxConcurrency, 1, 4, s.maxConcurrency);
+    if (patch.maxRepairRounds !== undefined)
+      s.maxRepairRounds = clamp(patch.maxRepairRounds, 0, 3, s.maxRepairRounds);
+    if (patch.maxStepAttempts !== undefined)
+      s.maxStepAttempts = clamp(patch.maxStepAttempts, 1, 3, s.maxStepAttempts);
+    if (patch.simSpeed !== undefined)
+      s.simSpeed = clamp(patch.simSpeed, 1, 20, s.simSpeed);
+    this.flush();
+    this.broadcast({ type: 'settings.changed', settings: { ...s } });
+    return { ...s };
   }
 
   updateTask(id, patch, event = 'task.updated') {

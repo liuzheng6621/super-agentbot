@@ -426,9 +426,17 @@ function clampNum(value, min, max, fallback) {
   return Math.min(max, Math.max(min, n));
 }
 
-function debateConfig() {
+export function debateConfig(task = null) {
+  const globalEnabled = store.db.settings.debateEnabled !== false;
+  // 任务级选择优先：direct 跳过讨论，debate 强制讨论，未选则跟随全局。
+  const enabled =
+    task?.flowMode === 'direct'
+      ? false
+      : task?.flowMode === 'debate'
+        ? true
+        : globalEnabled;
   return {
-    enabled: store.db.settings.debateEnabled !== false,
+    enabled,
     size: clampNum(store.db.settings.debateParticipants, 2, 6, 4),
     poolSeats: clampNum(store.db.settings.debatePoolSeats, 0, 3, 1),
     concurrency: clampNum(store.db.settings.debateConcurrency, 1, 4, 2),
@@ -746,13 +754,16 @@ async function runCritique(task, agent, { index, proposals, speed, signal }) {
 }
 
 /**
- * 跑完整方案讨论。返回 { decision, ranking, participants }；没有有效提案时抛错。
+ * 跑完整方案讨论。成功返回 { decision, ranking, participants }；
+ * 跳过讨论（直接开工 / 成员不足 / 无有效提案）时返回 null，并把原因写进 task.debate。
  */
 export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
-  const cfg = debateConfig();
+  const cfg = debateConfig(task);
   const judge = pickAgent('planner') || pickAgent('reviewer');
-  if (!cfg.enabled) {
-    store.setDebate(task.id, { status: 'skipped', reason: '方案讨论已关闭' });
+  // 用户一次 @ 多位成员，是明确要讨论，优先于任务上的「直接开工」
+  const forceDebate = forced.length >= 2;
+  if (!cfg.enabled && !forceDebate) {
+    store.setDebate(task.id, { status: 'skipped', reason: '本任务选择直接开工，跳过方案讨论' });
     return null;
   }
 

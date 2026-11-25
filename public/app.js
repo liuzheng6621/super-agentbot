@@ -12,9 +12,11 @@ const S = {
   settings: {},
   probe: [],
   dir: "",
+  flowMode: "debate",
   tab: "plan",
   atBottom: true,
   pending: new Map(),
+  openStep: "",
 };
 
 /* ---------------- 工具 ---------------- */
@@ -238,12 +240,21 @@ function agentRowHtml(a, reserve = false) {
       : reserve
         ? command || a.title || "可随时接席"
         : a.title || a.role;
+  const h = a.health;
+  const healthTag =
+    a.mode !== "cli"
+      ? `<i class="tag health sim" title="内置模拟成员，不调用真实模型">SIM 演示</i>`
+      : !h
+        ? `<i class="tag health unknown" title="尚未体检，点左栏「体检并换真实席位」">? 未检</i>`
+        : h.ok
+          ? `<i class="tag health ok" title="${escapeHtml(h.note || "在线")}">✓ 可用</i>`
+          : `<i class="tag health bad" title="${escapeHtml(h.note || "不可用")}">✗ 不可用</i>`;
   return `<div class="agent-row ${reserve ? "reserve" : "seated"}" data-agent="${a.id}">
     <span class="avatar" style="--c:${a.color}">${initials(a.name)}<i class="dot ${a.status}"></i></span>
     <span class="agent-meta">
       <span class="agent-name">${escapeHtml(a.name)}
         <i class="tag role" data-role="${reserve ? "tool" : a.role}">${role}</i>
-        <i class="tag ${a.mode === "cli" ? "cli" : ""}">${a.mode === "cli" ? "CLI" : "SIM"}</i>
+        ${healthTag}
       </span>
       <span class="agent-role">${escapeHtml(detail)}</span>
     </span>
@@ -252,6 +263,33 @@ function agentRowHtml(a, reserve = false) {
       <button class="agent-edit" data-edit="${a.id}" title="编辑配置">⚙</button>
     </span>
   </div>`;
+}
+
+/* 体检并把执行席位换成真正跑得通的真实 CLI（配置好 API Key 后点一次） */
+async function refreshRealTeam() {
+  const btn = $("#realTeamBtn");
+  const label = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "体检中…";
+  try {
+    const r = await api("/api/team/refresh", { method: "POST", body: {} });
+    await refreshAgents();
+    const okCount = (r.health || []).filter((x) => x.ok).length;
+    if (r.changed) {
+      toast(
+        `${r.reason}（${r.seats.map((s) => `${ROLE_META[s.role]?.short || s.role}→${s.name}`).join(" · ")}）`,
+        "ok",
+      );
+    } else {
+      toast(`体检完成：${okCount} 个 CLI 可用；${r.reason}`, okCount ? "ok" : "");
+    }
+    await probeClis();
+  } catch (err) {
+    toast(`体检失败：${err.message}`, "err");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+  }
 }
 
 function renderAgents() {
@@ -376,7 +414,7 @@ function renderTopbar() {
 
   $("#composerTip").textContent = t
     ? "群聊 · @成员 指定回复"
-    : `自动编排 · ${S.agents.filter((a) => a.seat !== false).length} 个席位`;
+    : `自动编排 · ${S.flowMode === "direct" ? "直接开工" : "先讨论后实施"}`;
   $("#input").disabled = false;
   $("#input").placeholder = t
     ? "跟团队补充需求，或 @某位成员 单独拉他进来…"
@@ -411,7 +449,9 @@ function messageHtml(m) {
           m.meta.ms ? `<span>${fmtMs(m.meta.ms)}</span>` : ""
         }${m.engine === "cli" ? "<span>CLI</span>" : ""}</div>`
       : "";
-  return `<div class="msg ${isUser ? "user" : ""} ${m.done ? "" : "streaming"}" data-msg="${m.id}">
+  return `<div class="msg ${isUser ? "user" : ""} ${m.done ? "" : "streaming"}" data-msg="${m.id}" ${
+    stageOfMessage(m) ? `data-stage="${stageOfMessage(m)}"` : ""
+  }>
       ${isUser ? "" : `<span class="avatar" style="--c:${color}">${initials(m.name)}</span>`}
       <div class="msg-main">
         ${head}
@@ -432,7 +472,15 @@ function renderMessages() {
   }
   $("#hero").hidden = true;
   wrap.hidden = false;
-  wrap.innerHTML = t.messages.map(messageHtml).join("");
+  let lastStage = null;
+  wrap.innerHTML = t.messages
+    .map((m) => {
+      const st = stageOfMessage(m);
+      const sep = st && st !== lastStage ? flowSepHtml(st) : "";
+      if (st) lastStage = st;
+      return sep + messageHtml(m);
+    })
+    .join("");
   scrollToBottom(true);
 }
 
@@ -460,6 +508,171 @@ function scrollToBottom(force = false) {
       sc.scrollTop = sc.scrollHeight;
     });
   }
+}
+
+/* ---------------- 渲染：工作流主线 ---------------- */
+
+const FLOW_STAGES = [
+  { id: "debate", label: "方案讨论", en: "DEBATE", kinds: ["debate-intro", "proposal", "critique", "decision"], tab: "debate" },
+  { id: "plan", label: "需求拆解", en: "PLAN", kinds: ["plan"], tab: "plan" },
+  { id: "build", label: "架构与实施", en: "BUILD", kinds: ["architect", "coder", "tester"], tab: "plan" },
+  { id: "review", label: "质量评审", en: "REVIEW", kinds: ["reviewer", "quality"], tab: "plan" },
+  { id: "deliver", label: "交付收口", en: "DELIVER", kinds: ["summary"], tab: "files" },
+];
+
+function stageOfMessage(m) {
+  if (!m || m.kind === "user" || m.agentId === "user") return null;
+  return FLOW_STAGES.find((s) => s.kinds.includes(m.kind))?.id || null;
+}
+
+function stageOfStep(step) {
+  const id = step.id;
+  if (id === "debate") return "debate";
+  if (id === "plan") return "plan";
+  if (["design", "implement", "test-design"].includes(id)) return "build";
+  if (/^(review|fix-|retest-|re-review-)/.test(id)) return "review";
+  return "build";
+}
+
+function lastStageOf(list) {
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    const st = stageOfMessage(list[i]);
+    if (st) return st;
+  }
+  return null;
+}
+
+/** 从任务状态推导五个阶段：不新增后端字段，界面自己算，重启后依然准确。 */
+function deriveFlow(t) {
+  const stages = FLOW_STAGES.map((s) => ({ ...s, status: "pending", note: "", steps: [] }));
+  const byId = new Map(stages.map((s) => [s.id, s]));
+  const empty = { stages, current: null, doneSteps: 0, totalSteps: 0 };
+  if (!t) return empty;
+
+  const plan = t.plan || [];
+  for (const step of plan) {
+    const st = byId.get(stageOfStep(step));
+    if (st) st.steps.push(step);
+  }
+
+  for (const st of stages) {
+    if (st.id === "deliver" || !st.steps.length) continue;
+    const list = st.steps;
+    const any = (fn) => list.some(fn);
+    if (any((s) => ["running", "retrying", "queued"].includes(s.status))) st.status = "active";
+    else if (any((s) => ["error", "blocked", "stopped"].includes(s.status))) st.status = "error";
+    else if (list.every((s) => s.status === "done")) st.status = "done";
+    else if (list.every((s) => s.status === "skipped")) st.status = "skipped";
+    else if (any((s) => s.status === "done")) st.status = "active";
+  }
+
+  // 讨论阶段以 debate 状态为准，提案/质询期间工序还没进 plan
+  const debate = byId.get("debate");
+  const dStatus = t.debate?.status;
+  const debateStep = plan.find((s) => s.id === "debate");
+  if (dStatus === "skipped" || debateStep?.status === "skipped") {
+    debate.status = "skipped";
+    debate.note = t.debate?.reason || "本任务跳过了方案讨论";
+  } else if (dStatus === "decided" || debateStep?.status === "done") {
+    debate.status = "done";
+    debate.note = t.debate?.decision ? `采纳方案 ${t.debate.decision.winnerId}` : "已裁决";
+  } else if (["proposing", "critiquing", "deciding"].includes(dStatus)) {
+    debate.status = "active";
+    debate.note = DEBATE_STATUS[dStatus] || "进行中";
+    if (t.debate?.participants?.length) debate.note += ` · ${t.debate.participants.length} 位成员`;
+  } else if (dStatus === "failed" || dStatus === "stopped") {
+    debate.status = "error";
+    debate.note = DEBATE_STATUS[dStatus] || "讨论中断";
+  }
+
+  // 交付收口看最终状态或收口消息
+  const deliver = byId.get("deliver");
+  const hasSummary = (t.messages || []).some((m) => m.kind === "summary" && m.done);
+  if (["done", "needs_attention", "error", "stopped"].includes(t.status) || hasSummary) {
+    deliver.status = t.status === "error" || t.status === "stopped" ? "error" : "done";
+    deliver.note = STATUS_TEXT[t.status] || "已收口";
+  } else if (
+    t.status === "running" &&
+    stages.slice(0, 4).every((s) => s.status === "done" || s.status === "skipped")
+  ) {
+    deliver.status = "active";
+    deliver.note = "生成交付结论";
+  }
+
+  // 当前阶段的说明：优先显示正在执行的工序与负责人
+  for (const st of stages) {
+    if (st.status !== "active" || st.note) continue;
+    const running =
+      st.steps.find((s) => ["running", "retrying", "queued"].includes(s.status)) ||
+      [...st.steps].reverse().find((s) => s.status === "done");
+    if (running) {
+      const owner = S.agents.find((a) => a.id === running.agentId)?.name;
+      st.note = `${running.title}${owner ? ` · ${owner}` : ""}`;
+    }
+  }
+
+  return {
+    stages,
+    current: stages.find((s) => s.status === "active" || s.status === "error") || null,
+    doneSteps: plan.filter((s) => s.status === "done").length,
+    totalSteps: plan.length,
+  };
+}
+
+function flowSepHtml(stageId) {
+  const st = FLOW_STAGES.find((s) => s.id === stageId);
+  if (!st) return "";
+  return `<div class="flow-sep" data-stage="${st.id}"><span>${pad2(FLOW_STAGES.indexOf(st) + 1)} / ${st.label}</span><em>${st.en}</em></div>`;
+}
+
+function renderFlow() {
+  const bar = $("#flowbar");
+  if (!bar) return;
+  const t = S.task;
+  const ticker = $("#ticker");
+  if (!t || (!t.plan?.length && !t.messages?.length)) {
+    bar.hidden = true;
+    if (ticker) ticker.hidden = false;
+    return;
+  }
+  bar.hidden = false;
+  // 有任务时用真实阶段条替代装饰性跑马灯，减少噪音
+  if (ticker) ticker.hidden = true;
+  const flow = deriveFlow(t);
+  const mark = { done: "✓", active: "●", error: "!", skipped: "–", pending: "" };
+  $("#flowTrack").innerHTML = flow.stages
+    .map(
+      (s, i) => `<button class="flow-node" data-stage="${s.id}" data-status="${s.status}"
+        title="${escapeHtml(s.note || `${s.label} · ${STEP_STATUS_TEXT[s.status] || s.status}`)}">
+        <span class="fn-idx">${pad2(i + 1)}</span>
+        <span class="fn-body"><b>${s.label}</b><small>${s.en}</small></span>
+        <span class="fn-mark">${mark[s.status] || pad2(i + 1)}</span>
+      </button>`,
+    )
+    .join('<span class="flow-link" aria-hidden="true"></span>');
+
+  const cur = flow.current;
+  const mode = t.flowMode === "direct" ? "直接开工" : t.flowMode === "debate" ? "先讨论后实施" : "默认流程";
+  $("#flowNow").innerHTML = `
+    <span class="now-dot" data-status="${cur?.status || "pending"}"></span>
+    <span class="now-text">${
+      cur
+        ? `<b>${cur.label}</b> · ${escapeHtml(cur.note || STEP_STATUS_TEXT[cur.status] || "进行中")}`
+        : `<b>${escapeHtml(STATUS_TEXT[t.status] || t.status)}</b> · 全流程已走完`
+    }</span>
+    <span class="now-mode">${mode}</span>
+    <span class="now-progress">工序 ${flow.doneSteps}/${flow.totalSteps}</span>`;
+}
+
+function jumpToStage(stageId) {
+  const st = FLOW_STAGES.find((s) => s.id === stageId);
+  if (!st) return;
+  switchTab(st.tab);
+  closeDrawers();
+  const sep = $(`#timeline .flow-sep[data-stage="${stageId}"]`);
+  const msg = $(`#timeline .msg[data-stage="${stageId}"]`);
+  const target = sep || msg;
+  if (target) target.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 /* ---------------- 渲染：编排面板 ---------------- */
@@ -514,7 +727,34 @@ function renderPlan() {
         step.round ? `R${step.round} 返工` : "",
       ].filter(Boolean);
       const icon = step.status === "done" ? "✓" : step.status === "blocked" ? "×" : pad2(i + 1);
-      return `<div class="step" data-status="${step.status}" data-role="${step.role}">
+      const files = (t.artifacts || []).filter((f) => f.stepId === step.id);
+      const open = S.openStep === step.id;
+      const conclusion = (t.messages || [])
+        .filter((m) => m.done && m.text && m.meta?.step === step.title && m.kind !== "user")
+        .slice(-1)[0];
+      const elapsed =
+        step.startedAt && step.endedAt ? fmtMs(step.endedAt - step.startedAt) : "";
+      const detail = open
+        ? `<div class="step-detail">
+            <div class="sd-line"><em>状态</em><span>${escapeHtml(step.note || STEP_STATUS_TEXT[step.status] || step.status)}</span></div>
+            ${elapsed ? `<div class="sd-line"><em>耗时</em><span>${elapsed}</span></div>` : ""}
+            ${step.verdict ? `<div class="sd-line"><em>评审</em><span>${step.verdict === "pass" ? "PASS" : step.verdict === "fail" ? "FAIL" : "结论不明确"}</span></div>` : ""}
+            ${conclusion ? `<div class="sd-conclusion"><em>本步结论</em><p>${escapeHtml(conclusion.text.replace(/\s+/g, " ").slice(0, 260))}${conclusion.text.length > 260 ? "…" : ""}</p></div>` : ""}
+            <div class="sd-files"><em>产出 ${files.length} 个文件</em>
+              ${
+                files.length
+                  ? files
+                      .map(
+                        (f) =>
+                          `<button class="sd-file" data-step-file="${escapeHtml(f.path)}">${escapeHtml(f.path)} <i>${fmtBytes(f.bytes)}</i></button>`,
+                      )
+                      .join("")
+                  : '<span class="sd-empty">本步没有写入文件</span>'
+              }
+            </div>
+          </div>`
+        : "";
+      return `<div class="step ${open ? "open" : ""}" data-status="${step.status}" data-role="${step.role}" data-step="${step.id}">
         <span class="step-num">${icon}</span>
         <div class="step-title"><i class="step-role">${role}</i>${escapeHtml(step.title)}</div>
         <div class="step-sub">
@@ -523,6 +763,8 @@ function renderPlan() {
           <span>${escapeHtml(step.note || STEP_STATUS_TEXT[step.status] || "")}</span>
         </div>
         ${extras.length ? `<div class="step-deps">${extras.map((e) => `<span>${escapeHtml(e)}</span>`).join("")}</div>` : ""}
+        ${files.length ? `<div class="step-files">产出 ${files.length} 个文件 · 点击查看详情</div>` : ""}
+        ${detail}
       </div>`;
     })
     .join("");
@@ -676,14 +918,31 @@ function renderFiles() {
     return;
   }
   list.innerHTML = t.artifacts
-    .map(
-      (f) => `<div class="file-item" data-file="${escapeHtml(f.path)}">
+    .map((f) => {
+      const step = (t.plan || []).find((s) => s.id === f.stepId);
+      const owner = step ? `${ROLE_META[step.role]?.short || step.role} · ${step.title}` : "未关联工序";
+      return `<div class="file-item" data-file="${escapeHtml(f.path)}" title="${escapeHtml(owner)}">
         <span class="ext">${escapeHtml((f.lang || "txt").slice(0, 3))}</span>
-        <span class="file-name">${escapeHtml(f.path)}</span>
+        <span class="file-name">${escapeHtml(f.path)}<i>${escapeHtml(ROLE_META[step?.role]?.short || "")}</i></span>
         <span class="file-size">${fmtBytes(f.bytes)}</span>
-      </div>`,
-    )
+      </div>`;
+    })
     .join("");
+}
+
+async function previewWorkspaceFile(rel) {
+  if (!rel || !S.task) return;
+  try {
+    const { path, content } = await api(
+      `/api/tasks/${S.task.id}/file?path=${encodeURIComponent(rel)}`,
+    );
+    switchTab("files");
+    $("#fileViewPath").textContent = path;
+    $("#fileViewCode").textContent = content;
+    $("#fileView").hidden = false;
+  } catch (err) {
+    toast(err.message, "err");
+  }
 }
 
 function renderStats() {
@@ -778,6 +1037,112 @@ function renderContext() {
   `;
 }
 
+/* ---------------- 工作流设置 ---------------- */
+
+const FLOW_MODE_KEY = "agentforge:flowMode";
+
+const FLOW_NUM_FIELDS = [
+  ["setDebateParticipants", "debateParticipants", 2, 6, 4],
+  ["setDebateConcurrency", "debateConcurrency", 1, 4, 2],
+  ["setDebatePoolSeats", "debatePoolSeats", 0, 3, 1],
+  ["setMaxConcurrency", "maxConcurrency", 1, 4, 2],
+  ["setMaxRepairRounds", "maxRepairRounds", 0, 3, 1],
+  ["setMaxStepAttempts", "maxStepAttempts", 1, 3, 2],
+];
+
+const FLOW_PRESETS = {
+  fast: { debateEnabled: false, debateParticipants: 2, debateConcurrency: 2, debatePoolSeats: 0, maxConcurrency: 4, maxRepairRounds: 0, maxStepAttempts: 1 },
+  balanced: { debateEnabled: true, debateParticipants: 5, debateConcurrency: 2, debatePoolSeats: 1, maxConcurrency: 2, maxRepairRounds: 1, maxStepAttempts: 2 },
+  thorough: { debateEnabled: true, debateParticipants: 6, debateConcurrency: 4, debatePoolSeats: 2, maxConcurrency: 4, maxRepairRounds: 3, maxStepAttempts: 3 },
+};
+
+function currentFlowSettings() {
+  const s = S.settings || {};
+  return {
+    debateEnabled: s.debateEnabled !== false,
+    debateParticipants: Number(s.debateParticipants) || 4,
+    debateConcurrency: Number(s.debateConcurrency) || 2,
+    debatePoolSeats: Number(s.debatePoolSeats ?? 1),
+    maxConcurrency: Number(s.maxConcurrency) || 2,
+    maxRepairRounds: Number(s.maxRepairRounds ?? 1),
+    maxStepAttempts: Number(s.maxStepAttempts) || 2,
+  };
+}
+
+function fillFlowForm(values) {
+  for (const [id, key, min, max, fallback] of FLOW_NUM_FIELDS) {
+    const el = $(`#${id}`);
+    if (!el) continue;
+    el.innerHTML = Array.from({ length: max - min + 1 }, (_, i) => {
+      const n = min + i;
+      return `<option value="${n}">${n}${n === fallback ? " · 默认" : ""}</option>`;
+    }).join("");
+    el.value = String(values[key] ?? fallback);
+  }
+  $("#setDebateEnabled").checked = values.debateEnabled !== false;
+}
+
+function readFlowForm() {
+  const out = { debateEnabled: $("#setDebateEnabled").checked };
+  for (const [id, key] of FLOW_NUM_FIELDS) out[key] = Number($(`#${id}`).value);
+  return out;
+}
+
+function openFlowSettings() {
+  fillFlowForm(currentFlowSettings());
+  $("#flowSaveHint").textContent = "";
+  $("#flowModal").showModal();
+}
+
+async function saveFlowSettings() {
+  const btn = $("#flowSave");
+  const patch = readFlowForm();
+  btn.disabled = true;
+  $("#flowSaveHint").textContent = "保存中…";
+  try {
+    const { settings } = await api("/api/settings", { method: "PATCH", body: patch });
+    S.settings = settings;
+    renderFlowModeControls();
+    $("#flowSaveHint").textContent = "已保存，下个任务生效";
+    toast("工作流设置已保存", "ok");
+    setTimeout(() => $("#flowModal").close(), 450);
+  } catch (err) {
+    $("#flowSaveHint").textContent = `保存失败：${err.message}`;
+    toast(`保存失败：${err.message}`, "err");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/** 开工方式选择：全局讨论关闭时，默认值也跟着变，避免"选了先讨论却没讨论"。 */
+function renderFlowModeControls() {
+  const globalOn = S.settings?.debateEnabled !== false;
+  const mode = S.flowMode === "direct" ? "direct" : "debate";
+  S.flowMode = mode;
+  $$("#heroMode .fm, #composerMode .fm").forEach((b) => {
+    b.classList.toggle("active", b.dataset.mode === mode);
+    if (b.dataset.mode === "debate") {
+      b.title = globalOn
+        ? "多位成员各出方案、交叉评分，选出最优再实施"
+        : "全局讨论已关闭；仍选它可为这个任务单独开启讨论";
+    }
+  });
+  const tip = $("#composerTip");
+  if (tip && !S.task) {
+    tip.textContent = `自动编排 · ${mode === "direct" ? "直接开工" : "先讨论后实施"}`;
+  }
+}
+
+function setFlowMode(mode) {
+  S.flowMode = mode === "direct" ? "direct" : "debate";
+  try {
+    localStorage.setItem(FLOW_MODE_KEY, S.flowMode);
+  } catch {
+    /* ignore */
+  }
+  renderFlowModeControls();
+}
+
 /* ---------------- 渲染总入口 ---------------- */
 
 function renderAll() {
@@ -790,6 +1155,7 @@ function renderAll() {
   renderFiles();
   renderStats();
   renderContext();
+  renderFlow();
 }
 
 /* ---------------- 任务操作 ---------------- */
@@ -800,6 +1166,7 @@ async function selectTask(id) {
     const { task } = await api(`/api/tasks/${id}`);
     S.task = task;
     S.atBottom = true;
+    S.openStep = "";
     // 换任务时关掉上一个任务的产物预览，避免内容错位
     $("#fileView").hidden = true;
     $("#fileViewPath").textContent = "—";
@@ -836,15 +1203,17 @@ async function createTask(goal) {
   }
   try {
     $("#heroStart").disabled = true;
-    const body = { goal: text };
+    const body = { goal: text, flowMode: S.flowMode === "direct" ? "direct" : "debate" };
     if (S.dir) body.workspace = S.dir;
     const { task } = await api("/api/tasks", { method: "POST", body });
     S.task = task;
     if (!S.tasks.find((t) => t.id === task.id)) S.tasks.unshift({ ...task });
     $("#heroInput").value = "";
     $("#input").value = "";
+    // 直接开工没有讨论可看，落到执行链路；先讨论则停在讨论页看提案
+    switchTab(S.flowMode === "direct" ? "plan" : "debate");
     renderAll();
-    toast("团队已开工", "ok");
+    toast(S.flowMode === "direct" ? "团队已按「直接开工」开工" : "团队已开工，先出方案再实施", "ok");
   } catch (err) {
     toast(`创建失败：${err.message}`, "err");
   } finally {
@@ -920,6 +1289,7 @@ function handleEvent(ev) {
         renderTopbar();
         renderPlan();
         renderStats();
+        renderFlow();
       }
       renderTasks();
       break;
@@ -928,6 +1298,7 @@ function handleEvent(ev) {
       if (cur && cur.id === ev.taskId) {
         cur.plan = ev.plan;
         renderPlan();
+        renderFlow();
         // 同步左侧历史条上的进度，否则永远停在 0/0
         const summary = S.tasks.find((t) => t.id === ev.taskId);
         if (summary) {
@@ -943,17 +1314,28 @@ function handleEvent(ev) {
         cur.debate = ev.debate;
         renderDebate();
         renderPlan();
+        renderFlow();
       }
+      break;
+    }
+    case "settings.changed": {
+      S.settings = ev.settings || {};
+      renderFlowModeControls();
       break;
     }
     case "message.start": {
       if (cur && cur.id === ev.taskId) {
+        const prevStage = lastStageOf(cur.messages);
         cur.messages.push(ev.message);
-        if (cur.messages.length === 1) renderMessages();
-        else {
-          $("#timeline").insertAdjacentHTML("beforeend", messageHtml(ev.message));
+        if (cur.messages.length === 1) {
+          renderMessages();
+        } else {
+          const st = stageOfMessage(ev.message);
+          const sep = st && st !== prevStage ? flowSepHtml(st) : "";
+          $("#timeline").insertAdjacentHTML("beforeend", sep + messageHtml(ev.message));
           scrollToBottom();
         }
+        renderFlow();
       }
       break;
     }
@@ -989,6 +1371,7 @@ function handleEvent(ev) {
         msg.meta = ev.meta;
         patchMessage(msg);
         renderStats();
+        renderFlow();
       }
       break;
     }
@@ -1020,13 +1403,23 @@ function handleEvent(ev) {
       refreshAgents();
       break;
     }
+    case "team.updated": {
+      refreshAgents();
+      if (ev.seats?.length) {
+        const names = [...new Set(ev.seats.map((s) => s.name))];
+        toast(`执行席位已换成真实 CLI：${names.join("、")}`, "ok");
+      }
+      break;
+    }
     case "task.deleted": {
       S.tasks = S.tasks.filter((t) => t.id !== ev.taskId);
       if (cur && cur.id === ev.taskId) {
         S.task = null;
+        S.openStep = "";
         renderAll();
       }
       renderTasks();
+      renderFlow();
       break;
     }
     default:
@@ -1345,6 +1738,7 @@ function bind() {
   /* 新建任务 */
   $("#newTaskBtn").addEventListener("click", () => {
     S.task = null;
+    S.openStep = "";
     renderAll();
     $("#heroInput").focus();
     closeDrawers();
@@ -1477,8 +1871,11 @@ function bind() {
   $("#runBtn").addEventListener("click", async () => {
     if (!S.task) return;
     try {
-      await api(`/api/tasks/${S.task.id}/run`, { method: "POST", body: {} });
-      toast("已重新编排", "ok");
+      await api(`/api/tasks/${S.task.id}/run`, {
+        method: "POST",
+        body: { flowMode: S.flowMode === "direct" ? "direct" : "debate" },
+      });
+      toast(S.flowMode === "direct" ? "已按「直接开工」重新编排" : "已按「先讨论后实施」重新编排", "ok");
     } catch (err) {
       toast(err.message, "err");
     }
@@ -1494,25 +1891,52 @@ function bind() {
     }
   });
 
+  /* 工作流主线：阶段跳转 / 工序展开 / 开工方式 / 参数设置 */
+  $("#flowTrack").addEventListener("click", (e) => {
+    const node = e.target.closest(".flow-node");
+    if (node) jumpToStage(node.dataset.stage);
+  });
+  $("#planList").addEventListener("click", (e) => {
+    const file = e.target.closest("[data-step-file]");
+    if (file) {
+      previewWorkspaceFile(file.dataset.stepFile);
+      return;
+    }
+    const stepEl = e.target.closest(".step[data-step]");
+    if (stepEl) {
+      S.openStep = S.openStep === stepEl.dataset.step ? "" : stepEl.dataset.step;
+      renderPlan();
+    }
+  });
+  $("#heroMode").addEventListener("click", (e) => {
+    const btn = e.target.closest(".fm");
+    if (btn) setFlowMode(btn.dataset.mode);
+  });
+  $("#composerMode").addEventListener("click", (e) => {
+    const btn = e.target.closest(".fm");
+    if (btn) setFlowMode(btn.dataset.mode);
+  });
+  $("#flowSettingsBtn").addEventListener("click", openFlowSettings);
+  $("#flowSave").addEventListener("click", saveFlowSettings);
+  $("#flowModalClose").addEventListener("click", () => $("#flowModal").close());
+  $("#flowModalCancel").addEventListener("click", () => $("#flowModal").close());
+  $("#flowModal").addEventListener("click", (e) => {
+    const preset = e.target.closest("[data-preset]");
+    if (!preset) return;
+    fillFlowForm(FLOW_PRESETS[preset.dataset.preset] || FLOW_PRESETS.balanced);
+    $$("#flowModal [data-preset]").forEach((b) => b.classList.toggle("active", b === preset));
+    $("#flowSaveHint").textContent = "已套用预设，点保存后生效";
+  });
+
   /* 面板 */
   $("#tabs").addEventListener("click", (e) => {
     const tab = e.target.closest(".tab");
     if (tab) switchTab(tab.dataset.tab);
   });
 
-  $("#fileList").addEventListener("click", async (e) => {
+  $("#fileList").addEventListener("click", (e) => {
     const item = e.target.closest(".file-item");
-    if (!item || !S.task) return;
-    try {
-      const { path, content } = await api(
-        `/api/tasks/${S.task.id}/file?path=${encodeURIComponent(item.dataset.file)}`,
-      );
-      $("#fileViewPath").textContent = path;
-      $("#fileViewCode").textContent = content;
-      $("#fileView").hidden = false;
-    } catch (err) {
-      toast(err.message, "err");
-    }
+    if (item) previewWorkspaceFile(item.dataset.file);
   });
   $("#fileClose").addEventListener("click", () => {
     $("#fileView").hidden = true;
@@ -1539,6 +1963,7 @@ function bind() {
   $("#probeBtn").addEventListener("click", probeClis);
   $("#adoptBtn").addEventListener("click", adoptAll);
   $("#rebalanceBtn").addEventListener("click", smartRebalance);
+  $("#realTeamBtn").addEventListener("click", refreshRealTeam);
 
   /* 工作目录 */
   $("#dirPick").addEventListener("click", openDirModal);
@@ -1609,6 +2034,12 @@ async function boot() {
   } catch {
     /* ignore */
   }
+  try {
+    const savedMode = localStorage.getItem(FLOW_MODE_KEY);
+    if (savedMode === "direct" || savedMode === "debate") S.flowMode = savedMode;
+  } catch {
+    /* ignore */
+  }
   renderDirPick();
 
   let night = false;
@@ -1625,12 +2056,15 @@ async function boot() {
     S.tasks = state.tasks;
     S.settings = state.settings || {};
     if (state.activeTask) S.task = state.activeTask;
+    S.openStep = "";
+    renderFlowModeControls();
     renderAll();
     renderStats();
     connect();
-    // 支持 #debate 这类深链，方便直接打开方案讨论
+    // 默认落在执行链路；支持 #debate / #settings 这类深链直接打开对应面板
     const hashTab = location.hash.replace("#", "");
-    if (["context", "debate", "plan", "files", "stats"].includes(hashTab)) switchTab(hashTab);
+    if (hashTab === "settings") openFlowSettings();
+    else switchTab(["context", "debate", "plan", "files", "stats"].includes(hashTab) ? hashTab : S.tab);
   } catch (err) {
     $("#connState").textContent = "服务未启动";
     toast(`无法连接后端：${err.message}`, "err");

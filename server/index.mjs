@@ -5,6 +5,7 @@ import { store, ROOT, DATA_DIR, WORKSPACE_DIR } from './store.mjs';
 import { startTask, stopTask, chat, listWorkspaceFiles, buildContextPack, isRunning } from './orchestrator.mjs';
 import { probeClis, spawnCli } from './adapters.mjs';
 import { adoptInstalledClis, rebalanceTeam } from './adopt.mjs';
+import { ensureRealTeam, refreshTeam } from './team.mjs';
 
 const PORT = Number(process.env.PORT || 8787);
 // 本地桌面场景只监听回环；被托管平台注入 PORT 时（容器 / 云沙箱）需要对外绑定
@@ -144,6 +145,12 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    /* ---- 工作流参数（界面可视化配置，替代手改 db.json） ---- */
+    if (pathname === '/api/settings' && method === 'PATCH') {
+      const body = await readBody(req);
+      return json(res, 200, { settings: store.updateSettings(body || {}) });
+    }
+
     /* ---- 全量状态 ---- */
     if (pathname === '/api/state' && method === 'GET') {
       const tasks = store.tasks.map((t) => store.taskSummary(t));
@@ -229,6 +236,13 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/agents/rebalance' && method === 'POST') {
       return json(res, 200, { assignments: rebalanceTeam(), agents: store.agents });
     }
+    // 把内置演示席位换成真实 CLI：ensure 只补齐内置席位，refresh 强制重体检并重组
+    if (pathname === '/api/team/ensure' && method === 'POST') {
+      return json(res, 200, await ensureRealTeam());
+    }
+    if (pathname === '/api/team/refresh' && method === 'POST') {
+      return json(res, 200, await refreshTeam());
+    }
 
     const agentMatch = pathname.match(/^\/api\/agents\/([\w-]+)(\/test)?$/);
     if (agentMatch) {
@@ -267,6 +281,7 @@ const server = http.createServer(async (req, res) => {
           goal,
           mode: body.mode === 'manual' ? 'manual' : 'auto',
           workspace: typeof body.workspace === 'string' ? body.workspace : '',
+          debate: body.flowMode === 'direct' || body.flowMode === 'debate' ? body.flowMode : null,
         });
       } catch (err) {
         return json(res, 400, { error: err.message });
@@ -292,6 +307,12 @@ const server = http.createServer(async (req, res) => {
       if (action === 'run' && method === 'POST') {
         const body = await readBody(req);
         if (isRunning(task.id)) return json(res, 409, { error: '该任务正在协作中' });
+        // 重新编排时允许顺带改流程模式（先讨论 / 直接开工），不必删掉重开任务
+        if (body.flowMode === 'direct' || body.flowMode === 'debate') {
+          store.updateTask(task.id, { flowMode: body.flowMode });
+        } else if (body.flowMode === null) {
+          store.updateTask(task.id, { flowMode: null });
+        }
         startTask(task.id, { speed: Number(body.speed) || 1 }).catch((e) =>
           console.error('[startTask]', e),
         );
@@ -455,4 +476,17 @@ server.listen(PORT, HOST, () => {
   console.log(`  ➜  http://${HOST}:${PORT}`);
   console.log(`  ➜  工作区: ${path.join(DATA_DIR, 'workspaces')}`);
   console.log('');
+  // 后台把内置演示席位换成体检通过的真实 CLI；体检较慢，不阻塞服务可用
+  setTimeout(() => {
+    ensureRealTeam()
+      .then((r) => {
+        if (r.changed) {
+          console.log(`  ➜  真实席位: ${r.seats.map((s) => `${s.role}→${s.name}`).join('、')}`);
+          console.log(`  ➜  ${r.reason}`);
+        } else {
+          console.log(`  ➜  团队: ${r.reason}`);
+        }
+      })
+      .catch((err) => console.warn('  !  组建真实团队失败: ' + err.message));
+  }, 200);
 });

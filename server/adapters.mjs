@@ -92,7 +92,8 @@ export function spawnCli(agent, prompt, { cwd, onChunk, timeout = 180000, signal
           shell: false,
           windowsHide: true,
           env,
-          stdio: ['pipe', 'pipe', 'pipe'],
+          // prompt 已在参数里时不给 stdin 管道：codex 会一直等「Reading additional input from stdin...」不退出
+          stdio: [passByStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
         });
       } else {
         // .cmd / .bat 只能过 cmd.exe，先把代码页切到 UTF-8，否则中文参数会乱码
@@ -102,7 +103,7 @@ export function spawnCli(agent, prompt, { cwd, onChunk, timeout = 180000, signal
           shell: true,
           windowsHide: true,
           env,
-          stdio: ['pipe', 'pipe', 'pipe'],
+          stdio: [passByStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
         });
       }
     } catch (err) {
@@ -110,11 +111,11 @@ export function spawnCli(agent, prompt, { cwd, onChunk, timeout = 180000, signal
       return;
     }
 
-    // 必须把 stdin 交完就关掉：codex / aider 这类 CLI 会打印
-    // "Reading additional input from stdin..." 然后一直阻塞到超时。
+    // 必须把 stdin 交完就关掉：aider 这类 CLI 会一直读到超时。
+    // prompt 在参数里时 stdin 是 ignore（null），用可选链避免抛错。
     try {
-      if (passByStdin) child.stdin.end(`${prompt}\n`);
-      else child.stdin.end();
+      if (passByStdin) child.stdin?.end(`${prompt}\n`);
+      else child.stdin?.end();
     } catch {
       /* 子进程可能已退出 */
     }

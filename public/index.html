@@ -50,11 +50,12 @@
               <em id="probeState">未探测</em>
             </header>
             <div class="probe-list" id="probeList">
-              <p class="hint">扫描本机 claude / codex / kimi / gemini 等命令行工具，一键挂成智能体。</p>
+              <p class="hint">扫描本机 claude / codex / kimi / gemini 等命令行工具；体检会真实调用一次，只有跑通的才会占执行席位。</p>
             </div>
             <button class="link-btn" id="probeBtn">扫描本机 CLI</button>
             <button class="link-btn" id="adoptBtn">接入工具池</button>
             <button class="link-btn" id="rebalanceBtn">智能分工</button>
+            <button class="link-btn" id="realTeamBtn">体检并换真实席位</button>
           </section>
 
           <section class="rail-section grow">
@@ -85,6 +86,7 @@
               <span class="pill" id="statusPill" data-status="idle">待命</span>
               <button class="btn btn-ghost" id="runBtn" hidden>重新编排</button>
               <button class="btn btn-ghost danger" id="stopBtn" hidden>停止</button>
+              <button class="icon-btn" id="flowSettingsBtn" title="工作流设置" aria-label="工作流设置">⚙</button>
               <button class="shift-switch" id="shiftBtn" aria-pressed="false" aria-label="切换夜巡模式">
                 <span class="shift-icon" aria-hidden="true">☾</span>
                 <span class="shift-copy"><small>SHIFT</small><b id="shiftLabel">DAY</b></span>
@@ -94,7 +96,12 @@
             </div>
           </header>
 
-          <div class="ticker" aria-hidden="true">
+          <div class="flowbar" id="flowbar" hidden>
+            <div class="flow-track" id="flowTrack"></div>
+            <div class="flow-now" id="flowNow"></div>
+          </div>
+
+          <div class="ticker" id="ticker" aria-hidden="true">
             <div class="ticker-track">
               <span>规划 PLANNER</span><b>✳</b><span>架构 ARCHITECT</span><b>✳</b><span>实现 CODER</span><b>✳</b>
               <span>测试 TESTER</span><b>✳</b><span>并行 PARALLEL</span><b>✳</b><span>质量门 GATE</span><b>✳</b><span>评审 REVIEWER</span><b>✳</b><span>产物 ARTIFACTS</span><b>✳</b>
@@ -124,6 +131,10 @@
                 <textarea id="heroInput" rows="3" placeholder="例如：做一个支持并发安全的待办清单 API，带单元测试和技术方案文档"></textarea>
                 <div class="hero-compose-foot">
                   <span class="kbd-hint"><kbd>Ctrl</kbd><kbd>↵</kbd> 直接开工</span>
+                  <div class="flow-mode" id="heroMode" role="group" aria-label="开工方式">
+                    <button class="fm active" data-mode="debate" title="多位成员各出方案、交叉评分，选出最优再实施">先讨论</button>
+                    <button class="fm" data-mode="direct" title="跳过方案讨论，按固定工序直接实施">直接开工</button>
+                  </div>
                   <button class="btn btn-primary" id="heroStart">开工 →</button>
                 </div>
               </div>
@@ -158,6 +169,10 @@
                   <span class="dir-ico">📁</span>
                   <span class="dir-label" id="dirLabel">自动新建工作区</span>
                 </button>
+                <div class="flow-mode mini" id="composerMode" role="group" aria-label="开工方式">
+                  <button class="fm active" data-mode="debate">先讨论</button>
+                  <button class="fm" data-mode="direct">直接开工</button>
+                </div>
                 <div class="mention-list" id="mentionList"></div>
                 <div class="composer-right">
                   <span class="tip" id="composerTip">自动编排 · 5 位成员</span>
@@ -319,6 +334,62 @@
           <footer class="modal-foot">
             <button type="button" class="btn btn-ghost" id="dirReset">用自动工作区</button>
             <button type="button" class="btn btn-primary" id="dirConfirm">用这个目录</button>
+          </footer>
+        </div>
+      </dialog>
+
+      <dialog class="modal" id="flowModal">
+        <div class="modal-inner">
+          <header class="modal-head">
+            <h3>工作流设置</h3>
+            <button type="button" class="icon-btn" id="flowModalClose" aria-label="关闭">×</button>
+          </header>
+          <div class="modal-body">
+            <p class="hint flow-intro">改完立即生效，作用于之后新建的任务；进行中的任务不受影响。</p>
+
+            <h4 class="flow-sec">默认流程</h4>
+            <label class="flow-row">
+              <span class="fr-main">方案讨论<b>多成员提案 → 交叉评分 → 裁决后实施</b></span>
+              <input type="checkbox" id="setDebateEnabled" class="switch" />
+            </label>
+
+            <h4 class="flow-sec">讨论规模</h4>
+            <div class="flow-grid">
+              <label class="field"><span>参与人数<em>2–6 人</em></span>
+                <select id="setDebateParticipants"></select>
+              </label>
+              <label class="field"><span>讨论并发<em>同时提案人数</em></span>
+                <select id="setDebateConcurrency"></select>
+              </label>
+              <label class="field"><span>工具池席位<em>额外拉入的 CLI 数</em></span>
+                <select id="setDebatePoolSeats"></select>
+              </label>
+            </div>
+
+            <h4 class="flow-sec">执行与收敛</h4>
+            <div class="flow-grid">
+              <label class="field"><span>工序并发<em>并行执行的工序数</em></span>
+                <select id="setMaxConcurrency"></select>
+              </label>
+              <label class="field"><span>返工轮次<em>评审不通过时</em></span>
+                <select id="setMaxRepairRounds"></select>
+              </label>
+              <label class="field"><span>单步重试<em>CLI 超时后</em></span>
+                <select id="setMaxStepAttempts"></select>
+              </label>
+            </div>
+
+            <div class="flow-preset">
+              <span>快速预设</span>
+              <button class="btn btn-ghost sm" data-preset="fast">快速</button>
+              <button class="btn btn-ghost sm" data-preset="balanced">均衡</button>
+              <button class="btn btn-ghost sm" data-preset="thorough">严谨</button>
+            </div>
+          </div>
+          <footer class="modal-foot">
+            <span class="flow-save-hint" id="flowSaveHint"></span>
+            <button type="button" class="btn btn-ghost" id="flowModalCancel">取消</button>
+            <button class="btn btn-primary" id="flowSave">保存设置</button>
           </footer>
         </div>
       </dialog>

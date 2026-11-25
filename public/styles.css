@@ -114,6 +114,11 @@
   outline-offset: 2px;
 }
 
+/* 组件用 display:flex/grid 时也要尊重 hidden 属性，否则空态会残留旧内容 */
+[hidden] {
+  display: none !important;
+}
+
 html,
 body {
   height: 100%;
@@ -300,6 +305,7 @@ body {
 }
 
 kbd {
+  flex: none;
   font-family: var(--f-pixel);
   font-size: 10px;
   padding: 1px 4px;
@@ -606,6 +612,34 @@ kbd {
   color: var(--orange);
 }
 
+/* 体检状态：一眼区分「真能跑的 CLI」和「只是装了 / 内置演示」 */
+.agent-name .tag.health.ok {
+  background: #bbf7d0;
+  border-color: #15803d;
+  color: #14532d;
+}
+.agent-name .tag.health.bad {
+  background: #fecaca;
+  border-color: #b91c1c;
+  color: #7f1d1d;
+}
+.agent-name .tag.health.unknown,
+.agent-name .tag.health.sim {
+  background: var(--sunken);
+  border-color: var(--muted);
+  color: var(--muted);
+}
+.page.night .agent-name .tag.health.ok {
+  background: #14532d;
+  border-color: #4ade80;
+  color: #bbf7d0;
+}
+.page.night .agent-name .tag.health.bad {
+  background: #7f1d1d;
+  border-color: #f87171;
+  color: #fecaca;
+}
+
 .agent-role {
   font-size: 10.5px;
   color: var(--muted);
@@ -828,6 +862,9 @@ kbd {
   font-size: 9.5px;
   letter-spacing: 1.4px;
   color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .topbar-title {
@@ -1183,9 +1220,77 @@ kbd {
 .kbd-hint {
   display: flex;
   align-items: center;
+  flex: none;
   gap: 4px;
+  white-space: nowrap;
   font-size: 10.5px;
   color: var(--muted);
+}
+
+.hero-compose-foot .flow-mode {
+  flex: none;
+  margin-left: auto;
+}
+
+@media (max-width: 560px) {
+  .topbar {
+    padding-inline: 10px;
+    gap: 8px;
+  }
+
+  /* 窄屏优先保证标题和操作可用：副标题、跑马灯让位 */
+  .topbar-sub {
+    display: none;
+  }
+
+  .topbar-actions {
+    gap: 6px;
+  }
+
+  .topbar-actions .btn {
+    padding-inline: 8px;
+    font-size: 11px;
+  }
+
+  .shift-copy {
+    display: none;
+  }
+
+  .flow-node {
+    min-width: 78px;
+    padding-inline: 6px;
+  }
+
+  .fn-body b {
+    font-size: 11px;
+  }
+
+  .flow-now {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+
+  .now-text {
+    flex-basis: 100%;
+    white-space: normal;
+  }
+
+  .now-mode,
+  .now-progress {
+    font-size: 9px;
+  }
+}
+
+@media (max-width: 520px) {
+  .hero-compose-foot {
+    flex-wrap: wrap;
+  }
+  .hero-compose-foot .kbd-hint {
+    display: none;
+  }
+  .hero-compose-foot .flow-mode {
+    margin-left: 0;
+  }
 }
 
 .chips {
@@ -2946,4 +3051,543 @@ kbd {
 
 .msg-badge.decision {
   background: var(--leaf);
+}
+
+/* ================= 工作流主线 ================= */
+.flowbar {
+  flex: none;
+  border-bottom: 2px solid var(--edge);
+  background: var(--card);
+}
+
+.flow-track {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  padding: 7px 12px 6px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.flow-node {
+  flex: 1 1 0;
+  min-width: 96px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border: 2px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--f-body);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.flow-node:hover {
+  background: var(--sunken);
+  color: var(--fg);
+}
+
+.flow-node[data-status="done"] {
+  color: var(--fg);
+}
+
+.flow-node[data-status="active"] {
+  border-color: var(--edge);
+  background: var(--yellow);
+  color: var(--edge);
+  box-shadow: 2px 2px 0 var(--hard);
+}
+
+.flow-node[data-status="error"] {
+  color: var(--orange);
+  border-color: var(--orange);
+}
+
+.flow-node[data-status="skipped"] {
+  opacity: 0.55;
+}
+
+.fn-idx {
+  font-family: var(--f-pixel);
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+.fn-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.fn-body b {
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.fn-body small {
+  font-family: var(--f-pixel);
+  font-size: 8.5px;
+  letter-spacing: 0.6px;
+  opacity: 0.7;
+}
+
+.fn-mark {
+  margin-left: 2px;
+  font-family: var(--f-pixel);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.flow-link {
+  flex: none;
+  align-self: center;
+  width: 14px;
+  height: 2px;
+  background: repeating-linear-gradient(to right, var(--muted) 0 3px, transparent 3px 6px);
+  opacity: 0.6;
+}
+
+.flow-now {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 14px;
+  border-top: 1px dashed var(--edge);
+  background: var(--sunken);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.now-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid var(--edge);
+  background: var(--muted);
+  border-radius: 50%;
+}
+
+.now-dot[data-status="active"] {
+  background: var(--orange);
+  animation: now-pulse 1.3s ease-in-out infinite;
+}
+
+.now-dot[data-status="done"] {
+  background: var(--leaf);
+}
+
+.now-dot[data-status="error"] {
+  background: var(--orange);
+}
+
+@keyframes now-pulse {
+  50% { opacity: 0.35; }
+}
+
+.now-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.now-text b {
+  color: var(--fg);
+}
+
+.now-mode,
+.now-progress {
+  flex: none;
+  padding: 1px 6px;
+  border: 1px solid var(--edge);
+  background: var(--card);
+  font-family: var(--f-pixel);
+  font-size: 9.5px;
+  color: var(--fg);
+}
+
+.now-progress {
+  border-color: var(--muted);
+  color: var(--muted);
+}
+
+/* 时间线阶段分隔 */
+.flow-sep {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 22px 0 12px;
+  padding: 4px 0;
+  border-top: 2px solid var(--edge);
+  border-bottom: 1px dashed var(--edge);
+  background: var(--band);
+  color: var(--band-fg);
+  font-family: var(--f-pixel);
+  font-size: 11px;
+  letter-spacing: 0.8px;
+}
+
+.flow-sep::before {
+  content: "✳";
+  margin-left: 10px;
+  color: var(--leaf);
+}
+
+.flow-sep span {
+  font-weight: 700;
+}
+
+.flow-sep em {
+  margin-left: auto;
+  margin-right: 10px;
+  font-style: normal;
+  opacity: 0.65;
+}
+
+.page.night .flow-sep::before {
+  color: var(--orange);
+}
+
+/* 开工方式切换 */
+.flow-mode {
+  display: inline-flex;
+  border: 2px solid var(--edge);
+  background: var(--card);
+  flex: none;
+}
+
+.flow-mode .fm {
+  padding: 4px 10px;
+  border: 0;
+  border-right: 2px solid var(--edge);
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--f-body);
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.flow-mode .fm:last-child {
+  border-right: 0;
+}
+
+.flow-mode .fm.active {
+  background: var(--leaf);
+  color: var(--edge);
+}
+
+.flow-mode .fm:hover:not(.active) {
+  background: var(--sunken);
+  color: var(--fg);
+}
+
+.flow-mode.mini .fm {
+  padding: 2px 7px;
+  font-size: 10.5px;
+}
+
+.hero-compose-foot .flow-mode {
+  flex: none;
+  margin-left: auto;
+}
+
+/* 工序展开详情 */
+.step[data-step] {
+  cursor: pointer;
+}
+
+.step[data-step]:hover .step-title {
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+}
+
+.step.open {
+  padding-bottom: 12px;
+}
+
+.step-files {
+  margin-top: 4px;
+  font-size: 10.5px;
+  color: var(--blue);
+}
+
+.step-detail {
+  margin-top: 8px;
+  padding: 8px;
+  border: 2px solid var(--edge);
+  background: var(--sunken);
+  cursor: default;
+}
+
+.sd-line {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 11px;
+}
+
+.sd-line em,
+.sd-conclusion em,
+.sd-files em {
+  flex: none;
+  width: 56px;
+  font-family: var(--f-pixel);
+  font-size: 9.5px;
+  font-style: normal;
+  color: var(--muted);
+}
+
+.sd-line span {
+  color: var(--fg);
+}
+
+.sd-conclusion {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--edge);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.sd-conclusion p {
+  margin: 2px 0 0;
+  color: var(--fg);
+}
+
+.sd-conclusion em {
+  display: block;
+  width: auto;
+}
+
+.sd-files {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--edge);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+}
+
+.sd-files em {
+  width: auto;
+}
+
+.sd-file {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 6px;
+  border: 1px solid var(--edge);
+  background: var(--card);
+  color: var(--blue);
+  font-family: var(--f-code);
+  font-size: 10.5px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sd-file:hover {
+  background: var(--yellow);
+  color: var(--edge);
+}
+
+.sd-file i {
+  flex: none;
+  font-style: normal;
+  color: var(--muted);
+}
+
+.sd-empty {
+  color: var(--muted);
+}
+
+.file-name i {
+  margin-left: 6px;
+  padding: 0 3px;
+  border: 1px solid var(--muted);
+  font-size: 9px;
+  font-style: normal;
+  color: var(--muted);
+}
+
+/* 工作流设置弹窗 */
+.flow-intro {
+  margin: 0 0 6px;
+}
+
+.flow-sec {
+  margin: 14px 0 8px;
+  padding-bottom: 4px;
+  border-bottom: 2px solid var(--edge);
+  font-family: var(--f-pixel);
+  font-size: 11px;
+  letter-spacing: 0.6px;
+  color: var(--fg);
+}
+
+.flow-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px;
+  border: 2px solid var(--edge);
+  background: var(--sunken);
+}
+
+.fr-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.fr-main b {
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.switch {
+  flex: none;
+  width: 40px;
+  height: 22px;
+  appearance: none;
+  border: 2px solid var(--edge);
+  background: var(--card);
+  cursor: pointer;
+  position: relative;
+}
+
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  background: var(--muted);
+  transition: transform 0.15s;
+}
+
+.switch:checked {
+  background: var(--leaf);
+}
+
+.switch:checked::after {
+  transform: translateX(18px);
+  background: var(--edge);
+}
+
+.flow-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.flow-grid .field > span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 11.5px;
+}
+
+.flow-grid .field em {
+  font-size: 9.5px;
+  font-style: normal;
+  color: var(--muted);
+}
+
+.flow-preset {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 14px;
+  padding: 8px;
+  border: 2px dashed var(--edge);
+  background: var(--sunken);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.flow-preset > span {
+  margin-right: auto;
+  font-weight: 700;
+  color: var(--fg);
+}
+
+.flow-preset .active {
+  background: var(--leaf);
+  color: var(--edge);
+}
+
+.flow-save-hint {
+  margin-right: auto;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+@media (max-width: 900px) {
+  .flow-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .flow-node {
+    min-width: 84px;
+  }
+  .fn-body small {
+    display: none;
+  }
+}
+
+/* 夜间：阶段条提高对比度，避免深底上灰字发糊 */
+.page.night .flow-node {
+  color: #a9cbc2;
+}
+
+.page.night .flow-node[data-status="done"] {
+  color: #e9fff2;
+}
+
+.page.night .flow-node[data-status="active"] {
+  color: var(--edge);
+}
+
+.page.night .fn-mark {
+  color: var(--leaf);
+}
+
+.page.night .flow-node[data-status="pending"] .fn-mark {
+  color: #7fa39a;
+}
+
+.page.night .flow-node[data-status="skipped"] {
+  opacity: 0.5;
+}
+
+.page.night .flow-link {
+  opacity: 0.85;
+}
+
+.page.night .now-text b {
+  color: #eafff3;
+}
+
+.page.night .now-mode {
+  background: #12303f;
+  color: #e9fff2;
+}
+
+.page.night .now-progress {
+  color: #a9cbc2;
 }
