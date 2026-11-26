@@ -56,6 +56,7 @@
             <button class="link-btn" id="adoptBtn">接入工具池</button>
             <button class="link-btn" id="rebalanceBtn">智能分工</button>
             <button class="link-btn" id="realTeamBtn">体检并换真实席位</button>
+            <button class="link-btn" id="providerBtn">Provider 配置</button>
           </section>
 
           <section class="rail-section grow">
@@ -512,6 +513,10 @@
             </div>
             <div class="cli-fields" id="cliFields" hidden>
               <label class="field">
+                <span>Provider Profile</span>
+                <select name="providerId" id="agentProvider"></select>
+              </label>
+              <label class="field">
                 <span>命令</span>
                 <input name="command" placeholder="codex / dsh / workbuddy / claude" />
               </label>
@@ -585,6 +590,9 @@
 
             <h4 class="flow-sec">执行与收敛</h4>
             <div class="flow-grid">
+              <label class="field"><span>任务并发<em>同时运行的协作任务</em></span>
+                <select id="setMaxTaskConcurrency"></select>
+              </label>
               <label class="field"><span>工序并发<em>并行执行的工序数</em></span>
                 <select id="setMaxConcurrency"></select>
               </label>
@@ -608,6 +616,67 @@
             <button type="button" class="btn btn-ghost" id="flowModalCancel">取消</button>
             <button class="btn btn-primary" id="flowSave">保存设置</button>
           </footer>
+        </div>
+      </dialog>
+
+      <dialog class="modal" id="providerModal">
+        <div class="modal-inner">
+          <header class="modal-head">
+            <h3>Provider Profiles</h3>
+            <button type="button" class="icon-btn" id="providerModalClose" aria-label="关闭">×</button>
+          </header>
+          <div class="modal-body">
+            <p class="hint">Profile 保存模型、网关、并发上限和密钥引用；密钥值只从服务环境变量读取，不写入 db.json。</p>
+            <div class="provider-list" id="providerList"></div>
+            <form class="provider-form" id="providerForm">
+              <div class="field-row">
+                <label class="field">
+                  <span>ID</span>
+                  <input name="id" placeholder="例如 openai-main" maxlength="64" />
+                </label>
+                <label class="field">
+                  <span>名称</span>
+                  <input name="name" placeholder="例如 团队网关" required maxlength="40" />
+                </label>
+              </div>
+              <div class="field-row">
+                <label class="field">
+                  <span>类型</span>
+                  <select name="kind">
+                    <option value="cli-native">CLI Native</option>
+                    <option value="openai-compatible">OpenAI Compatible</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>最大并发</span>
+                  <input name="maxConcurrency" type="number" min="1" max="16" value="2" />
+                </label>
+              </div>
+              <label class="field">
+                <span>Base URL</span>
+                <input name="baseUrl" placeholder="http://127.0.0.1:3425/v1" />
+              </label>
+              <div class="field-row">
+                <label class="field">
+                  <span>模型</span>
+                  <input name="model" placeholder="例如 trae-cn/glm-5.3-flash" />
+                </label>
+                <label class="field">
+                  <span>密钥环境变量</span>
+                  <input name="apiKeyRef" placeholder="例如 OPENAI_API_KEY" />
+                </label>
+              </div>
+              <label class="flow-row">
+                <span class="fr-main">启用 Profile<b>停用后，绑定它的任务会在队列中等待</b></span>
+                <input type="checkbox" name="enabled" class="switch" checked />
+              </label>
+              <div class="provider-form-actions">
+                <span id="providerFormHint" class="flow-save-hint"></span>
+                <button type="button" class="btn btn-ghost sm" id="providerCancel">清空</button>
+                <button type="submit" class="btn btn-primary sm" id="providerSave">保存 Profile</button>
+              </div>
+            </form>
+          </div>
         </div>
       </dialog>
 

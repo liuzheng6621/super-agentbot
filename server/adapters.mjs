@@ -94,9 +94,41 @@ export function normalizeCliArgs(command, args = []) {
   return normalized;
 }
 
+function replaceOption(args, names, value) {
+  if (!value) return args;
+  const out = [...args];
+  for (let index = 0; index < out.length; index += 1) {
+    if (!names.includes(out[index])) continue;
+    if (index + 1 < out.length) out[index + 1] = value;
+    return out;
+  }
+  return out;
+}
+
+function applyProviderArgs(agent, args) {
+  const provider = agent?.provider;
+  if (!provider) return args;
+  let out = [...args];
+  if (provider.model) {
+    out = replaceOption(out, ['--model', '-m'], provider.model);
+    out = out.map((arg) => (String(arg).startsWith('model=') ? `model=${provider.model}` : arg));
+  }
+  if (provider.baseUrl) {
+    out = replaceOption(
+      out,
+      ['--openai-api-base', '--openai-base-url', '--base-url'],
+      provider.baseUrl,
+    );
+  }
+  return out;
+}
+
 function buildArgs(agent, prompt) {
   const { args = [] } = agent.cli || {};
-  const normalized = normalizeCliArgs(agent.cli?.command, args.length ? args : ['-p', '{{prompt}}']);
+  const normalized = applyProviderArgs(
+    agent,
+    normalizeCliArgs(agent.cli?.command, args.length ? args : ['-p', '{{prompt}}']),
+  );
   return normalized.map((a) => a.replace(/\{\{prompt\}\}/g, prompt));
 }
 
@@ -219,6 +251,8 @@ export function spawnCli(
       PYTHONIOENCODING: 'utf-8',
       // 单个 CLI 的自定义环境变量（如 gemini 的 GEMINI_API_KEY / GOOGLE_GEMINI_BASE_URL）
       ...(agent.cli.env || {}),
+      // Provider Profile 只把引用解析成子进程环境，不把明文密钥写回 store。
+      ...(agent.provider?.env || {}),
     });
     const resolved = resolveCommand(agent.cli.command);
     if (!resolved) {

@@ -7,11 +7,13 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 const S = {
   agents: [],
+  providers: [],
   toolCatalog: [],
   roleTools: {},
   tasks: [],
   task: null,
   settings: {},
+  scheduler: null,
   probe: [],
   dir: "",
   worktree: false,
@@ -251,7 +253,7 @@ function agentRowHtml(a, reserve = false) {
       ? a.activity
       : reserve
         ? command || a.title || "可随时接席"
-        : a.title || a.role;
+        : `${a.title || a.role}${a.mode === "cli" ? ` · ${providerName(a.providerId)}` : ""}`;
   const h = a.health;
   const healthTag =
     a.mode !== "cli"
@@ -353,6 +355,7 @@ function renderHeroStats() {
 
 const STATUS_TEXT = {
   idle: "待命",
+  queued: "排队中",
   running: "协作中",
   stopping: "停止中",
   done: "已交付",
@@ -393,9 +396,18 @@ function renderTasks() {
   $("#taskList").innerHTML = S.tasks.length
     ? S.tasks
         .map(
-          (t) => `<div class="task-item ${S.task?.id === t.id ? "active" : ""}" data-task="${t.id}">
+          (t) => `<div class="task-item ${S.task?.id === t.id ? "active" : ""}" data-task="${t.id}" title="${escapeHtml(
+            t.waitingReason || "",
+          )}">
             <span class="t-title">${escapeHtml(t.title)}</span>
-            <span class="t-meta"><span>${STATUS_TEXT[t.status] || t.status}</span><span>${t.doneSteps}/${t.steps || 0}</span><span>${t.files}F</span></span>
+            <span class="t-meta"><span>${STATUS_TEXT[t.status] || t.status}${
+              t.status === "queued" && t.queuePosition ? ` #${t.queuePosition}` : ""
+            }</span><span>${t.doneSteps}/${t.steps || 0}</span><span>${t.files}F</span></span>
+            ${
+              t.status === "queued" && t.waitingReason
+                ? `<span class="t-wait">${escapeHtml(t.waitingReason)}</span>`
+                : ""
+            }
           </div>`,
         )
         .join("")
@@ -410,7 +422,11 @@ function renderTopbar() {
   const t = S.task;
   $("#topbarTitle").textContent = t ? t.title : "未选择任务";
   $("#topbarSub").textContent = t
-    ? t.worktree && t.sourceWorkspace
+    ? t.status === "queued"
+      ? t.waitingReason || "已进入调度队列"
+      : t.waitingReason
+        ? t.waitingReason
+        : t.worktree && t.sourceWorkspace
       ? `${t.goal} · 工作树 ${shortPath(t.sourceWorkspace)}`
       : t.external && t.workspace
       ? `${t.goal} · 📁 ${shortPath(t.workspace)}`
@@ -418,7 +434,9 @@ function renderTopbar() {
     : "描述一个目标，团队会自己分工";
   $("#topbarSub").title = t ? t.workspace || "" : "";
   $("#topbarCode").textContent = t
-    ? t.status === "running"
+    ? t.status === "queued"
+      ? "QUEUED"
+      : t.status === "running"
       ? "RUNNING"
       : t.status === "stopping"
         ? "STOPPING"
@@ -427,10 +445,14 @@ function renderTopbar() {
 
   const pill = $("#statusPill");
   pill.dataset.status = t ? t.status : "idle";
-  pill.textContent = t ? STATUS_TEXT[t.status] || t.status : "待命";
+  pill.textContent = t
+    ? t.status === "queued" && t.queuePosition
+      ? `排队 #${t.queuePosition}`
+      : STATUS_TEXT[t.status] || t.status
+    : "待命";
 
   // 只认 status：taskDetail.running 是首次拉取时的快照，任务结束后不会自动失效
-  const busy = !!t && (t.status === "running" || t.status === "stopping");
+  const busy = !!t && (t.status === "running" || t.status === "stopping" || t.status === "queued");
   $("#stopBtn").hidden = !busy || t?.status === "stopping";
   $("#runBtn").hidden = !t || busy;
 
@@ -673,7 +695,7 @@ function renderFlow() {
   if (!bar) return;
   const t = S.task;
   const ticker = $("#ticker");
-  if (!t || (!t.plan?.length && !t.messages?.length)) {
+  if (!t || (!t.plan?.length && !t.messages?.length && t.status !== "queued")) {
     bar.hidden = true;
     if (ticker) ticker.hidden = false;
     return;
@@ -697,9 +719,13 @@ function renderFlow() {
   const cur = flow.current;
   const mode = t.flowMode === "direct" ? "直接开工" : t.flowMode === "debate" ? "先讨论后实施" : "默认流程";
   $("#flowNow").innerHTML = `
-    <span class="now-dot" data-status="${cur?.status || "pending"}"></span>
+    <span class="now-dot" data-status="${t.status === "queued" ? "warning" : cur?.status || "pending"}"></span>
     <span class="now-text">${
-      cur
+      t.status === "queued"
+        ? `<b>排队中${t.queuePosition ? ` #${t.queuePosition}` : ""}</b> · ${escapeHtml(
+            t.waitingReason || "等待调度资源",
+          )}`
+        : cur
         ? `<b>${cur.label}</b> · ${escapeHtml(cur.note || STEP_STATUS_TEXT[cur.status] || "进行中")}`
         : `<b>${escapeHtml(STATUS_TEXT[t.status] || t.status)}</b> · 全流程已走完`
     }</span>
@@ -1286,7 +1312,13 @@ function workspaceConsoleSummaryHtml() {
 
 function workspaceConsoleLanesHtml() {
   const plan = S.task?.plan || [];
-  if (!plan.length) return '<p class="wc-empty-line">任务开始后，这里会按成员展示工序与依赖。</p>';
+  if (!plan.length) {
+    return S.task?.status === "queued"
+      ? `<p class="wc-empty-line">排队中${S.task.queuePosition ? ` #${S.task.queuePosition}` : ""} · ${escapeHtml(
+          S.task.waitingReason || "等待调度资源",
+        )}</p>`
+      : '<p class="wc-empty-line">任务开始后，这里会按成员展示工序与依赖。</p>';
+  }
   const groups = new Map();
   for (const step of plan) {
     const key = step.agentId || `role:${step.role}`;
@@ -1861,7 +1893,9 @@ function renderStats() {
         : "—";
   const elapsedHint = stats.wallMs
     ? `墙钟 ${fmtMs(stats.wallMs)}（含排队、重试与等待）`
-    : "尚未记录工时";
+    : t.queueMs
+      ? `排队 ${fmtMs(t.queueMs)} · 执行 ${fmtMs(t.executionMs || 0)}`
+      : "尚未记录工时";
   const items = [
     [
       "累计 TOKENS",
@@ -1952,15 +1986,16 @@ const FLOW_NUM_FIELDS = [
   ["setDebateParticipants", "debateParticipants", 2, 6, 4],
   ["setDebateConcurrency", "debateConcurrency", 1, 4, 2],
   ["setDebatePoolSeats", "debatePoolSeats", 0, 3, 1],
+  ["setMaxTaskConcurrency", "maxTaskConcurrency", 1, 8, 2],
   ["setMaxConcurrency", "maxConcurrency", 1, 4, 2],
   ["setMaxRepairRounds", "maxRepairRounds", 0, 3, 1],
   ["setMaxStepAttempts", "maxStepAttempts", 1, 3, 2],
 ];
 
 const FLOW_PRESETS = {
-  fast: { debateEnabled: false, debateParticipants: 2, debateConcurrency: 2, debatePoolSeats: 0, maxConcurrency: 4, maxRepairRounds: 0, maxStepAttempts: 1 },
-  balanced: { debateEnabled: true, debateParticipants: 5, debateConcurrency: 2, debatePoolSeats: 1, maxConcurrency: 2, maxRepairRounds: 1, maxStepAttempts: 2 },
-  thorough: { debateEnabled: true, debateParticipants: 6, debateConcurrency: 4, debatePoolSeats: 2, maxConcurrency: 4, maxRepairRounds: 3, maxStepAttempts: 3 },
+  fast: { debateEnabled: false, debateParticipants: 2, debateConcurrency: 2, debatePoolSeats: 0, maxTaskConcurrency: 3, maxConcurrency: 4, maxRepairRounds: 0, maxStepAttempts: 1 },
+  balanced: { debateEnabled: true, debateParticipants: 5, debateConcurrency: 2, debatePoolSeats: 1, maxTaskConcurrency: 2, maxConcurrency: 2, maxRepairRounds: 1, maxStepAttempts: 2 },
+  thorough: { debateEnabled: true, debateParticipants: 6, debateConcurrency: 4, debatePoolSeats: 2, maxTaskConcurrency: 2, maxConcurrency: 4, maxRepairRounds: 3, maxStepAttempts: 3 },
 };
 
 function currentFlowSettings() {
@@ -1970,6 +2005,7 @@ function currentFlowSettings() {
     debateParticipants: Number(s.debateParticipants) || 4,
     debateConcurrency: Number(s.debateConcurrency) || 2,
     debatePoolSeats: Number(s.debatePoolSeats ?? 1),
+    maxTaskConcurrency: Number(s.maxTaskConcurrency) || 2,
     maxConcurrency: Number(s.maxConcurrency) || 2,
     maxRepairRounds: Number(s.maxRepairRounds ?? 1),
     maxStepAttempts: Number(s.maxStepAttempts) || 2,
@@ -2207,7 +2243,8 @@ function handleEvent(ev) {
       break;
     }
     case "task.updated":
-    case "task.status": {
+    case "task.status":
+    case "task.queue": {
       const summary = S.tasks.find((t) => t.id === ev.taskId);
       if (summary) Object.assign(summary, ev.patch);
       if (cur && cur.id === ev.taskId) {
@@ -2218,6 +2255,13 @@ function handleEvent(ev) {
         renderFlow();
       }
       renderTasks();
+      break;
+    }
+    case "providers.changed": {
+      if (Array.isArray(ev.providers)) S.providers = ev.providers;
+      renderProviders();
+      renderProviderChoices($("#agentProvider")?.value || "local-default");
+      renderAgents();
       break;
     }
     case "plan.updated": {
@@ -2408,10 +2452,12 @@ async function refreshAgents() {
   try {
     const data = await api("/api/agents");
     S.agents = normalizeAgentSeats(data.agents);
+    S.providers = data.providers || S.providers;
     S.toolCatalog = data.toolCatalog || S.toolCatalog;
     S.roleTools = data.roleTools || S.roleTools;
     renderAgents();
     renderPlan();
+    renderProviders();
   } catch {
     /* ignore */
   }
@@ -2627,6 +2673,123 @@ const ROLE_TITLE = {
   reviewer: "代码评审",
 };
 
+function providerName(id) {
+  return S.providers.find((provider) => provider.id === id)?.name || "本机 CLI";
+}
+
+let editingProviderId = null;
+
+function renderProviders() {
+  const list = $("#providerList");
+  if (!list) return;
+  list.innerHTML = S.providers.length
+    ? S.providers
+        .map(
+          (provider) => `<div class="provider-row">
+            <div class="provider-row-main">
+              <b>${escapeHtml(provider.name)}</b>
+              <span>${escapeHtml(provider.id)} · ${escapeHtml(provider.kind)} · 并发 ${provider.maxConcurrency}${provider.model ? ` · ${escapeHtml(provider.model)}` : ""}</span>
+            </div>
+            <span class="provider-row-state">${provider.enabled === false ? "OFF" : "ON"}</span>
+            <button type="button" class="link-btn" data-provider-edit="${escapeHtml(provider.id)}">编辑</button>
+            ${
+              provider.builtin
+                ? ""
+                : `<button type="button" class="link-btn" data-provider-delete="${escapeHtml(provider.id)}">删除</button>`
+            }
+          </div>`,
+        )
+        .join("")
+    : '<p class="hint">还没有 Provider Profile。</p>';
+}
+
+function fillProviderForm(provider = null) {
+  const form = $("#providerForm");
+  if (!form) return;
+  editingProviderId = provider?.id || null;
+  const f = (name) => form.elements.namedItem(name);
+  f("id").value = provider?.id || "";
+  f("id").disabled = !!provider?.builtin;
+  f("name").value = provider?.name || "";
+  f("kind").value = provider?.kind || "cli-native";
+  f("baseUrl").value = provider?.baseUrl || "";
+  f("model").value = provider?.model || "";
+  f("apiKeyRef").value = provider?.apiKeyRef || "";
+  f("maxConcurrency").value = provider?.maxConcurrency || 2;
+  f("enabled").checked = provider?.enabled !== false;
+  $("#providerFormHint").textContent = provider ? `正在编辑 ${provider.name}` : "新 Profile";
+}
+
+function openProviderModal(provider = null) {
+  renderProviders();
+  fillProviderForm(provider);
+  $("#providerModal").showModal();
+}
+
+async function saveProvider() {
+  const form = $("#providerForm");
+  const fd = new FormData(form);
+  const payload = {
+    id: String(fd.get("id") || "").trim(),
+    name: String(fd.get("name") || "").trim(),
+    kind: String(fd.get("kind") || "cli-native"),
+    baseUrl: String(fd.get("baseUrl") || "").trim(),
+    model: String(fd.get("model") || "").trim(),
+    apiKeyRef: String(fd.get("apiKeyRef") || "").trim(),
+    maxConcurrency: Number(fd.get("maxConcurrency")) || 2,
+    enabled: fd.get("enabled") === "on",
+  };
+  if (!payload.name) {
+    toast("Provider 需要一个名称", "err");
+    return;
+  }
+  try {
+    const path = editingProviderId ? `/api/providers/${editingProviderId}` : "/api/providers";
+    const result = await api(path, { method: editingProviderId ? "PATCH" : "POST", body: payload });
+    const index = S.providers.findIndex((item) => item.id === result.provider.id);
+    if (index >= 0) S.providers[index] = result.provider;
+    else S.providers.push(result.provider);
+    renderProviders();
+    renderProviderChoices(result.provider.id);
+    fillProviderForm(result.provider);
+    toast("Provider Profile 已保存", "ok");
+  } catch (err) {
+    toast(`保存失败：${err.message}`, "err");
+  }
+}
+
+async function deleteProvider(id) {
+  if (!window.confirm("删除这个 Provider？绑定它的 Agent 会回到默认 Provider。")) return;
+  try {
+    await api(`/api/providers/${id}`, { method: "DELETE" });
+    S.providers = S.providers.filter((provider) => provider.id !== id);
+    for (const agent of S.agents) {
+      if (agent.providerId === id) agent.providerId = "local-default";
+    }
+    renderProviders();
+    renderProviderChoices("local-default");
+    fillProviderForm();
+    renderAgents();
+    toast("Provider 已删除", "ok");
+  } catch (err) {
+    toast(`删除失败：${err.message}`, "err");
+  }
+}
+
+function renderProviderChoices(selected = "local-default") {
+  const select = $("#agentProvider");
+  if (!select) return;
+  const current = selected || "local-default";
+  select.innerHTML = S.providers
+    .map(
+      (provider) =>
+        `<option value="${escapeHtml(provider.id)}" ${provider.id === current ? "selected" : ""}>${escapeHtml(
+          provider.name,
+        )}${provider.enabled === false ? " · 停用" : ""}</option>`,
+    )
+    .join("");
+}
+
 let editingId = null;
 
 function renderAgentToolChoices(selected, role) {
@@ -2666,15 +2829,18 @@ function openAgentModal(agent = null, preset = null) {
     f("mode").value = agent.mode === "cli" ? "cli" : "sim";
     f("command").value = agent.cli?.command || "";
     f("args").value = (agent.cli?.args || []).join(" ");
+    f("providerId").value = agent.providerId || "local-default";
     f("seat").checked = agent.seat !== false;
   } else if (preset) {
     f("name").value = preset.name || "";
     f("mode").value = "cli";
     f("command").value = preset.command || "";
     f("args").value = preset.args || "run {{prompt}}";
+    f("providerId").value = "local-default";
     f("seat").checked = false;
   }
 
+  renderProviderChoices(agent?.providerId || "local-default");
   $("#agentModalTitle").textContent = agent ? `编辑 · ${agent.name}` : "接入新的智能体";
   $("#agentSubmit").textContent = agent ? "保存修改" : "加入团队";
   $("#agentDelete").hidden = !agent;
@@ -2835,6 +3001,7 @@ function bind() {
       color: String(fd.get("color") || "#ff5538"),
       title: ROLE_TITLE[role] || "自定义智能体",
       mode,
+      providerId: String(fd.get("providerId") || "local-default"),
       seat: fd.get("seat") === "on",
       tools: fd.getAll("tools").map(String),
       cli: { command, args: argsStr ? argsStr.split(/\s+/) : [] },
@@ -2936,6 +3103,26 @@ function bind() {
     fillFlowForm(FLOW_PRESETS[preset.dataset.preset] || FLOW_PRESETS.balanced);
     $$("#flowModal [data-preset]").forEach((b) => b.classList.toggle("active", b === preset));
     $("#flowSaveHint").textContent = "已套用预设，点保存后生效";
+  });
+  $("#providerBtn").addEventListener("click", () => openProviderModal());
+  $("#providerModalClose").addEventListener("click", () => $("#providerModal").close());
+  $("#providerCancel").addEventListener("click", () => fillProviderForm());
+  $("#providerForm").addEventListener("submit", (e) => {
+    e.preventDefault();
+    saveProvider();
+  });
+  $("#providerList").addEventListener("click", (e) => {
+    const edit = e.target.closest("[data-provider-edit]");
+    if (edit) {
+      const provider = S.providers.find((item) => item.id === edit.dataset.providerEdit);
+      if (provider) fillProviderForm(provider);
+      return;
+    }
+    const remove = e.target.closest("[data-provider-delete]");
+    if (remove) deleteProvider(remove.dataset.providerDelete);
+  });
+  $("#providerModal").addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) e.currentTarget.close();
   });
 
   /* 面板 */
@@ -3142,10 +3329,12 @@ async function boot() {
   try {
     const state = await api("/api/state");
     S.agents = normalizeAgentSeats(state.agents);
+    S.providers = state.providers || [];
     S.toolCatalog = state.toolCatalog || [];
     S.roleTools = state.roleTools || {};
     S.tasks = state.tasks;
     S.settings = state.settings || {};
+    S.scheduler = state.scheduler || null;
     if (state.activeTask) S.task = state.activeTask;
     S.openStep = "";
     renderFlowModeControls();

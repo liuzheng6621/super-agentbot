@@ -9,6 +9,13 @@ import {
   ensureMessageEnvelope,
   ensurePlanVersionState,
 } from './collaboration.mjs';
+import {
+  DEFAULT_PROVIDER_ID,
+  defaultProviders,
+  normalizeProvider,
+  redactProvider,
+  resolveProvider,
+} from './providers.mjs';
 
 export const ROOT = path.resolve(import.meta.dirname, '..');
 export const DATA_DIR = process.env.AGENTFORGE_DATA_DIR
@@ -212,6 +219,7 @@ function defaultAgents() {
     skills,
     tools: toolsForRole(role),
     mode: 'sim',
+    providerId: DEFAULT_PROVIDER_ID,
     // 内置演示席位：服务启动后会用本机真实 CLI 顶替（见 server/team.mjs）
     builtin: true,
     seat: true,
@@ -233,12 +241,14 @@ function defaultAgents() {
 function emptyDb() {
   return {
     agents: defaultAgents(),
+    providers: defaultProviders(),
     tasks: [],
     settings: {
       hookToken: randomUUID().replace(/-/g, '').slice(0, 24),
       defaultMode: 'auto',
       simSpeed: 1,
       maxConcurrency: 2,
+      maxTaskConcurrency: 2,
       maxRepairRounds: 1,
       maxAutoReplans: 1,
       maxStepAttempts: 2,
@@ -370,8 +380,16 @@ class Store {
       fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
       if (fs.existsSync(DB_FILE)) {
         const raw = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+        const providers = (Array.isArray(raw.providers) && raw.providers.length
+          ? raw.providers
+          : defaultProviders()
+        ).map((provider) => normalizeProvider(provider));
+        if (!providers.some((provider) => provider.id === DEFAULT_PROVIDER_ID)) {
+          providers.unshift(...defaultProviders());
+        }
         this.db = {
           agents: Array.isArray(raw.agents) && raw.agents.length ? raw.agents : defaultAgents(),
+          providers,
           tasks: Array.isArray(raw.tasks) ? raw.tasks : [],
           settings: { ...emptyDb().settings, ...(raw.settings || {}) },
         };
@@ -379,6 +397,14 @@ class Store {
         normalizeSeats(this.db.agents);
         let recovered = false;
         for (const a of this.db.agents) {
+          const providerId = String(a.providerId || DEFAULT_PROVIDER_ID);
+          if (!this.db.providers.some((provider) => provider.id === providerId)) {
+            a.providerId = DEFAULT_PROVIDER_ID;
+            recovered = true;
+          } else if (a.providerId !== providerId) {
+            a.providerId = providerId;
+            recovered = true;
+          }
           a.status = 'idle';
           a.activity = '';
           const tools = normalizeTools(a.tools, a.role);
@@ -386,9 +412,11 @@ class Store {
           a.tools = tools;
         }
         for (const t of this.db.tasks) {
-          if (t.status === 'running' || t.status === 'stopping') {
+          if (t.status === 'running' || t.status === 'stopping' || t.status === 'queued') {
             t.status = 'stopped';
             t.endedAt ||= Date.now();
+            t.queuePosition = null;
+            t.waitingReason ||= '服务重启时排队任务已中断';
             recovered = true;
           }
           for (const s of t.plan || []) {
@@ -481,6 +509,55 @@ class Store {
   }
 
   /* ---------- agents ---------- */
+  get providers() {
+    return this.db.providers;
+  }
+
+  getProvider(id) {
+    return this.db.providers.find((provider) => provider.id === id);
+  }
+
+  providerForAgent(agent) {
+    return resolveProvider(agent, this.db.providers);
+  }
+
+  addProvider(patch = {}) {
+    const provider = normalizeProvider(patch);
+    if (this.db.providers.some((item) => item.id === provider.id)) {
+      throw new Error(`Provider ID 已存在：${provider.id}`);
+    }
+    this.db.providers.push(provider);
+    this.save();
+    this.broadcast({ type: 'providers.changed', providers: this.db.providers.map(redactProvider) });
+    return provider;
+  }
+
+  updateProvider(id, patch = {}) {
+    const provider = this.getProvider(id);
+    if (!provider) return null;
+    const next = normalizeProvider(patch, provider);
+    next.id = provider.id;
+    next.builtin = provider.builtin === true;
+    Object.assign(provider, next);
+    this.save();
+    this.broadcast({ type: 'providers.changed', providers: this.db.providers.map(redactProvider) });
+    return provider;
+  }
+
+  removeProvider(id) {
+    if (id === DEFAULT_PROVIDER_ID) return false;
+    const index = this.db.providers.findIndex((provider) => provider.id === id);
+    if (index < 0) return false;
+    this.db.providers.splice(index, 1);
+    for (const agent of this.db.agents) {
+      if (agent.providerId === id) agent.providerId = DEFAULT_PROVIDER_ID;
+    }
+    this.save();
+    this.broadcast({ type: 'providers.changed', providers: this.db.providers.map(redactProvider) });
+    this.broadcast({ type: 'agents.changed' });
+    return true;
+  }
+
   get agents() {
     return this.db.agents;
   }
@@ -513,6 +590,9 @@ class Store {
       skills: patch.skills || [],
       tools: normalizeTools(patch.tools, role),
       mode: patch.mode === 'cli' ? 'cli' : 'sim',
+      providerId: this.getProvider(String(patch.providerId || DEFAULT_PROVIDER_ID))
+        ? String(patch.providerId || DEFAULT_PROVIDER_ID)
+        : DEFAULT_PROVIDER_ID,
       builtin: false,
       health: patch.health || null,
       // 同一角色默认只有一个主执行席位，额外接入的 CLI 进入工具池。
@@ -548,6 +628,11 @@ class Store {
     const prevCli = { ...(agent.cli || {}) };
     const hasExplicitTools = Array.isArray(patch.tools);
     Object.assign(agent, patch, { id: agent.id });
+    if (patch.providerId !== undefined) {
+      agent.providerId = this.getProvider(String(patch.providerId))
+        ? String(patch.providerId)
+        : DEFAULT_PROVIDER_ID;
+    }
     // 先把旧 cli 存下来再合并，否则 Object.assign 已经把 agent.cli 覆盖成新对象了
     if (patch.cli) agent.cli = { ...prevCli, ...patch.cli };
     const role = agent.role;
@@ -674,6 +759,14 @@ class Store {
       status: 'idle',
       createdAt: Date.now(),
       endedAt: null,
+      queuedAt: null,
+      startedAt: null,
+      finishedAt: null,
+      queuePosition: null,
+      waitingReason: '',
+      queueMs: 0,
+      executionMs: 0,
+      scheduler: null,
       plan: [],
       messages: [],
       artifacts: [],
@@ -712,6 +805,14 @@ class Store {
       status: task.status,
       createdAt: task.createdAt,
       endedAt: task.endedAt,
+      queuedAt: task.queuedAt || null,
+      startedAt: task.startedAt || null,
+      finishedAt: task.finishedAt || null,
+      queuePosition: task.queuePosition ?? null,
+      waitingReason: task.waitingReason || '',
+      queueMs: Number(task.queueMs) || 0,
+      executionMs: Number(task.executionMs) || 0,
+      scheduler: task.scheduler || null,
       runId: task.runId || null,
       repairRound: task.repairRound || 0,
       planVersion: task.planVersion || 0,
@@ -743,6 +844,8 @@ class Store {
       s.debateConcurrency = clamp(patch.debateConcurrency, 1, 4, s.debateConcurrency);
     if (patch.maxConcurrency !== undefined)
       s.maxConcurrency = clamp(patch.maxConcurrency, 1, 4, s.maxConcurrency);
+    if (patch.maxTaskConcurrency !== undefined)
+      s.maxTaskConcurrency = clamp(patch.maxTaskConcurrency, 1, 8, s.maxTaskConcurrency);
     if (patch.maxRepairRounds !== undefined)
       s.maxRepairRounds = clamp(patch.maxRepairRounds, 0, 3, s.maxRepairRounds);
     if (patch.maxAutoReplans !== undefined)

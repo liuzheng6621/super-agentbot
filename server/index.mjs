@@ -3,7 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { store, ROOT, DATA_DIR, WORKSPACE_DIR, TOOL_CATALOG, ROLE_TOOLS } from './store.mjs';
 import {
-  startTask,
+  agentForExecution,
+  isQueued,
+  isScheduled,
+  scheduleTask,
+  schedulerSnapshot,
   stopTask,
   chat,
   buildContextPack,
@@ -12,6 +16,7 @@ import {
   workMsOf,
 } from './orchestrator.mjs';
 import { probeClis, spawnCli, clearResolveCache } from './adapters.mjs';
+import { redactProvider } from './providers.mjs';
 import { adoptInstalledClis, rebalanceTeam } from './adopt.mjs';
 import { ensureRealTeam, refreshTeam, judgeHealth } from './team.mjs';
 import { toolGateway } from './tool-gateway.mjs';
@@ -92,6 +97,8 @@ function taskDetail(task) {
     debate: task.debate || null,
     error: task.error || null,
     running: isRunning(task.id),
+    queued: isQueued(task.id),
+    scheduled: isScheduled(task.id),
     workspace: task.workspace,
     sourceWorkspace: task.sourceWorkspace || task.workspace,
     worktree: task.worktree || null,
@@ -184,11 +191,16 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/state' && method === 'GET') {
       const tasks = store.tasks.map((t) => store.taskSummary(t));
       // 优先给正在跑的那条全量详情；都没在跑时退回最新一条（tasks[0] 是最新）
-      const active = store.tasks.find((t) => isRunning(t.id)) || store.tasks[0];
+      const active =
+        store.tasks.find((t) => isRunning(t.id)) ||
+        store.tasks.find((t) => isQueued(t.id)) ||
+        store.tasks[0];
       return json(res, 200, {
         agents: store.agents,
+        providers: store.providers.map(redactProvider),
         tasks,
         settings: { ...store.db.settings },
+        scheduler: schedulerSnapshot(),
         toolCatalog: TOOL_CATALOG,
         roleTools: ROLE_TOOLS,
         activeTask: active ? taskDetail(active) : null,
@@ -199,9 +211,42 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/tools' && method === 'GET') {
       return json(res, 200, { tools: toolGateway.descriptors() });
     }
+    if (pathname === '/api/scheduler' && method === 'GET') {
+      return json(res, 200, { scheduler: schedulerSnapshot() });
+    }
+    if (pathname === '/api/providers' && method === 'GET') {
+      return json(res, 200, { providers: store.providers.map(redactProvider) });
+    }
+    if (pathname === '/api/providers' && method === 'POST') {
+      const body = await readBody(req);
+      try {
+        const provider = store.addProvider(body);
+        return json(res, 201, { provider: redactProvider(provider) });
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    const providerMatch = pathname.match(/^\/api\/providers\/([\w-]+)$/);
+    if (providerMatch) {
+      const providerId = providerMatch[1];
+      if (method === 'PATCH') {
+        const body = await readBody(req);
+        const provider = store.updateProvider(providerId, body);
+        if (!provider) return json(res, 404, { error: 'Provider 不存在' });
+        return json(res, 200, { provider: redactProvider(provider) });
+      }
+      if (method === 'DELETE') {
+        if (providerId === 'local-default') {
+          return json(res, 400, { error: '默认 Provider 不能删除' });
+        }
+        const ok = store.removeProvider(providerId);
+        return json(res, ok ? 200 : 404, { ok });
+      }
+    }
     if (pathname === '/api/agents' && method === 'GET') {
       return json(res, 200, {
         agents: store.agents,
+        providers: store.providers.map(redactProvider),
         toolCatalog: TOOL_CATALOG,
         roleTools: ROLE_TOOLS,
       });
@@ -292,7 +337,7 @@ const server = http.createServer(async (req, res) => {
       if (!agent) return json(res, 404, { error: '智能体不存在' });
       if (agentMatch[2] && method === 'POST') {
         if (!agent.cli?.command) return json(res, 400, { ok: false, message: '未配置 CLI 命令' });
-        const res2 = await spawnCli(agent, '只回答两个字：在线', {
+        const res2 = await spawnCli(agentForExecution(agent), '只回答两个字：在线', {
           timeout: agent.cli.healthTimeout || 60000,
           cwd: ROOT,
         });
@@ -338,7 +383,7 @@ const server = http.createServer(async (req, res) => {
       }
       const speed = Number(body.speed) || 1;
       if (body.autoRun !== false) {
-        setTimeout(() => startTask(task.id, { speed }).catch((e) => console.error('[startTask]', e)), 60);
+        scheduleTask(task.id, { speed, source: 'api.create' });
       }
       return json(res, 201, { task: taskDetail(store.getTask(task.id)) });
     }
@@ -358,17 +403,21 @@ const server = http.createServer(async (req, res) => {
       }
       if (action === 'run' && method === 'POST') {
         const body = await readBody(req);
-        if (isRunning(task.id)) return json(res, 409, { error: '该任务正在协作中' });
+        if (isScheduled(task.id)) return json(res, 409, { error: '该任务正在协作中或排队中' });
         // 重新编排时允许顺带改流程模式（先讨论 / 直接开工），不必删掉重开任务
         if (body.flowMode === 'direct' || body.flowMode === 'debate') {
           store.updateTask(task.id, { flowMode: body.flowMode });
         } else if (body.flowMode === null) {
           store.updateTask(task.id, { flowMode: null });
         }
-        startTask(task.id, { speed: Number(body.speed) || 1 }).catch((e) =>
-          console.error('[startTask]', e),
-        );
-        return json(res, 202, { ok: true });
+        const scheduled = scheduleTask(task.id, {
+          speed: Number(body.speed) || 1,
+          source: 'api.run',
+        });
+        return json(res, scheduled.accepted ? 202 : 409, {
+          ok: scheduled.accepted,
+          scheduler: scheduled,
+        });
       }
       if (action === 'stop' && method === 'POST') {
         return json(res, 200, { ok: stopTask(task.id) });
@@ -538,7 +587,7 @@ const server = http.createServer(async (req, res) => {
         const goal = String(body.goal || body.text || body.message || '').trim();
         if (!goal) return json(res, 400, { error: '需要 goal / text / message 字段' });
         const task = store.createTask({ goal });
-        setTimeout(() => startTask(task.id).catch((e) => console.error('[hook]', e)), 60);
+        scheduleTask(task.id, { source: 'hook' });
         return json(res, 202, {
           ok: true,
           taskId: task.id,
@@ -558,7 +607,13 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === '/api/health') {
-      return json(res, 200, { ok: true, agents: store.agents.length, tasks: store.tasks.length, uptime: process.uptime() });
+      return json(res, 200, {
+        ok: true,
+        agents: store.agents.length,
+        tasks: store.tasks.length,
+        scheduler: schedulerSnapshot(),
+        uptime: process.uptime(),
+      });
     }
 
     return json(res, 404, { error: '接口不存在' });

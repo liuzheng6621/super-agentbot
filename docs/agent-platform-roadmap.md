@@ -61,7 +61,9 @@ AgentForge 不是基于 Magpie 框架实现。Magpie 目前只是部分 CLI 适�
 
 - `server/adapters.mjs` 为 Codex、Aider、Gemini、Qwen 等命令硬编码了模型名、网关地址或环境变量。
 - 典型默认地址是 `http://127.0.0.1:3425`，模型默认值是 `trae-cn/glm-5.3-flash`。
-- `AGENTFORGE_MODEL` 只能统一改模型名，不能定义不同 Provider、不同凭据、不同路由策略。
+- `AGENTFORGE_MODEL` 仍是全局模型名兜底；Provider Profile 已可覆盖模型、Base URL、密钥环境变量引用和并发上限。
+
+第一层 Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile 解析为临时子进程环境，明文密钥不写回 `db.json`。尚未完成的是 CLI 参数模板、Provider 自动路由与回退，以及对真实 CLI 子进程的强制工具拦截。
 
 因此，当前泛用性瓶颈不在编排器，而在“CLI 适配参数是硬编码的”。
 
@@ -155,10 +157,10 @@ AgentForge 不是基于 Magpie 框架实现。Magpie 目前只是部分 CLI 适�
 
 ### 当前边界
 
-- 没有全局 Scheduler，无法限制整个进程的并发任务数。
-- 没有 Provider/CLI 级并发配额，多个任务可能同时压垮同一模型网关。
-- 没有 Agent 租约；同一 CLI 可能被多个任务同时占用。
-- 没有工作区配额、磁盘配额或任务优先级。
+- 进程内已有任务级 Scheduler，可限制同时运行的任务数，并展示排队位置和等待原因。
+- Provider 配额按绑定该 Provider 的活跃任务计数，不按每次 CLI 调用计数；同一个 Provider 仍可能被单任务内的多个工序并发使用。
+- Agent 租约只覆盖显式声明的 Agent；同一任务内可重入，不同任务之间互斥。
+- 工作区配额、磁盘配额、任务优先级和跨 Provider 回退尚未实现。
 - 没有显式的专项 Agent 模板（前端、后端、测试、安全等）与能力路由。
 
 ### 改进建议
@@ -193,7 +195,8 @@ AgentForge 不是基于 Magpie 框架实现。Magpie 目前只是部分 CLI 适�
 | 协作消息路由 | 已完成 | 消息记录来源、目标、父消息、关联工序、产物引用和 correlationId |
 | Tool Gateway 第一层 | 已完成 | 统一工具描述、Owner/Agent/System 主体、工具白名单、工作区执行和审计事件 |
 | 工作区控制台 | 已完成 | 计划版本、协作消息、工具审计与原有文件、执行泳道、Diff 统一展示 |
-| Provider Profile | 待实施 | CLI 命令、网关地址和模型参数仍需要进一步模板化 |
+| Provider Profile | 第一层已完成 | Agent 绑定 Profile；Base URL、模型、密钥环境变量引用和并发上限可配置；CLI 参数模板与自动路由待补 |
+| 全局 Scheduler | 第一层已完成 | 任务并发上限、Provider 配额、排队位置、等待原因、Agent 租约和取消排队 |
 | Shell 沙箱 | 待实施 | `shell` 端点明确返回 501，不把未执行的命令伪装成成功 |
 
 本轮的强制边界是平台 API：Agent 通过 API 调用工具时会被白名单校验并留痕；Owner UI 的只读请求不写入工具审计，避免“刷新工作区 → 产生审计事件 → 再次刷新”的反馈循环。真实 CLI 仍可能直接调用本机工具，因此下一阶段必须补 CLI 沙箱或代理网关，不能把平台 API 校验当成对子进程的强制隔离。
@@ -203,7 +206,7 @@ AgentForge 不是基于 Magpie 框架实现。Magpie 目前只是部分 CLI 适�
 | 阶段 | 重点 | 交付物 |
 | --- | --- | --- |
 | P0（已完成） | 工作区 API、全屏控制台、工具白名单、Git worktree/clone 回退、Diff 与事件流 | 可用的单机协作台 |
-| P1（第一层已完成） | Tool Gateway、计划版本、消息路由；Provider Profile 与密钥引用待补 | 平台 API 可校验、可审计、可重规划 |
-| P2 | 全局 Scheduler、租约、配额、专项 Agent Profile | 稳定的多任务并发 |
+| P1（第一层已完成） | Tool Gateway、计划版本、消息路由、Provider Profile 与密钥引用 | 平台 API 可校验、可审计、可重规划 |
+| P2（第一层已完成） | 全局 Scheduler、任务并发、Provider 配额、Agent 租约；专项 Agent Profile 待补 | 稳定的多任务并发 |
 | P3 | DAG 图、时间回放、评审与合并工作台 | 面向复杂项目的可视化协作 |
 

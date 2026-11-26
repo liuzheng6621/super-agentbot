@@ -9,7 +9,7 @@
 [![Node](https://img.shields.io/badge/node-%E2%89%A520.11-3c873a?logo=node.js&logoColor=white)](https://nodejs.org)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-blue)
 ![Build](https://img.shields.io/badge/build-none-lightgrey)
-![Tests](https://img.shields.io/badge/tests-60%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-65%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4)
 
@@ -50,7 +50,7 @@
 - 🧠 **方案辩论先行** — 4 个执行席位 + 1 个工具池 CLI 各出一版方案（契约先行 / 最小闭环 / 测试先行 / 风险优先 / 分阶段交付），互相匿名打 1–10 分并各指一个硬伤，主持人按平均分裁决；只有 1 份有效提案或评分不足时会在裁决里标注置信度，不假装形成共识。
 - 🔀 **依赖图并行** — 架构定稿后「实现」与「测试设计」并行推进，DAG 校验依赖与环路，失败按依赖链传播，取消是即时生效而不是等当前工序跑完。
 - 🚦 **真实质量门** — 评审前真的执行测试命令，`VERDICT: PASS` 才允许交付；FAIL 进入「修复 → 回归 → 复评」有界回环，轮次可配。测试入口按 `package.json scripts.test` → pytest → cargo → go → Makefile → `tests/` 依次探测，找不到就标 `missing` 让界面显示「没有测试入口」，绝不静默跳过；真实 CLI 任务同样执行这套质量门，而不是一律跳过。评审员缺位退到其他席位时会如实标注「评审代质量门」，不让自审看起来像独立把关。
-- 🎛 **工作流可视化配置** — 讨论开关与规模、工序并发、返工轮次都在顶栏 ⚙ 里改，即时落库；另带「快速 / 均衡 / 严谨」三档预设。
+- 🎛 **工作流可视化配置** — 讨论开关与规模、工序并发、全局任务并发、返工轮次都在顶栏 ⚙ 里改，即时落库；另带「快速 / 均衡 / 严谨」三档预设。
 - 🔁 **任务级流程覆盖** — 输入框旁可切「先讨论」或「直接开工」，只影响当前任务，不动全局默认。
 - 🧭 **计划版本与有限重规划** — 计划以不可变快照保存；失败后自动重规划最多一次，手动重规划会保留已完成工序，方便在复杂项目中继续推进。
 - 🔗 **带路由的协作消息** — 消息不再只是聊天记录，还带来源、目标、父子关系、关联工序和产物引用，方便定位“谁把什么交给了谁”。
@@ -60,7 +60,7 @@
 **执行**
 
 - 🖥 **10 个本机 CLI 真接入** — 启动后台并发体检每个 CLI，只有「真回了话且没有鉴权错误」的才占执行席位；同一个 CLI 可兼任多角色（`OpenCode · 架构师`）。
-- 🔌 **多 CLI 与可配模型名** — 通过 `AGENTFORGE_MODEL` 统一覆盖模型名；Provider、网关和凭据仍由各 CLI 适配器决定，统一 Provider Profile 见 Roadmap。
+- 🔌 **Provider Profile 与可配模型** — 每个 Agent 可绑定独立 Provider Profile，保存 Base URL、模型、密钥环境变量引用和并发上限；密钥只从服务进程环境读取，不写入 `db.json`。`AGENTFORGE_MODEL` 仍可作为全局兜底，Provider 路由与自动回退见 Roadmap。
 - 🧾 **产物带内容版本** — 每个产物记录 `version`（sha256 前 16 位），改写即换版本，可判断「这一步到底动了什么」。
 - 🧷 **不合格输出不流转** — 每个角色的回复都要过结构校验：提案需 5 段标题、质询需覆盖全部方案、步骤需可执行产出；半截回复或「我无法完成」直接重试，不把残稿喂给下一步。
 - 💾 **原子写入** — 临时文件 → `fsync` → `rename`，Windows 占用自动退避重试，不会留下半截文件。
@@ -76,7 +76,7 @@
 **工程**
 
 - 📦 **零依赖、零构建** — 纯 Node.js + 原生 ESM，`node server/index.mjs` 就起来，前端不打包、不装包管理器。
-- ✅ **60 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、质量门返工与入口探测、体检判定、上下文预算、工作区文件闭环、Git 隔离、工具策略、计划版本、消息路由、Tool Gateway 审计、真实工时统计、输出完整性判定与退出码分类。
+- ✅ **65 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、质量门返工与入口探测、体检判定、上下文预算、工作区文件闭环、Git 隔离、工具策略、计划版本、消息路由、Tool Gateway 审计、Provider Profile、全局调度队列、Agent 租约、真实工时统计、输出完整性判定与退出码分类。
 
 ## 快速开始
 
@@ -188,9 +188,9 @@ CLI 是不可控的第三方进程，所以调用不是「起进程 → 收字�
 
 ### 与 Magpie 的关系
 
-AgentForge **不是基于 Magpie 框架实现**。Magpie 目前只是部分 CLI 适配器中的默认兼容网关：`server/adapters.mjs` 为 Codex、Aider、Gemini、Qwen 等命令硬编码了 `http://127.0.0.1:3425`、模型名或环境变量。`AGENTFORGE_MODEL` 只能改模型名，不能定义 Provider、凭据、路由和回退。
+AgentForge **不是基于 Magpie 框架实现**。Magpie 目前只是部分 CLI 适配器中的默认兼容网关：`server/adapters.mjs` 仍为 Codex、Aider、Gemini、Qwen 等命令保留 `http://127.0.0.1:3425`、模型名或环境变量的默认值。
 
-要把泛用性从「适配某个 CLI」提升到「适配任意兼容网关」，需要独立 Provider Profile 层，把 base URL、模型、密钥引用和 CLI 参数模板从源码中拆出去。完整字段设计、迁移顺序和验收标准见 [docs/agent-platform-roadmap.md](docs/agent-platform-roadmap.md)。
+现在 Provider Profile 已把 Base URL、模型、密钥环境变量引用和并发上限带到配置层，Agent 可以绑定不同 Profile；执行时会解析成临时子进程环境，不把明文密钥写回持久化数据。尚未完成的是 CLI 参数模板、Provider 自动路由与回退，以及对真实 CLI 子进程的强制工具拦截。完整设计见 [docs/agent-platform-roadmap.md](docs/agent-platform-roadmap.md)。
 
 ## 上下文预算
 
@@ -233,7 +233,7 @@ Git 隔离支持两种模式：
 - `worktree`：`git worktree add --detach`，每个任务独立目录，删除任务时只清理工作树。
 - `clone`：当 Windows 文件系统无法写 `.git/worktrees` 时自动回退到 `git clone --shared`，并在界面标记 `CLONE 回退`。
 
-同一进程内可以并行运行多个任务，每个任务使用独立工作区；目前还没有全局 Scheduler、Provider 并发配额和 Agent 租约，详见路线图。
+同一进程内可以并行运行多个任务，每个任务使用独立工作区。全局 Scheduler 会限制同时运行的任务数，按 Provider 计算并发配额，并为显式声明的 Agent 获取租约；排队任务会显示队列位置和等待原因。尚未实现工作区池、磁盘配额、任务优先级和跨 Provider 自动回退，详见路线图。
 
 ## 界面
 
@@ -269,7 +269,10 @@ Git 隔离支持两种模式：
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `GET` | `/api/state` | 全量状态（团队 / 任务 / 设置 / 当前任务） |
+| `GET` | `/api/state` | 全量状态（团队 / Provider / 任务 / 设置 / Scheduler / 当前任务） |
+| `GET` | `/api/scheduler` | 全局队列、运行任务、Provider 配额和 Agent 租约 |
+| `GET` `POST` | `/api/providers` | Provider Profile 列表 / 新增 |
+| `PATCH` `DELETE` | `/api/providers/:id` | 修改 / 删除 Profile（`local-default` 不可删除） |
 | `GET` | `/api/tools` | 工具目录与输入 Schema |
 | `PATCH` | `/api/settings` | 工作流参数（白名单字段 + 范围夹紧） |
 | `POST` | `/api/tasks` | 创建 `{ goal, workspace?, isolation?: "direct"\|"worktree", flowMode?: "debate"\|"direct", autoRun? }` |
@@ -298,7 +301,7 @@ Git 隔离支持两种模式：
 | `GET` | `/api/probe` | 扫描本机 CLI |
 | `GET` | `/api/fs?path=` | 浏览本机目录（「选文件夹开工」） |
 | `GET` | `/api/stream` | SSE 事件流 |
-| `GET` | `/api/health` | 健康检查 |
+| `GET` | `/api/health` | 健康检查（含 Scheduler 快照） |
 | `POST` | `/api/shutdown` | 优雅退出 |
 | `POST` | `/api/hooks/:token` | 外部触发（Bot Hook） |
 
@@ -323,9 +326,9 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 | `PORT` | `8787` | HTTP 端口（被占用时会打印明确提示并以退出码 2 退出，不会静默失败） |
 | `HOST` | `127.0.0.1` | 监听地址；局域网共享设 `0.0.0.0` |
 | `AGENTFORGE_DATA_DIR` | `<repo>/data` | 数据目录，测试与多套数据隔离时用 |
-| `AGENTFORGE_MODEL` | `trae-cn/glm-5.3-flash` | 传给各 CLI 的模型名（走自建网关时改这里，不用逐个 CLI 改配置） |
+| `AGENTFORGE_MODEL` | `trae-cn/glm-5.3-flash` | 全局模型名兜底；Agent 绑定的 Provider Profile 可覆盖模型和 Base URL |
 
-工作流参数（讨论开关与规模、工序并发、返工轮次）在界面 ⚙ 里改，落 `data/db.json` 的 `settings`。
+工作流参数（讨论开关与规模、工序并发、全局任务并发、返工轮次）在界面 ⚙ 里改，落 `data/db.json` 的 `settings`。Provider Profile 在左栏「Provider 配置」或 `/api/providers` 管理；`apiKeyRef` 只保存环境变量名，真实值由服务进程环境提供。
 
 ## 项目结构
 
@@ -334,6 +337,8 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 ├── server/
 │   ├── index.mjs         HTTP 路由、SSE、静态资源、单实例端口守卫
 │   ├── orchestrator.mjs  流水线编排、质量门、上下文组装、产物落盘
+│   ├── scheduler.mjs     全局任务队列、Provider 配额与 Agent 租约
+│   ├── providers.mjs     Provider Profile、密钥引用解析与执行环境
 │   ├── store.mjs         状态、席位、持久化、事件总线
 │   ├── collaboration.mjs 计划版本、消息信封与路由差异
 │   ├── tool-gateway.mjs  工具白名单、主体校验与调用审计
@@ -355,7 +360,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 │   ├── screenshot.png
 │   ├── design-io-image-context.md
 │   └── agent-platform-roadmap.md
-├── tests/                9 个测试文件、60 个测试
+├── tests/                10 个测试文件、65 个测试
 ├── 安装到桌面.bat
 ├── 卸载桌面快捷方式.bat
 └── data/                 运行时数据（gitignore）
@@ -367,7 +372,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 npm test
 ```
 
-60 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、评审结论解析、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `missing` 判定、真实 CLI 任务同样执行质量门、评审员兜底不落到实现者、目录快照复用、上游瞬时故障（ECONNRESET / 429 / socket hang up）只重试一次且不掩盖真实失败、上下文预算（段序稳定性、中文 token 估算、原子写版本、spill 可还原）、工作区文件闭环与路径/敏感文件边界、Agent 工具策略、计划版本与已完成工序保留、消息路由、Tool Gateway 权限与审计、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计（只累加结束过的工序，不拿墙钟冒充）、输出完整性判定（半截提案 / 缺段质询 / 空步骤都会判不合格）、提案宽松解析（`A=7`、`B：8分`、`方案 C 7/10`）、退出码分类（超时 / 已停止 / 命令缺失 / `0xC0000142`）与参数拼装。
+65 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、评审结论解析、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `missing` 判定、真实 CLI 任务同样执行质量门、评审员兜底不落到实现者、目录快照复用、上游瞬时故障（ECONNRESET / 429 / socket hang up）只重试一次且不掩盖真实失败、上下文预算（段序稳定性、中文 token 估算、原子写版本、spill 可还原）、工作区文件闭环与路径/敏感文件边界、Agent 工具策略、计划版本与已完成工序保留、消息路由、Tool Gateway 权限与审计、Provider Profile 持久化与迁移、全局任务并发、Provider 配额、Agent 租约与排队取消、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计（只累加结束过的工序，不拿墙钟冒充）、输出完整性判定（半截提案 / 缺段质询 / 空步骤都会判不合格）、提案宽松解析（`A=7`、`B：8分`、`方案 C 7/10`）、退出码分类（超时 / 已停止 / 命令缺失 / `0xC0000142`）与参数拼装。
 
 ## 已知边界
 
@@ -376,8 +381,8 @@ npm test
 - **`trae-cli` 的行为取决于模型**：工具齐全（bash / 编辑 / 顺序思考），但某些模型只肯调顺序思考而不落盘——这是模型行为，不是配置问题。
 - **模拟模式**：一个可用 CLI 都没有时才会启用，产出仍是可运行的代码（`tests/*.test.js` 能直接 `node` 执行），但成员会明确标注 `SIM 演示`。
 - **Tool Gateway 仍是平台 API 层**：平台 API 已能校验工具白名单、记录调用和审计，但真实 CLI 仍是外部子进程，可以绕过平台直接使用自身工具；CLI 沙箱 / 代理网关仍未实现。
-- **Magpie 只是默认网关**：项目不依赖 Magpie 框架；Provider Profile、密钥引用和多 Provider 路由仍在路线图中。
-- **并发缺全局调度**：不同任务可并行且有独立工作区，但还没有 Provider/CLI 配额、Agent 租约、磁盘配额和任务优先级。
+- **Magpie 只是默认网关**：项目不依赖 Magpie 框架；Provider Profile 和密钥引用已落地，但 CLI 参数模板、自动路由/回退与真实子进程强制拦截仍未完成。
+- **调度粒度仍是任务级**：全局任务并发、Provider 配额和显式 Agent 租约已生效；Provider 配额按绑定该 Provider 的活跃任务计数，不按每次 CLI 调用计数。工作区/磁盘配额和任务优先级仍在路线图中。
 
 ## Roadmap
 
@@ -389,8 +394,10 @@ npm test
 - [x] 计划版本、有限重规划、带路由消息与 Tool Gateway 第一层
 - [ ] CLI 沙箱 / 代理网关（拦截真实 CLI 内部工具调用）
 - [ ] 文件租约、跨 Agent 写冲突检测与事务级回滚
-- [ ] Provider Profile（自定义网关、凭据引用、路由与回退）
-- [ ] 全局 Scheduler（多任务配额、Agent 租约、工作区池）
+- [x] Provider Profile（自定义网关、密钥环境引用、Agent 绑定与并发配额）
+- [x] 全局 Scheduler（任务并发、Provider 配额、Agent 租约）
+- [ ] Provider 自动路由与回退、CLI 参数模板
+- [ ] 工作区池、磁盘配额与任务优先级
 - [ ] 跨任务工作区总览、DAG 图与时间回放
 - [ ] 附件与读图（把截图交给视觉模型看 UI）
 - [ ] 读后写守卫（改动未经读取的文件时要求先读，防盲改）

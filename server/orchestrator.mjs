@@ -7,6 +7,16 @@ import { runDag, throwIfAborted } from './dag.mjs';
 import { versionOf, spillText } from './fs.mjs';
 import { estimateTokens } from './tokens.mjs';
 import { toolGateway } from './tool-gateway.mjs';
+import { withProviderProfile } from './providers.mjs';
+import {
+  cancelQueuedTask,
+  configureScheduler,
+  enqueueTask,
+  isQueued,
+  isScheduled,
+  schedulerSnapshot,
+  withAgentLease,
+} from './scheduler.mjs';
 
 /** taskId -> { runId, controller, stopping } */
 const running = new Map();
@@ -22,6 +32,11 @@ const STEP_KIND = {
   tester: 'tester',
   reviewer: 'reviewer',
 };
+
+/** Persisted agents only carry providerId; resolve secrets into a child copy. */
+export function agentForExecution(agent) {
+  return withProviderProfile(agent, store.providerForAgent(agent));
+}
 
 /**
  * 真实 CLI 的耗时由模型推理、工具调用和网关排队共同决定。
@@ -358,6 +373,7 @@ async function cliMessage(
     artifactRefs = [],
   } = {},
 ) {
+  const execAgent = agentForExecution(agent);
   const msg = store.addMessage(task.id, {
     agentId: agent.id,
     name: agent.name,
@@ -408,7 +424,7 @@ async function cliMessage(
   store.countPrompt(task.id, agent.id, promptTokens);
 
   const runOnce = () =>
-    spawnCli(agent, prompt, {
+    spawnCli(execAgent, prompt, {
       cwd: task.workspace,
       signal,
       timeout,
@@ -1220,13 +1236,15 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
 
   const proposals = await mapPool(roster, cfg.concurrency, async (agent, index) => {
     const id = String.fromCharCode(65 + index);
-    return runProposal(task, agent, {
-      id,
-      index,
-      speed,
-      signal,
-      timeout: CLI_TIMEOUTS.proposal,
-    });
+    return withAgentLease(task.id, agent.id, signal, () =>
+      runProposal(task, agent, {
+        id,
+        index,
+        speed,
+        signal,
+        timeout: CLI_TIMEOUTS.proposal,
+      }),
+    );
   });
   throwIfAborted(signal);
 
@@ -1250,13 +1268,15 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
 
   store.setDebate(task.id, { status: 'critiquing' });
   const critiques = await mapPool(roster, cfg.concurrency, async (agent, index) =>
-    runCritique(task, agent, {
-      index,
-      proposals: valid,
-      speed,
-      signal,
-      timeout: CLI_TIMEOUTS.critique,
-    }),
+    withAgentLease(task.id, agent.id, signal, () =>
+      runCritique(task, agent, {
+        index,
+        proposals: valid,
+        speed,
+        signal,
+        timeout: CLI_TIMEOUTS.critique,
+      }),
+    ),
   );
   throwIfAborted(signal);
 
@@ -1315,14 +1335,16 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
       });
       store.endMessage(task.id, msg.id, {});
     } else if (judge?.mode === 'cli') {
-      const res = await cliMessage(task, judge, buildDecisionPrompt(task, judge, ranking, winner), {
-        kind: 'decision',
-        signal,
-        timeout: CLI_TIMEOUTS.decision,
-        completeWhen: isCompleteDecisionText,
-        settleMs: 5000,
-        message: { debate: { phase: 'decision', winnerId: winner.id } },
-      });
+      const res = await withAgentLease(task.id, judge.id, signal, () =>
+        cliMessage(task, judge, buildDecisionPrompt(task, judge, ranking, winner), {
+          kind: 'decision',
+          signal,
+          timeout: CLI_TIMEOUTS.decision,
+          completeWhen: isCompleteDecisionText,
+          settleMs: 5000,
+          message: { debate: { phase: 'decision', winnerId: winner.id } },
+        }),
+      );
       if (res.code !== 0 || !res.stdout.trim()) throw new Error('裁决说明生成失败');
     } else {
       await streamMessage(task, judge || { id: 'system', name: '编排器', role: 'planner', title: 'ORCHESTRATOR', color: '#a78bfa' }, decisionText, {
@@ -1439,7 +1461,9 @@ async function runStepWithRetry(task, agent, options) {
         startedAt: Date.now(),
       });
     }
-    last = await runStep(task, agent, options);
+    last = await withAgentLease(task.id, agent.id, options.signal, () =>
+      runStep(task, agent, options),
+    );
     if (last.ok || attempt >= maxAttempts || options.signal?.aborted || !shouldRetryCliResult(last)) {
       return { ...last, attempt };
     }
@@ -1819,7 +1843,7 @@ function replanFailure(taskId, result, { runId, reason = '' } = {}) {
 export function replanTask(taskId, { reason = '', steps = null } = {}) {
   const task = store.getTask(taskId);
   if (!task) return null;
-  if (running.has(taskId)) {
+  if (isScheduled(taskId)) {
     throw new Error('任务正在执行，停止后才能重规划');
   }
   const result = store.replanUnfinished(taskId, {
@@ -1857,6 +1881,7 @@ export function isRunning(taskId) {
 }
 
 export function stopTask(taskId) {
+  if (cancelQueuedTask(taskId)) return true;
   const ctx = running.get(taskId);
   if (!ctx || ctx.stopping) return false;
   ctx.stopping = true;
@@ -1879,10 +1904,18 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
   running.set(taskId, state);
   const signal = controller.signal;
   const startedAt = Date.now();
+  const queuedAt = Number(task.queuedAt) || null;
+  const queueMs = queuedAt ? Math.max(0, startedAt - queuedAt) : 0;
 
   store.updateTask(taskId, {
     status: 'running',
     endedAt: null,
+    startedAt,
+    finishedAt: null,
+    queuePosition: null,
+    waitingReason: '',
+    queueMs,
+    executionMs: 0,
     error: null,
     runId,
     repairRound: 0,
@@ -2077,6 +2110,9 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
       {
         status: finalStatus,
         endedAt: Date.now(),
+        finishedAt: Date.now(),
+        executionMs: Date.now() - startedAt,
+        queueMs,
         quality,
         // 真实工时＝各工序实际耗时之和；墙钟另记，含排队、重试与等待
         stats: { ...finished.stats, ms: workMsOf(finished), wallMs: Date.now() - startedAt },
@@ -2121,6 +2157,9 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
       const patch = {
         status: aborted ? 'stopped' : 'error',
         endedAt: Date.now(),
+        finishedAt: Date.now(),
+        executionMs: Date.now() - startedAt,
+        queueMs,
         error: aborted ? '已停止' : err.message,
         // 中断时质量门确实没跑过，别让它永远停在「待执行」
         quality:
@@ -2146,6 +2185,15 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
     if (current?.runId === runId) running.delete(taskId);
   }
 }
+
+/** All external entry points use this wrapper; direct startTask remains the executor. */
+export function scheduleTask(taskId, options = {}) {
+  return enqueueTask(taskId, options);
+}
+
+export { isQueued, isScheduled, schedulerSnapshot };
+
+configureScheduler({ execute: startTask });
 
 function readmeFor(task) {
   const mod = sim.pickModule(task.goal);
@@ -2192,7 +2240,11 @@ export async function chat(taskId, text, { speed = 1 } = {}) {
     // 一次 @ 多位成员：组成讨论组，各自出方案 → 交叉评分 → 裁决后实施。
     if (mentioned.length > 1) {
       const names = mentioned.map((a) => `**${a.name}**`).join('、');
-      const busy = task.status === 'running' || task.status === 'stopping';
+      const busy =
+        task.status === 'running' ||
+        task.status === 'stopping' ||
+        task.status === 'queued' ||
+        isScheduled(taskId);
 
       if ((shouldStart || wantsWork) && !busy) {
         const kickoff = store.addMessage(taskId, {
@@ -2211,9 +2263,7 @@ export async function chat(taskId, text, { speed = 1 } = {}) {
         });
         store.endMessage(taskId, kickoff.id, {});
         await sleep(300);
-        startTask(taskId, { speed, participants: mentioned.map((a) => a.id) }).catch((e) =>
-          console.error('[startTask]', e),
-        );
+        scheduleTask(taskId, { speed, participants: mentioned.map((a) => a.id) });
         return true;
       }
 
@@ -2263,17 +2313,19 @@ export async function chat(taskId, text, { speed = 1 } = {}) {
     const signal = running.get(taskId)?.controller.signal;
 
     if (agent.mode === 'cli') {
-      const res = await cliMessage(
-        task,
-        agent,
-        `${buildPrompt(task, agent, null, transcript, context)}\n\n# 用户说\n${text}`,
-        {
-          kind: 'text',
-          signal,
-          to: { kind: 'owner', id: 'user', name: '你' },
-          parentMessageId: userMessage.id,
-          causeBy: userMessage.id,
-        },
+      const res = await withAgentLease(taskId, agent.id, signal, () =>
+        cliMessage(
+          task,
+          agent,
+          `${buildPrompt(task, agent, null, transcript, context)}\n\n# 用户说\n${text}`,
+          {
+            kind: 'text',
+            signal,
+            to: { kind: 'owner', id: 'user', name: '你' },
+            parentMessageId: userMessage.id,
+            causeBy: userMessage.id,
+          },
+        ),
       );
       if (res.code !== 0) throw new Error(describeCliResult(res));
     } else {
@@ -2290,9 +2342,12 @@ export async function chat(taskId, text, { speed = 1 } = {}) {
 
     // 冷启动提示：任务还没跑过编排，用户说「开始」就直接开工
     const fresh = store.getTask(taskId);
-    if (/^(开始|开工|继续|动手|跑起来|go|start)/i.test(text.trim()) && fresh.status !== 'running') {
+    if (
+      /^(开始|开工|继续|动手|跑起来|go|start)/i.test(text.trim()) &&
+      !['running', 'stopping', 'queued'].includes(fresh.status)
+    ) {
       await sleep(400);
-      startTask(taskId, { speed }).catch((e) => console.error('[startTask]', e));
+      scheduleTask(taskId, { speed });
     }
     return true;
   } catch (err) {
