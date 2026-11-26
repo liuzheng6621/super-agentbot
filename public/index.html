@@ -350,6 +350,9 @@
               <div class="wc-view-tabs" id="wcViewTabs">
                 <button class="wc-view-tab active" type="button" data-wc-view="file">文件</button>
                 <button class="wc-view-tab" type="button" data-wc-view="execution">执行轨迹</button>
+                <button class="wc-view-tab" type="button" data-wc-view="plan">计划版本</button>
+                <button class="wc-view-tab" type="button" data-wc-view="messages">协作消息</button>
+                <button class="wc-view-tab" type="button" data-wc-view="audit">工具审计</button>
                 <button class="wc-view-tab" type="button" data-wc-view="diff">DIFF</button>
               </div>
               <span class="wc-file-state" id="wcFileState">选择一个文件开始</span>
@@ -386,6 +389,42 @@
                 <em id="wcEventCount">00</em>
               </div>
               <div class="wc-events" id="wcEvents"></div>
+            </section>
+
+            <section class="wc-view" id="wcPlanView" hidden>
+              <div class="wc-lanes-head">
+                <div>
+                  <span class="wc-eyebrow">PLAN VERSIONS</span>
+                  <h3>计划如何演进</h3>
+                </div>
+                <div class="wc-view-actions">
+                  <span class="wc-run-status" id="wcPlanCount">V0</span>
+                  <button class="btn btn-ghost sm" id="wcReplan" type="button">重规划未完成工序</button>
+                </div>
+              </div>
+              <div class="wc-plan-versions" id="wcPlanVersions"></div>
+            </section>
+
+            <section class="wc-view" id="wcMessagesView" hidden>
+              <div class="wc-lanes-head">
+                <div>
+                  <span class="wc-eyebrow">MESSAGE ROUTING</span>
+                  <h3>谁把什么交给了谁</h3>
+                </div>
+                <span class="wc-run-status" id="wcMessageCount">00</span>
+              </div>
+              <div class="wc-message-routes" id="wcMessageRoutes"></div>
+            </section>
+
+            <section class="wc-view" id="wcAuditView" hidden>
+              <div class="wc-lanes-head">
+                <div>
+                  <span class="wc-eyebrow">TOOL GATEWAY</span>
+                  <h3>每次工具调用的主体、参数与结果</h3>
+                </div>
+                <span class="wc-run-status" id="wcAuditCount">00</span>
+              </div>
+              <div class="wc-audit" id="wcAudit"></div>
             </section>
 
             <section class="wc-view" id="wcDiffView" hidden>

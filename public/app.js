@@ -992,6 +992,9 @@ const WORKSPACE_EVENT_LABEL = {
   "run.error": "运行中断",
   "tool.call.start": "工具调用",
   "tool.call.end": "工具完成",
+  "tool.policy.denied": "策略拒绝",
+  "message.published": "消息路由",
+  "plan.replanned": "计划重规划",
   "file.changed": "文件变更",
   "fs.write": "写入文件",
   "fs.mkdir": "新建目录",
@@ -1050,7 +1053,22 @@ function workspaceEventTone(event) {
 function workspaceEventSummary(event) {
   const data = event.data || {};
   if (event.type === "tool.call.start" || event.type === "tool.call.end") {
-    return `${data.command || "CLI"}${data.code === undefined ? "" : ` · exit ${data.code}`}`;
+    const tool = data.tool || data.command || "CLI";
+    const operation = data.operation ? ` · ${data.operation}` : "";
+    const status = data.status ? ` · ${data.status}` : data.code === undefined ? "" : ` · exit ${data.code}`;
+    const actor = data.principal?.name ? ` · ${data.principal.name}` : "";
+    return `${tool}${operation}${status}${actor}`;
+  }
+  if (event.type === "tool.policy.denied") {
+    return `${data.tool || "tool"} · ${data.principal?.name || data.agentId || "unknown"} · 已拒绝`;
+  }
+  if (event.type === "message.published") {
+    const from = data.from?.name || "—";
+    const to = (data.to || []).map((item) => item.name || item.id).join("、") || "广播";
+    return `${from} → ${to}`;
+  }
+  if (event.type === "plan.replanned") {
+    return `${data.source || "auto"} · 保留 ${data.preserved?.length || 0} · 重开 ${data.reopened?.length || 0}`;
   }
   if (event.type === "file.changed") {
     return `${data.status || "M"} · ${data.path || ""}`;
@@ -1304,6 +1322,120 @@ function workspaceConsoleLanesHtml() {
     .join("");
 }
 
+function workspaceConsolePlanVersionsHtml() {
+  const versions = (S.task?.planVersions || []).slice().sort((a, b) => b.version - a.version);
+  if (!versions.length) {
+    return '<p class="wc-empty-line">任务开始后会记录初版、返工和重规划快照。</p>';
+  }
+  return versions
+    .map(
+      (version, index) => `<article class="wc-version" data-current="${index === 0}">
+        <header class="wc-version-head">
+          <b>V${version.version}</b>
+          <div>
+            <strong>${escapeHtml(version.reason || "计划更新")}</strong>
+            <span>${escapeHtml(version.source || "platform")} · ${fmtTime(version.createdAt)} · ${version.summary?.done || 0}/${version.summary?.total || 0} 完成</span>
+          </div>
+          <em>${version.added?.length ? `+${version.added.length} ` : ""}${version.removed?.length ? `-${version.removed.length} ` : ""}${version.changed?.length ? `~${version.changed.length}` : ""}</em>
+        </header>
+        <div class="wc-version-steps">
+          ${(version.steps || [])
+            .map(
+              (step) => `<div class="wc-version-step" data-status="${escapeHtml(step.status || "pending")}">
+                <span>${escapeHtml(step.id)}</span>
+                <b>${escapeHtml(step.title || step.id)}</b>
+                <em>${escapeHtml(STEP_STATUS_TEXT[step.status] || step.status || "pending")}</em>
+              </div>`,
+            )
+            .join("")}
+        </div>
+      </article>`,
+    )
+    .join("");
+}
+
+function messageRecipientLabel(message) {
+  const recipients = message.to || [];
+  if (!recipients.length) return "任务广播";
+  return recipients.map((recipient) => recipient.name || recipient.id).join("、");
+}
+
+function workspaceConsoleMessagesHtml() {
+  const messages = (S.task?.messages || []).filter((message) => message.text).slice(-100).reverse();
+  if (!messages.length) return '<p class="wc-empty-line">协作消息会在这里显示来源、目标、关联工序和产物。</p>';
+  return messages
+    .map((message) => {
+      const from = message.from || {};
+      const refs = message.artifactRefs || [];
+      return `<article class="wc-message-route">
+        <div class="wc-message-line">
+          <b>${escapeHtml(from.name || message.name || "System")}</b>
+          <span>→</span>
+          <strong>${escapeHtml(messageRecipientLabel(message))}</strong>
+          <em>${fmtTime(message.createdAt)}</em>
+        </div>
+        <div class="wc-message-meta">
+          <span>${escapeHtml(message.kind || "text")}</span>
+          ${message.stepId ? `<span>STEP ${escapeHtml(message.stepId)}</span>` : ""}
+          ${message.correlationId ? `<span>RUN ${escapeHtml(String(message.correlationId).slice(0, 8))}</span>` : ""}
+          ${message.parentMessageId ? `<span>RE ${escapeHtml(String(message.parentMessageId).slice(0, 8))}</span>` : ""}
+          ${refs.length ? `<span>${refs.length} ARTIFACTS</span>` : ""}
+        </div>
+        <p>${escapeHtml(String(message.text || "").replace(/\s+/g, " ").slice(0, 560))}</p>
+      </article>`;
+    })
+    .join("");
+}
+
+function toolAuditEntries() {
+  const events = (S.task?.events || []).filter((event) => String(event.type || "").startsWith("tool."));
+  const calls = new Map();
+  for (const event of events) {
+    const key = event.data?.callId || event.id;
+    if (!calls.has(key)) calls.set(key, { key, start: null, end: null, denied: null, at: event.at });
+    const entry = calls.get(key);
+    if (event.type === "tool.call.start") entry.start = event;
+    else if (event.type === "tool.call.end") entry.end = event;
+    else if (event.type === "tool.policy.denied") entry.denied = event;
+    entry.at = Math.max(entry.at || 0, event.at || 0);
+  }
+  return [...calls.values()].sort((a, b) => b.at - a.at).slice(0, 120);
+}
+
+function workspaceConsoleAuditHtml() {
+  const entries = toolAuditEntries();
+  if (!entries.length) return '<p class="wc-empty-line">还没有工具调用审计。</p>';
+  return entries
+    .map(({ start, end, denied, at }) => {
+      const data = end?.data || denied?.data || start?.data || {};
+      const status = data.status || (end ? "ok" : denied ? "denied" : "running");
+      const actor = data.principal?.name || data.agentId || "Owner UI";
+      const args = data.arguments
+        ? Object.entries(data.arguments)
+            .map(([key, value]) => `${key}=${typeof value === "string" ? value : JSON.stringify(value)}`)
+            .join(" · ")
+        : data.command
+          ? [data.command, ...(data.args || [])].join(" ")
+          : "";
+      return `<article class="wc-audit-row" data-status="${escapeHtml(status)}">
+        <div class="wc-audit-main">
+          <b>${escapeHtml(data.tool || data.command || "tool")}</b>
+          <span>${escapeHtml(data.operation || "call")}</span>
+          <em>${escapeHtml(status)}</em>
+        </div>
+        <div class="wc-audit-meta">
+          <span>${escapeHtml(actor)}</span>
+          <span>${escapeHtml(data.source || "runtime")}</span>
+          ${data.durationMs !== undefined ? `<span>${fmtMs(data.durationMs)}</span>` : ""}
+          <span>${fmtTime(at)}</span>
+        </div>
+        ${args ? `<code>${escapeHtml(args)}</code>` : ""}
+        ${data.error ? `<p>${escapeHtml(data.error)}</p>` : ""}
+      </article>`;
+    })
+    .join("");
+}
+
 function renderWorkspaceConsoleFile() {
   const empty = $("#wcFileEmpty");
   const codeBlock = $("#wcCodeBlock");
@@ -1356,6 +1488,9 @@ function renderWorkspaceConsole() {
     $("#wcSearchResults").innerHTML = "";
     $("#wcLanes").innerHTML = '<p class="wc-empty-line">选择任务后显示执行泳道。</p>';
     $("#wcEvents").innerHTML = '<p class="hint">选择任务后显示运行事件。</p>';
+    $("#wcPlanVersions").innerHTML = '<p class="wc-empty-line">选择任务后显示计划版本。</p>';
+    $("#wcMessageRoutes").innerHTML = '<p class="wc-empty-line">选择任务后显示协作消息。</p>';
+    $("#wcAudit").innerHTML = '<p class="wc-empty-line">选择任务后显示工具审计。</p>';
     $("#wcContext").innerHTML = "";
     $("#wcPolicy").innerHTML = "";
     $("#wcSummary").innerHTML = "";
@@ -1366,6 +1501,9 @@ function renderWorkspaceConsole() {
     $("#wcEventCount").textContent = "00";
     $("#wcContextCount").textContent = "00";
     $("#wcPolicyCount").textContent = "00";
+    $("#wcPlanCount").textContent = "V0";
+    $("#wcMessageCount").textContent = "00";
+    $("#wcAuditCount").textContent = "00";
     renderWorkspaceConsoleFile();
     return;
   }
@@ -1417,7 +1555,13 @@ function renderWorkspaceConsole() {
   $("#wcEvents").innerHTML = events.length
     ? events.slice().reverse().slice(0, 120).map(workspaceConsoleEventHtml).join("")
     : '<p class="hint">任务运行后会记录工具调用、文件变更和运行结果。</p>';
+  $("#wcPlanVersions").innerHTML = workspaceConsolePlanVersionsHtml();
+  $("#wcMessageRoutes").innerHTML = workspaceConsoleMessagesHtml();
+  $("#wcAudit").innerHTML = workspaceConsoleAuditHtml();
   $("#wcRunStatus").textContent = STATUS_TEXT[S.task.status] || S.task.status || "—";
+  $("#wcPlanCount").textContent = `V${S.task.planVersion || 0}`;
+  $("#wcMessageCount").textContent = pad2((S.task.messages || []).length);
+  $("#wcAuditCount").textContent = pad2(toolAuditEntries().length);
   $("#wcContext").innerHTML = workspaceConsoleContextHtml();
   $("#wcPolicy").innerHTML = workspaceConsolePolicyHtml();
   $("#wcSummary").innerHTML = workspaceConsoleSummaryHtml();
@@ -1426,14 +1570,26 @@ function renderWorkspaceConsole() {
 }
 
 function setWorkspaceConsoleView(view, { render = true } = {}) {
-  const next = ["file", "execution", "diff"].includes(view) ? view : "file";
+  const next = ["file", "execution", "plan", "messages", "audit", "diff"].includes(view) ? view : "file";
   S.workspaceConsoleView = next;
   $$("#wcViewTabs [data-wc-view]").forEach((button) => {
     button.classList.toggle("active", button.dataset.wcView === next);
   });
   $("#wcFileView").hidden = next !== "file";
   $("#wcExecutionView").hidden = next !== "execution";
+  $("#wcPlanView").hidden = next !== "plan";
+  $("#wcMessagesView").hidden = next !== "messages";
+  $("#wcAuditView").hidden = next !== "audit";
   $("#wcDiffView").hidden = next !== "diff";
+  const stateLabel = {
+    execution: "按成员查看工序、依赖与运行事件",
+    plan: `计划版本 V${S.task?.planVersion || 0} · 快照不可变`,
+    messages: "消息保留来源、目标、关联工序与产物",
+    audit: "策略校验、参数摘要与执行结果",
+    diff: "对比当前工作区与 Git 基线",
+  }[next];
+  if (stateLabel) $("#wcFileState").textContent = stateLabel;
+  else renderWorkspaceConsoleFile();
   if (render && next === "diff") loadWorkspaceConsoleDiff();
 }
 
@@ -1452,6 +1608,38 @@ async function loadWorkspaceConsoleDiff() {
       : data.reason || data.error || "当前工作区没有可用的 diff。";
   } catch (err) {
     $("#wcDiff").textContent = `读取失败：${err.message}`;
+  }
+}
+
+async function replanWorkspaceTask() {
+  if (!S.task) return;
+  if (S.task.running || ["running", "stopping"].includes(S.task.status)) {
+    toast("任务正在执行，停止后才能重规划", "err");
+    return;
+  }
+  const button = $("#wcReplan");
+  button.disabled = true;
+  try {
+    const data = await api(`/api/tasks/${S.task.id}/replan`, {
+      method: "POST",
+      body: { reason: "用户从工作区控制台重规划未完成工序" },
+    });
+    S.task = data.task;
+    const summary = S.tasks.find((task) => task.id === S.task.id);
+    if (summary) {
+      summary.status = S.task.status;
+      summary.planVersion = S.task.planVersion;
+      summary.planVersions = S.task.planVersions?.length || 0;
+      summary.steps = S.task.plan?.length || 0;
+      summary.doneSteps = (S.task.plan || []).filter((step) => step.status === "done").length;
+    }
+    renderAll();
+    await loadWorkspace({ force: true });
+    toast(`已生成计划 V${S.task.planVersion}，保留 ${data.replan?.preserved?.length || 0} 个完成工序`, "ok");
+  } catch (err) {
+    toast(`重规划失败：${err.message}`, "err");
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -2035,8 +2223,11 @@ function handleEvent(ev) {
     case "plan.updated": {
       if (cur && cur.id === ev.taskId) {
         cur.plan = ev.plan;
+        cur.planVersion = ev.planVersion || cur.planVersion || 0;
+        cur.planVersions = ev.planVersions || cur.planVersions || [];
         renderPlan();
         renderFlow();
+        if (S.workspaceConsoleOpen) renderWorkspaceConsole();
         // 同步左侧历史条上的进度，否则永远停在 0/0
         const summary = S.tasks.find((t) => t.id === ev.taskId);
         if (summary) {
@@ -2045,6 +2236,10 @@ function handleEvent(ev) {
           renderTasks();
         }
       }
+      break;
+    }
+    case "plan.replanned": {
+      syncCurrentTask();
       break;
     }
     case "debate.updated": {
@@ -2790,7 +2985,10 @@ function bind() {
   /* 全屏工作区控制台 */
   $("#workspaceExpand").addEventListener("click", openWorkspaceConsole);
   $("#wcClose").addEventListener("click", closeWorkspaceConsole);
-  $("#wcRefresh").addEventListener("click", () => loadWorkspace({ force: true }));
+  $("#wcRefresh").addEventListener("click", async () => {
+    await syncCurrentTask();
+    await loadWorkspace({ force: true });
+  });
   $("#wcSearchBtn").addEventListener("click", () => searchWorkspaceFrom("#wcSearch"));
   $("#wcSearch").addEventListener("keydown", (e) => {
     if (e.key === "Enter") searchWorkspaceFrom("#wcSearch");
@@ -2823,6 +3021,7 @@ function bind() {
   $("#wcSave").addEventListener("click", saveWorkspaceFile);
   $("#wcDelete").addEventListener("click", deleteWorkspaceFile);
   $("#wcDiffRefresh").addEventListener("click", loadWorkspaceConsoleDiff);
+  $("#wcReplan").addEventListener("click", replanWorkspaceTask);
 
   $("#copyHook").addEventListener("click", async () => {
     const url = `${location.origin}/api/hooks/${S.settings.hookToken || ""}`;

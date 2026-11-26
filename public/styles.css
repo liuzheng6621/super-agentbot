@@ -4436,6 +4436,8 @@ kbd {
 .wc-view-tabs {
   display: flex;
   gap: 0;
+  min-width: 0;
+  overflow-x: auto;
   border: 2px solid var(--edge);
   background: var(--card);
 }
@@ -4449,6 +4451,8 @@ kbd {
   font-family: var(--f-body);
   font-size: 11.5px;
   font-weight: 700;
+  white-space: nowrap;
+  flex: none;
   cursor: pointer;
 }
 
@@ -4597,6 +4601,237 @@ kbd {
   display: grid;
   gap: 8px;
   padding: 10px;
+}
+
+.wc-view-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+.wc-plan-versions,
+.wc-message-routes,
+.wc-audit {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 10px;
+}
+
+.wc-version {
+  border: 2px solid var(--edge);
+  background: var(--card);
+}
+
+.wc-version[data-current="true"] {
+  border-left: 5px solid var(--leaf);
+}
+
+.wc-version-head {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  padding: 7px 8px;
+  border-bottom: 1px dashed var(--edge);
+  background: var(--sunken);
+}
+
+.wc-version-head > b {
+  padding: 2px 4px;
+  border: 1px solid var(--edge);
+  background: var(--leaf);
+  color: var(--edge);
+  font-family: var(--f-pixel);
+  font-size: 10px;
+  text-align: center;
+}
+
+.wc-version-head strong {
+  display: block;
+  font-size: 11px;
+}
+
+.wc-version-head span {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-family: var(--f-code);
+  font-size: 9px;
+}
+
+.wc-version-head em {
+  color: var(--muted);
+  font-family: var(--f-pixel);
+  font-size: 9px;
+  font-style: normal;
+}
+
+.wc-version-steps {
+  display: grid;
+  gap: 3px;
+  padding: 6px 8px 8px;
+}
+
+.wc-version-step {
+  display: grid;
+  grid-template-columns: minmax(72px, 0.45fr) minmax(0, 1fr) auto;
+  gap: 7px;
+  align-items: center;
+  padding: 4px 0;
+  border-bottom: 1px dashed var(--muted);
+  font-size: 10px;
+}
+
+.wc-version-step:last-child {
+  border-bottom: 0;
+}
+
+.wc-version-step span,
+.wc-version-step em {
+  color: var(--muted);
+  font-family: var(--f-code);
+  font-size: 9px;
+  font-style: normal;
+}
+
+.wc-version-step[data-status="done"] em {
+  color: var(--leaf);
+}
+
+.wc-version-step[data-status="error"] em,
+.wc-version-step[data-status="blocked"] em {
+  color: var(--orange);
+}
+
+.wc-message-route {
+  padding: 7px 8px;
+  border: 1px solid var(--edge);
+  background: var(--card);
+}
+
+.wc-message-line {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+.wc-message-line b,
+.wc-message-line strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 10.5px;
+}
+
+.wc-message-line span {
+  color: var(--orange);
+  font-family: var(--f-pixel);
+}
+
+.wc-message-line em {
+  margin-left: auto;
+  flex: none;
+  color: var(--muted);
+  font-family: var(--f-code);
+  font-size: 9px;
+  font-style: normal;
+}
+
+.wc-message-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 4px 0;
+}
+
+.wc-message-meta span {
+  padding: 1px 4px;
+  border: 1px solid var(--edge);
+  background: var(--sunken);
+  color: var(--muted);
+  font-family: var(--f-code);
+  font-size: 8.5px;
+}
+
+.wc-message-route p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.wc-audit-row {
+  padding: 7px 8px;
+  border: 1px solid var(--edge);
+  border-left: 4px solid var(--leaf);
+  background: var(--card);
+}
+
+.wc-audit-row[data-status="error"],
+.wc-audit-row[data-status="denied"] {
+  border-left-color: var(--orange);
+}
+
+.wc-audit-row[data-status="running"] {
+  border-left-color: var(--yellow);
+}
+
+.wc-audit-main,
+.wc-audit-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.wc-audit-main b {
+  font-family: var(--f-code);
+  font-size: 10.5px;
+}
+
+.wc-audit-main span,
+.wc-audit-main em,
+.wc-audit-meta span {
+  color: var(--muted);
+  font-family: var(--f-code);
+  font-size: 9px;
+  font-style: normal;
+}
+
+.wc-audit-main em {
+  margin-left: auto;
+  padding: 1px 4px;
+  border: 1px solid var(--edge);
+  color: var(--fg);
+}
+
+.wc-audit-meta {
+  flex-wrap: wrap;
+  margin-top: 3px;
+}
+
+.wc-audit-row code {
+  display: block;
+  margin-top: 5px;
+  padding: 4px 5px;
+  overflow: hidden;
+  background: var(--sunken);
+  color: var(--muted);
+  font-family: var(--f-code);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wc-audit-row p {
+  margin: 4px 0 0;
+  color: var(--orange);
+  font-size: 10px;
 }
 
 .wc-lane {

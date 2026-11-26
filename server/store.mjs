@@ -3,6 +3,12 @@ import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { estimateTokens } from './tokens.mjs';
+import {
+  createMessageEnvelope,
+  createPlanSnapshot,
+  ensureMessageEnvelope,
+  ensurePlanVersionState,
+} from './collaboration.mjs';
 
 export const ROOT = path.resolve(import.meta.dirname, '..');
 export const DATA_DIR = process.env.AGENTFORGE_DATA_DIR
@@ -14,6 +20,7 @@ const DB_FILE = path.join(DATA_DIR, 'db.json');
 const MAX_MESSAGES = 400;
 const MAX_TASK_EVENTS = 800;
 const MAX_FILE_CHANGES = 500;
+const MAX_PLAN_VERSIONS = 40;
 
 export const ROLE_ORDER = ['planner', 'architect', 'coder', 'tester', 'reviewer'];
 export const ROLE_LABEL = {
@@ -25,12 +32,118 @@ export const ROLE_LABEL = {
 };
 
 export const TOOL_CATALOG = [
-  { id: 'workspace.read', label: '读取工作区' },
-  { id: 'workspace.search', label: '搜索工作区' },
-  { id: 'workspace.write', label: '创建或修改文件' },
-  { id: 'workspace.move', label: '移动或重命名' },
-  { id: 'workspace.delete', label: '移入回收站' },
-  { id: 'shell', label: '执行 Shell' },
+  {
+    id: 'workspace.read',
+    label: '读取工作区',
+    description: '读取工作树、文件、事件、变更和 Git diff。',
+    risk: 'read',
+    scope: 'workspace',
+    audit: true,
+    operations: ['tree', 'files', 'file', 'events', 'changes', 'diff'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        op: { enum: ['tree', 'files', 'file', 'events', 'changes', 'diff'] },
+        path: { type: 'string' },
+        limit: { type: 'integer', minimum: 1, maximum: 800 },
+      },
+      required: ['op'],
+      additionalProperties: false,
+    },
+  },
+  {
+    id: 'workspace.search',
+    label: '搜索工作区',
+    description: '按文本搜索工作区中的非敏感文件。',
+    risk: 'read',
+    scope: 'workspace',
+    audit: true,
+    operations: ['search'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        op: { const: 'search' },
+        query: { type: 'string', minLength: 2 },
+      },
+      required: ['op', 'query'],
+      additionalProperties: false,
+    },
+  },
+  {
+    id: 'workspace.write',
+    label: '创建或修改文件',
+    description: '创建目录或原子写入工作区文件。',
+    risk: 'write',
+    scope: 'workspace',
+    audit: true,
+    operations: ['write', 'mkdir'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        op: { enum: ['write', 'mkdir'] },
+        path: { type: 'string' },
+        content: { type: 'string', maxLength: 2097152 },
+      },
+      required: ['op', 'path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    id: 'workspace.move',
+    label: '移动或重命名',
+    description: '移动或重命名工作区中的文件与目录。',
+    risk: 'write',
+    scope: 'workspace',
+    audit: true,
+    operations: ['move'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        op: { const: 'move' },
+        from: { type: 'string' },
+        to: { type: 'string' },
+      },
+      required: ['op', 'from', 'to'],
+      additionalProperties: false,
+    },
+  },
+  {
+    id: 'workspace.delete',
+    label: '移入回收站',
+    description: '把工作区文件或目录移入可恢复的回收站。',
+    risk: 'destructive',
+    scope: 'workspace',
+    audit: true,
+    operations: ['delete'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        op: { const: 'delete' },
+        path: { type: 'string' },
+      },
+      required: ['op', 'path'],
+      additionalProperties: false,
+    },
+  },
+  {
+    id: 'shell',
+    label: '执行 Shell',
+    description: '执行受控命令。当前版本只声明能力，尚未开放平台执行入口。',
+    risk: 'execute',
+    scope: 'workspace',
+    audit: true,
+    operations: ['exec'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        op: { const: 'exec' },
+        command: { type: 'string' },
+        args: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['op', 'command'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 export const ROLE_TOOLS = {
@@ -56,6 +169,35 @@ export function normalizeTools(value, role) {
   const allowed = new Set(TOOL_CATALOG.map((tool) => tool.id));
   const input = Array.isArray(value) ? value : toolsForRole(role);
   return [...new Set(input.filter((tool) => allowed.has(String(tool))))];
+}
+
+function normalizePlanStep(step = {}, fallbackId = 'step-1', used = new Set(), reset = false) {
+  let id = String(step.id || fallbackId);
+  if (used.has(id)) id = `${fallbackId}-${randomUUID().slice(0, 4)}`;
+  used.add(id);
+  const saved = {
+    ...step,
+    id,
+    title: String(step.title || id),
+    role: String(step.role || 'coder'),
+    agentId: String(step.agentId || ''),
+    needs: [...new Set((step.needs || []).map(String).filter(Boolean))],
+    outputPaths: Array.isArray(step.outputPaths) ? [...step.outputPaths] : [],
+    status: reset ? 'pending' : String(step.status || 'pending'),
+    note: reset ? '' : String(step.note || ''),
+    attempt: reset ? 0 : Math.max(0, Number(step.attempt) || 0),
+    maxAttempts: Math.max(1, Number(step.maxAttempts) || 1),
+    round: Math.max(0, Number(step.round) || 0),
+  };
+  if (reset) {
+    delete saved.startedAt;
+    delete saved.endedAt;
+    delete saved.verdict;
+    delete saved.resultText;
+    delete saved.outputRole;
+    delete saved.outputName;
+  }
+  return saved;
 }
 
 /** 默认团队：覆盖「规划 → 架构 → 实现 → 测试 → 评审」完整链路 */
@@ -98,6 +240,7 @@ function emptyDb() {
       simSpeed: 1,
       maxConcurrency: 2,
       maxRepairRounds: 1,
+      maxAutoReplans: 1,
       maxStepAttempts: 2,
       // 方案讨论：默认 5 位提案人（4 个执行席位 + 1 个工具池 CLI），决策后再实施。
       debateEnabled: true,
@@ -272,7 +415,14 @@ class Store {
             if (t.debate.status === 'decided') t.debate.status = 'fallback';
             recovered = true;
           }
-          for (const m of t.messages || []) if (!m.done) m.done = true;
+          if (ensurePlanVersionState(t)) recovered = true;
+          for (const m of t.messages || []) {
+            if (!m.done) {
+              m.done = true;
+              recovered = true;
+            }
+            if (ensureMessageEnvelope(t, m)) recovered = true;
+          }
           if (!Array.isArray(t.events)) t.events = [];
           if (!Array.isArray(t.fileChanges)) t.fileChanges = [];
           if (t.events.length > MAX_TASK_EVENTS) t.events.splice(0, t.events.length - MAX_TASK_EVENTS);
@@ -529,6 +679,9 @@ class Store {
       artifacts: [],
       runId: null,
       repairRound: 0,
+      planVersion: 0,
+      planVersions: [],
+      autoReplans: [],
       quality: { status: 'pending' },
       debate: { status: 'pending', proposals: [], critiques: [], decision: null },
       stats: { tokens: 0, tokensIn: 0, tokensOut: 0, agentRuns: 0, files: 0, ms: 0 },
@@ -561,6 +714,8 @@ class Store {
       endedAt: task.endedAt,
       runId: task.runId || null,
       repairRound: task.repairRound || 0,
+      planVersion: task.planVersion || 0,
+      planVersions: (task.planVersions || []).length,
       quality: task.quality || { status: 'pending' },
       stats: task.stats,
       steps: task.plan.length,
@@ -590,6 +745,8 @@ class Store {
       s.maxConcurrency = clamp(patch.maxConcurrency, 1, 4, s.maxConcurrency);
     if (patch.maxRepairRounds !== undefined)
       s.maxRepairRounds = clamp(patch.maxRepairRounds, 0, 3, s.maxRepairRounds);
+    if (patch.maxAutoReplans !== undefined)
+      s.maxAutoReplans = clamp(patch.maxAutoReplans, 0, 1, s.maxAutoReplans);
     if (patch.maxStepAttempts !== undefined)
       s.maxStepAttempts = clamp(patch.maxStepAttempts, 1, 3, s.maxStepAttempts);
     if (patch.simSpeed !== undefined)
@@ -630,16 +787,24 @@ class Store {
   }
 
   /* ---------- messages ---------- */
-  addMessage(taskId, msg) {
+  publishMessage(taskId, msg, options = {}) {
+    return this.addMessage(taskId, msg, options);
+  }
+
+  addMessage(taskId, msg, options = {}) {
     const task = this.getTask(taskId);
     if (!task) return null;
-    const message = {
+    const draft = {
       id: randomUUID(),
       createdAt: Date.now(),
       done: false,
       text: '',
       kind: 'text',
       ...msg,
+    };
+    const message = {
+      ...draft,
+      ...createMessageEnvelope(task, draft, options),
     };
     task.messages.push(message);
     if (task.messages.length > MAX_MESSAGES) task.messages.splice(0, task.messages.length - MAX_MESSAGES);
@@ -649,6 +814,23 @@ class Store {
       taskId,
       runId: task.runId || null,
       message: { ...message, text: message.done ? message.text : '' },
+    });
+    this.addTaskEvent(taskId, {
+      type: 'message.published',
+      runId: task.runId || null,
+      agentId: message.agentId || '',
+      stepId: message.stepId || '',
+      data: {
+        messageId: message.id,
+        correlationId: message.correlationId,
+        from: message.from,
+        to: message.to,
+        route: message.route,
+        parentMessageId: message.parentMessageId,
+        causeBy: message.causeBy,
+        artifactRefs: message.artifactRefs,
+        kind: message.kind,
+      },
     });
     this.save();
     return message;
@@ -708,58 +890,131 @@ class Store {
   }
 
   /* ---------- plan ---------- */
-  setPlan(taskId, steps) {
-    const task = this.getTask(taskId);
-    if (!task) return;
-    const used = new Set();
-    task.plan = steps.map((s, i) => {
-      let id = String(s.id || `step-${i + 1}`);
-      if (used.has(id)) id = `step-${i + 1}-${randomUUID().slice(0, 4)}`;
-      used.add(id);
-      return {
-        id,
-        title: s.title,
-        role: s.role,
-        agentId: s.agentId || '',
-        needs: [...new Set((s.needs || []).filter(Boolean))],
-        outputPaths: s.outputPaths || [],
-        status: 'pending',
-        note: '',
-        attempt: 0,
-        maxAttempts: Math.max(1, Number(s.maxAttempts) || 1),
-        round: Number(s.round) || 0,
-      };
+  _recordPlanVersion(task, previousSteps, options = {}) {
+    const version = Math.max(1, Number(task.planVersion || 0) + 1);
+    const snapshot = createPlanSnapshot({
+      version,
+      previousSteps,
+      steps: task.plan,
+      reason: options.reason || 'plan-updated',
+      source: options.source || 'orchestrator',
+      runId: options.runId || task.runId || '',
+      added: options.added,
+      removed: options.removed,
+      changed: options.changed,
     });
-    this.broadcast({ type: 'plan.updated', taskId, runId: task.runId, plan: task.plan });
-    this.save();
+    task.planVersion = version;
+    task.planVersions ||= [];
+    task.planVersions.push(snapshot);
+    if (task.planVersions.length > MAX_PLAN_VERSIONS) {
+      task.planVersions.splice(0, task.planVersions.length - MAX_PLAN_VERSIONS);
+    }
+    return snapshot;
   }
 
-  appendPlan(taskId, steps) {
+  _emitPlan(task) {
+    this.broadcast({
+      type: 'plan.updated',
+      taskId: task.id,
+      runId: task.runId,
+      plan: task.plan,
+      planVersion: task.planVersion || 0,
+      planVersions: task.planVersions || [],
+    });
+  }
+
+  setPlan(taskId, steps, options = {}) {
+    const task = this.getTask(taskId);
+    if (!task) return null;
+    const previous = task.plan || [];
+    const used = new Set();
+    task.plan = (Array.isArray(steps) ? steps : []).map((step, index) =>
+      normalizePlanStep(step, `step-${index + 1}`, used, true),
+    );
+    this._recordPlanVersion(task, previous, {
+      ...options,
+      reason: options.reason || 'initial-plan',
+      source: options.source || 'orchestrator',
+    });
+    this._emitPlan(task);
+    this.save();
+    return task.plan;
+  }
+
+  appendPlan(taskId, steps, options = {}) {
     const task = this.getTask(taskId);
     if (!task) return [];
+    const previous = task.plan.map((step) => ({ ...step, needs: [...(step.needs || [])] }));
     const used = new Set(task.plan.map((s) => s.id));
-    const added = steps.map((s, i) => {
-      let id = String(s.id || `step-${task.plan.length + i + 1}`);
-      if (used.has(id)) id = `${id}-${randomUUID().slice(0, 4)}`;
-      used.add(id);
-      return {
-        id,
-        title: s.title,
-        role: s.role,
-        agentId: s.agentId || '',
-        needs: [...new Set((s.needs || []).filter(Boolean))],
-        outputPaths: s.outputPaths || [],
-        status: 'pending',
-        note: '',
-        attempt: 0,
-        maxAttempts: Math.max(1, Number(s.maxAttempts) || 1),
-        round: Number(s.round) || 0,
-      };
-    });
+    const added = (Array.isArray(steps) ? steps : []).map((step, index) =>
+      normalizePlanStep(step, `step-${task.plan.length + index + 1}`, used, true),
+    );
     task.plan.push(...added);
-    this.broadcast({ type: 'plan.updated', taskId, runId: task.runId, plan: task.plan });
+    this._recordPlanVersion(task, previous, {
+      ...options,
+      reason: options.reason || 'plan-appended',
+      source: options.source || 'orchestrator',
+      added: added.map((step) => step.id),
+    });
+    this._emitPlan(task);
     this.save();
     return added;
+  }
+
+  replacePlan(taskId, steps, options = {}) {
+    const task = this.getTask(taskId);
+    if (!task) return [];
+    const previous = task.plan || [];
+    const preserveDone = options.preserveDone !== false;
+    const completed = preserveDone
+      ? previous.filter((step) => ['done', 'skipped'].includes(step.status))
+      : [];
+    const used = new Set();
+    const incoming = (Array.isArray(steps) ? steps : []).map((step, index) =>
+      normalizePlanStep(step, `step-${index + 1}`, used, true),
+    );
+    const next = [];
+    for (const step of completed) {
+      if (!incoming.some((candidate) => candidate.id === step.id)) next.push(step);
+    }
+    for (const step of incoming) {
+      const done = completed.find((candidate) => candidate.id === step.id);
+      next.push(done || step);
+    }
+    for (const step of completed) {
+      if (!next.some((candidate) => candidate.id === step.id)) next.push(step);
+    }
+    task.plan = next;
+    this._recordPlanVersion(task, previous, {
+      ...options,
+      reason: options.reason || 'manual-replan',
+      source: options.source || 'manual',
+    });
+    this._emitPlan(task);
+    this.save();
+    return task.plan;
+  }
+
+  replanUnfinished(taskId, options = {}) {
+    const task = this.getTask(taskId);
+    if (!task) return null;
+    const completed = task.plan.filter((step) => ['done', 'skipped'].includes(step.status));
+    const unfinished = Array.isArray(options.steps)
+      ? options.steps
+      : task.plan.filter((step) => !['done', 'skipped'].includes(step.status));
+    this.replacePlan(taskId, unfinished, {
+      ...options,
+      preserveDone: true,
+      reason: options.reason || 'manual-replan',
+      source: options.source || 'manual',
+    });
+    return {
+      task: this.getTask(taskId),
+      preserved: completed.map((step) => step.id),
+      reopened: this.getTask(taskId).plan
+        .filter((step) => !['done', 'skipped'].includes(step.status))
+        .map((step) => step.id),
+    };
   }
 
   updateStep(taskId, stepId, patch) {

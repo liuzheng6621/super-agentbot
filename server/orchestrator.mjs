@@ -4,8 +4,9 @@ import { store, randomUUID, ROLE_LABEL, TOOL_CATALOG } from './store.mjs';
 import * as sim from './sim.mjs';
 import { streamText, spawnCli, sleep, classifyCliExit, describeCliResult } from './adapters.mjs';
 import { runDag, throwIfAborted } from './dag.mjs';
-import { writeFileAtomic, versionOf, spillText } from './fs.mjs';
+import { versionOf, spillText } from './fs.mjs';
 import { estimateTokens } from './tokens.mjs';
+import { toolGateway } from './tool-gateway.mjs';
 
 /** taskId -> { runId, controller, stopping } */
 const running = new Map();
@@ -70,16 +71,18 @@ export function pickAgent(role) {
   return seats.find((a) => a.role !== 'coder') || seats[0] || store.agents[0] || null;
 }
 
-function safeJoin(root, rel) {
-  const base = path.resolve(root);
-  const target = path.resolve(base, rel);
-  if (target !== base && !target.startsWith(base + path.sep)) throw new Error(`非法路径: ${rel}`);
-  return target;
-}
-
 export function writeWorkspaceFile(task, relPath, content, meta = {}) {
-  const abs = safeJoin(task.workspace, relPath);
-  writeFileAtomic(abs, content);
+  const invocation = toolGateway.invokeTool({
+    taskId: task.id,
+    toolId: 'workspace.write',
+    operation: 'write',
+    args: { op: 'write', path: relPath, content },
+    agentId: meta.agentId || '',
+    principal: { kind: 'system', id: 'orchestrator', name: 'Orchestrator' },
+    stepId: meta.stepId || '',
+    source: 'orchestrator',
+  });
+  const abs = path.join(task.workspace, invocation.result.path);
   const stat = fs.statSync(abs, { bigint: true });
   const bytes = Buffer.byteLength(content);
   // 自己写的文件立刻记进本任务的目录快照，下一步就不用再全量扫一遍
@@ -92,16 +95,6 @@ export function writeWorkspaceFile(task, relPath, content, meta = {}) {
       mtimeNs: stat.mtimeNs.toString(),
     });
   }
-  store.addArtifact(task.id, {
-    path: relPath,
-    bytes,
-    mtimeMs: Number(stat.mtimeMs),
-    version: versionOf(abs) || '',
-    lang: path.extname(relPath).slice(1) || 'text',
-    agentId: meta.agentId || '',
-    stepId: meta.stepId || '',
-    source: 'simulation',
-  });
   return abs;
 }
 
@@ -179,6 +172,8 @@ export function buildContextPack(task, { maxMessages = 8, maxFiles = 80, files }
     workspace: task.workspace,
     status: task.status,
     mode: task.mode,
+    planVersion: task.planVersion || 0,
+    planVersionReason: task.planVersions?.at(-1)?.reason || '',
     plan: (task.plan || []).map((s) => ({
       id: s.id,
       title: s.title,
@@ -196,6 +191,10 @@ export function buildContextPack(task, { maxMessages = 8, maxFiles = 80, files }
         name: m.name || m.role || 'AI',
         role: m.role || '',
         kind: m.kind || 'text',
+        from: m.from?.name || m.name || '',
+        to: (m.to || []).map((recipient) => recipient.name || recipient.id).join(', '),
+        correlationId: m.correlationId || '',
+        stepId: m.stepId || '',
         text: String(m.text).replace(/\s+/g, ' ').slice(0, 300),
       })),
     budget: {
@@ -226,6 +225,7 @@ export function volatileBlock(context, step = '') {
   return [
     '# 项目上下文（实时）',
     `- 状态: ${context.status}`,
+    `- 计划版本: v${context.planVersion || 0}${context.planVersionReason ? ` · ${context.planVersionReason}` : ''}`,
     step ? `- 当前工序: ${step}` : '',
     '',
     '# 工序账本',
@@ -281,7 +281,23 @@ function recordRun(task, agent) {
 /* 消息流                                                              */
 /* ------------------------------------------------------------------ */
 
-async function streamMessage(task, agent, text, { kind = 'text', signal, speed = 1, meta = {}, message = {} } = {}) {
+async function streamMessage(
+  task,
+  agent,
+  text,
+  {
+    kind = 'text',
+    signal,
+    speed = 1,
+    meta = {},
+    message = {},
+    to = null,
+    parentMessageId = '',
+    causeBy = '',
+    stepId = '',
+    artifactRefs = [],
+  } = {},
+) {
   const msg = store.addMessage(task.id, {
     agentId: agent.id,
     name: agent.name,
@@ -290,6 +306,12 @@ async function streamMessage(task, agent, text, { kind = 'text', signal, speed =
     color: agent.color,
     kind,
     ...message,
+  }, {
+    to,
+    parentMessageId,
+    causeBy,
+    stepId,
+    artifactRefs,
   });
   beginAgent(agent, `${ROLE_LABEL[agent.role] || agent.role}发言中`);
   try {
@@ -329,6 +351,11 @@ async function cliMessage(
     message = {},
     completeWhen = null,
     settleMs = 0,
+    to = null,
+    parentMessageId = '',
+    causeBy = '',
+    stepId = '',
+    artifactRefs = [],
   } = {},
 ) {
   const msg = store.addMessage(task.id, {
@@ -340,6 +367,12 @@ async function cliMessage(
     kind,
     engine: 'cli',
     ...message,
+  }, {
+    to,
+    parentMessageId,
+    causeBy,
+    stepId: stepId || agent.currentStepId || '',
+    artifactRefs,
   });
   beginAgent(agent, `${agent.cli?.command || 'CLI'} 运行中`);
   const toolCall = store.addTaskEvent(task.id, {
@@ -352,6 +385,8 @@ async function cliMessage(
       args: agent.cli?.args || [],
       cwd: task.workspace,
       timeout,
+      principal: { kind: 'agent', id: agent.id, name: agent.name, role: agent.role },
+      messageId: msg.id,
     },
   });
 
@@ -1328,6 +1363,8 @@ async function runStep(task, agent, { step, kind, prompt, signal, speed, simOutp
       kind,
       signal,
       timeout: CLI_TIMEOUTS.step,
+      causeBy: step?.id ? `step:${step.id}` : 'summary',
+      stepId: step?.id || '',
       completeWhen: step
         ? (value) => isCompleteStepText(value, step.role)
         : isCompleteSummaryText,
@@ -1361,6 +1398,9 @@ async function runStep(task, agent, { step, kind, prompt, signal, speed, simOutp
     signal,
     speed,
     meta: step ? { step: step.title } : {},
+    causeBy: step?.id ? `step:${step.id}` : 'summary',
+    stepId: step?.id || '',
+    artifactRefs: (out.artifacts || []).map((file) => file.path),
   });
   throwIfAborted(signal);
   for (const file of out.artifacts || []) {
@@ -1686,6 +1726,11 @@ async function executeSteps(task, steps, { outputs, speed, signal }) {
             passed: out.passed,
             verdict: out.verdict,
           });
+          store.updateStep(task.id, step.id, {
+            resultText: String(out.text || '').slice(0, 12000),
+            outputRole: step.role,
+            outputName: agent.name,
+          });
           return out;
         }
 
@@ -1725,6 +1770,88 @@ function describeFailure(result, plan) {
   return step ? `${step.title}：${step.note || '执行失败'}` : '有工序执行失败';
 }
 
+function replanFailure(taskId, result, { runId, reason = '' } = {}) {
+  const task = store.getTask(taskId);
+  if (!task) return null;
+  const maxAutoReplans = Math.max(0, Number(store.db.settings.maxAutoReplans) || 0);
+  const used = (task.autoReplans || []).filter((item) => item.runId === runId).length;
+  if (maxAutoReplans < 1 || used >= maxAutoReplans) return null;
+
+  const unfinished = task.plan.filter((step) => !['done', 'skipped'].includes(step.status));
+  if (!unfinished.length) return null;
+  const failedId =
+    [...result.results.entries()].find(([, value]) => value?.ok === false)?.[0] || '';
+  const failedStep = task.plan.find((step) => step.id === failedId);
+  const detail = reason || `${failedStep?.title || failedId || '工序'}失败后重开未完成步骤`;
+  const replanned = store.replanUnfinished(taskId, {
+    steps: unfinished,
+    reason: `自动重规划：${detail}`,
+    source: 'auto',
+    runId,
+  });
+  const entry = {
+    id: randomUUID(),
+    at: Date.now(),
+    runId,
+    reason: detail,
+    failedStepId: failedId,
+    preserved: replanned?.preserved || [],
+    reopened: replanned?.reopened || [],
+  };
+  const current = store.getTask(taskId);
+  store.updateTask(
+    taskId,
+    { autoReplans: [...(current.autoReplans || []), entry] },
+    'plan.replanned',
+  );
+  store.addTaskEvent(taskId, {
+    type: 'plan.replanned',
+    runId,
+    stepId: failedId,
+    data: entry,
+  });
+  return {
+    entry,
+    steps: store.getTask(taskId).plan.filter((step) => step.status === 'pending'),
+  };
+}
+
+export function replanTask(taskId, { reason = '', steps = null } = {}) {
+  const task = store.getTask(taskId);
+  if (!task) return null;
+  if (running.has(taskId)) {
+    throw new Error('任务正在执行，停止后才能重规划');
+  }
+  const result = store.replanUnfinished(taskId, {
+    reason: reason || '用户手动重规划未完成步骤',
+    source: 'manual',
+    steps: Array.isArray(steps) ? steps : undefined,
+  });
+  store.updateTask(
+    taskId,
+    {
+      status: result?.reopened?.length ? 'idle' : task.status,
+      endedAt: result?.reopened?.length ? null : task.endedAt,
+      error: null,
+      quality: result?.reopened?.length ? { status: 'pending' } : task.quality,
+      manualReplanAt: Date.now(),
+    },
+    'plan.replanned',
+  );
+  store.addTaskEvent(taskId, {
+    type: 'plan.replanned',
+    runId: task.runId || null,
+    data: {
+      source: 'manual',
+      reason: reason || '用户手动重规划未完成步骤',
+      preserved: result?.preserved || [],
+      reopened: result?.reopened || [],
+      planVersion: store.getTask(taskId)?.planVersion || 0,
+    },
+  });
+  return result;
+}
+
 export function isRunning(taskId) {
   return running.has(taskId);
 }
@@ -1759,6 +1886,7 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
     error: null,
     runId,
     repairRound: 0,
+    autoReplans: [],
     quality: { status: 'pending' },
     stats: { ...task.stats, ms: 0 },
   });
@@ -1781,7 +1909,11 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
       },
       ...planWithSeats(task.goal).map((step) => (step.id === 'plan' ? { ...step, needs: ['debate'] } : step)),
     ];
-    store.setPlan(taskId, initial);
+    store.setPlan(taskId, initial, {
+      reason: '初版工序计划',
+      source: 'orchestrator',
+      runId,
+    });
     const outputs = new Map();
 
     // 先讨论、后动手：多个成员各出一版方案，交叉评分，裁决后再实施。
@@ -1843,7 +1975,13 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
     }
 
     const workPlan = store.getTask(taskId).plan.filter((step) => step.id !== 'debate');
-    const first = await executeSteps(task, workPlan, { outputs, speed, signal });
+    let first = await executeSteps(task, workPlan, { outputs, speed, signal });
+    if (!first.ok && !signal.aborted) {
+      const replanned = replanFailure(taskId, first, { runId });
+      if (replanned?.steps.length) {
+        first = await executeSteps(task, replanned.steps, { outputs, speed, signal });
+      }
+    }
     if (!first.ok) throw new Error(describeFailure(first, store.getTask(taskId).plan));
 
     let review = outputs.get('review');
@@ -1886,7 +2024,11 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
         },
       ].map(({ agent, ...step }) => ({ ...step, agentId: agent?.id || '' }));
 
-      store.appendPlan(taskId, repairSteps);
+      store.appendPlan(taskId, repairSteps, {
+        reason: `第 ${repairRound} 轮返工计划`,
+        source: 'auto-repair',
+        runId,
+      });
       const retry = await executeSteps(
         task,
         store.getTask(taskId).plan.filter((s) => s.round === repairRound),
@@ -2026,8 +2168,9 @@ function parseMentions(text) {
 export async function chat(taskId, text, { speed = 1 } = {}) {
   const task = store.getTask(taskId);
   if (!task) return false;
+  const mentioned = parseMentions(text);
 
-  store.addMessage(taskId, {
+  const userMessage = store.addMessage(taskId, {
     agentId: 'user',
     name: '你',
     role: 'user',
@@ -2036,10 +2179,11 @@ export async function chat(taskId, text, { speed = 1 } = {}) {
     kind: 'user',
     text,
     done: true,
+  }, {
+    to: mentioned.length ? mentioned : null,
   });
 
   try {
-    const mentioned = parseMentions(text);
     const shouldStart = /^(开始|开工|继续|动手|跑起来|go|start)/i.test(text.trim());
     const wantsWork = /(优化|实现|开发|修复|重构|新增|添加|完成|开工|开始|讨论|方案|选型|评审|build|fix|optimi[sz]e|implement|discuss)/i.test(
       text,
@@ -2060,6 +2204,10 @@ export async function chat(taskId, text, { speed = 1 } = {}) {
           kind: 'debate-intro',
           done: true,
           text: `**已组成讨论组**\n\n${names} 会先各自出一版方案，然后互相匿名评分；评分最高的方案由规划席位裁决后直接进入实施。\n\n未被点到的成员仍可能作为工具池视角加入讨论，席位成员负责落地。`,
+        }, {
+          to: mentioned,
+          parentMessageId: userMessage.id,
+          causeBy: userMessage.id,
         });
         store.endMessage(taskId, kickoff.id, {});
         await sleep(300);
@@ -2079,6 +2227,10 @@ export async function chat(taskId, text, { speed = 1 } = {}) {
           kind: 'text',
           done: true,
           text: `本轮正在执行，${names} 的讨论请求先排队。等这一轮结束后回复「讨论」即可重新组队出方案。`,
+        }, {
+          to: { kind: 'owner', id: 'user', name: '你' },
+          parentMessageId: userMessage.id,
+          causeBy: userMessage.id,
         });
         store.endMessage(taskId, msg.id, {});
         return true;
@@ -2093,6 +2245,10 @@ export async function chat(taskId, text, { speed = 1 } = {}) {
         kind: 'text',
         done: true,
         text: `**讨论组已就位**\n\n${names} 会就当前目标各出一版方案、互相评分，再按最优方案实施。\n\n回复「开工」或直接说「讨论一下这个方案」即可开始。`,
+        }, {
+          to: { kind: 'owner', id: 'user', name: '你' },
+          parentMessageId: userMessage.id,
+          causeBy: userMessage.id,
       });
       store.endMessage(taskId, briefing.id, {});
       return true;
@@ -2111,12 +2267,25 @@ export async function chat(taskId, text, { speed = 1 } = {}) {
         task,
         agent,
         `${buildPrompt(task, agent, null, transcript, context)}\n\n# 用户说\n${text}`,
-        { kind: 'text', signal },
+        {
+          kind: 'text',
+          signal,
+          to: { kind: 'owner', id: 'user', name: '你' },
+          parentMessageId: userMessage.id,
+          causeBy: userMessage.id,
+        },
       );
       if (res.code !== 0) throw new Error(describeCliResult(res));
     } else {
       const out = sim.compose({ kind: 'chat', goal: task.goal, agent, outputs: { userText: text } });
-      await streamMessage(task, agent, out.text, { kind: 'text', speed, signal });
+      await streamMessage(task, agent, out.text, {
+        kind: 'text',
+        speed,
+        signal,
+        to: { kind: 'owner', id: 'user', name: '你' },
+        parentMessageId: userMessage.id,
+        causeBy: userMessage.id,
+      });
     }
 
     // 冷启动提示：任务还没跑过编排，用户说「开始」就直接开工
@@ -2135,6 +2304,10 @@ export async function chat(taskId, text, { speed = 1 } = {}) {
       title: 'ERROR',
       color: '#ff5538',
       kind: 'text',
+    }, {
+      to: { kind: 'owner', id: 'user', name: '你' },
+      parentMessageId: userMessage.id,
+      causeBy: userMessage.id,
     });
     store.appendMessage(
       taskId,

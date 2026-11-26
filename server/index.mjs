@@ -2,21 +2,22 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { store, ROOT, DATA_DIR, WORKSPACE_DIR, TOOL_CATALOG, ROLE_TOOLS } from './store.mjs';
-import { startTask, stopTask, chat, listWorkspaceFiles, buildContextPack, isRunning, workMsOf } from './orchestrator.mjs';
+import {
+  startTask,
+  stopTask,
+  chat,
+  buildContextPack,
+  isRunning,
+  replanTask,
+  workMsOf,
+} from './orchestrator.mjs';
 import { probeClis, spawnCli, clearResolveCache } from './adapters.mjs';
 import { adoptInstalledClis, rebalanceTeam } from './adopt.mjs';
 import { ensureRealTeam, refreshTeam, judgeHealth } from './team.mjs';
+import { toolGateway } from './tool-gateway.mjs';
 import {
   WorkspaceError,
-  deleteWorkspaceEntry,
-  makeWorkspaceDir,
-  moveWorkspaceEntry,
-  readWorkspaceFile,
-  searchWorkspace,
-  workspaceDiff,
   workspaceInfo,
-  workspaceSnapshot,
-  writeWorkspaceEntry,
 } from './workspace.mjs';
 
 const PORT = Number(process.env.PORT || 8787);
@@ -84,6 +85,8 @@ function taskDetail(task) {
   return {
     ...summary,
     plan: task.plan,
+    planVersion: task.planVersion || 0,
+    planVersions: task.planVersions || [],
     messages: task.messages,
     artifacts: task.artifacts,
     debate: task.debate || null,
@@ -96,18 +99,11 @@ function taskDetail(task) {
     external: !!task.external,
     fileChanges: task.fileChanges || [],
     events: (task.events || []).slice(-160),
+    toolCalls: (task.events || [])
+      .filter((event) => String(event.type || '').startsWith('tool.'))
+      .slice(-120),
     context: buildContextPack(task),
   };
-}
-
-function requireAgentTool(agentId, toolId) {
-  if (!agentId) return;
-  const agent = store.getAgent(agentId);
-  if (!agent) throw new WorkspaceError('智能体不存在', 404);
-  const allowed = new Set(Array.isArray(agent.tools) ? agent.tools : []);
-  if (!allowed.has(toolId)) {
-    throw new WorkspaceError(`智能体「${agent.name}」没有 ${toolId} 权限`, 403);
-  }
 }
 
 /* ---------------------------- SSE ---------------------------- */
@@ -200,6 +196,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     /* ---- 智能体 ---- */
+    if (pathname === '/api/tools' && method === 'GET') {
+      return json(res, 200, { tools: toolGateway.descriptors() });
+    }
     if (pathname === '/api/agents' && method === 'GET') {
       return json(res, 200, {
         agents: store.agents,
@@ -345,7 +344,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     const taskMatch = pathname.match(
-      /^\/api\/tasks\/([\w-]+)(?:\/(run|stop|chat|files|file|workspace|search|events|changes|diff|fs))?$/,
+      /^\/api\/tasks\/([\w-]+)(?:\/(run|stop|chat|replan|files|file|workspace|search|events|changes|diff|fs|tools))?$/,
     );
     if (taskMatch) {
       const task = store.getTask(taskMatch[1]);
@@ -383,69 +382,147 @@ const server = http.createServer(async (req, res) => {
         );
         return json(res, 202, { ok: true });
       }
+      if (action === 'replan' && method === 'POST') {
+        const body = await readBody(req);
+        try {
+          const result = replanTask(task.id, {
+            reason: String(body.reason || '').trim(),
+            steps: Array.isArray(body.steps) ? body.steps : null,
+          });
+          return json(res, 200, {
+            ok: true,
+            replan: {
+              preserved: result?.preserved || [],
+              reopened: result?.reopened || [],
+            },
+            task: taskDetail(store.getTask(task.id)),
+          });
+        } catch (err) {
+          return json(res, /正在执行/.test(err.message) ? 409 : 400, { error: err.message });
+        }
+      }
+      if (action === 'tools' && method === 'GET') {
+        return json(res, 200, {
+          tools: toolGateway.descriptors(),
+          events: (task.events || [])
+            .filter((event) => String(event.type || '').startsWith('tool.'))
+            .slice(-240),
+        });
+      }
       if (action === 'files' && method === 'GET') {
-        requireAgentTool(searchParams.get('agentId') || '', 'workspace.read');
-        return json(res, 200, { files: listWorkspaceFiles(task) });
+        const call = toolGateway.invokeTool({
+          taskId: task.id,
+          toolId: 'workspace.read',
+          operation: 'files',
+          args: { op: 'files' },
+          agentId: searchParams.get('agentId') || '',
+          source: searchParams.get('agentId') ? 'api.agent' : 'api.owner',
+          audit: !!searchParams.get('agentId'),
+        });
+        return json(res, 200, call.result);
       }
       if (action === 'workspace' && method === 'GET') {
-        requireAgentTool(searchParams.get('agentId') || '', 'workspace.read');
-        return json(res, 200, workspaceSnapshot(task));
+        const call = toolGateway.invokeTool({
+          taskId: task.id,
+          toolId: 'workspace.read',
+          operation: 'tree',
+          args: { op: 'tree' },
+          agentId: searchParams.get('agentId') || '',
+          source: searchParams.get('agentId') ? 'api.agent' : 'api.owner',
+          audit: !!searchParams.get('agentId'),
+        });
+        return json(res, 200, call.result);
       }
       if (action === 'search' && method === 'GET') {
-        requireAgentTool(searchParams.get('agentId') || '', 'workspace.search');
-        return json(res, 200, searchWorkspace(task, searchParams.get('q') || ''));
+        const call = toolGateway.invokeTool({
+          taskId: task.id,
+          toolId: 'workspace.search',
+          operation: 'search',
+          args: { op: 'search', query: searchParams.get('q') || '' },
+          agentId: searchParams.get('agentId') || '',
+          source: searchParams.get('agentId') ? 'api.agent' : 'api.owner',
+          audit: !!searchParams.get('agentId'),
+        });
+        return json(res, 200, call.result);
       }
       if (action === 'events' && method === 'GET') {
-        requireAgentTool(searchParams.get('agentId') || '', 'workspace.read');
         const limit = Math.max(1, Math.min(800, Number(searchParams.get('limit')) || 160));
-        return json(res, 200, { events: (task.events || []).slice(-limit) });
+        const call = toolGateway.invokeTool({
+          taskId: task.id,
+          toolId: 'workspace.read',
+          operation: 'events',
+          args: { op: 'events', limit },
+          agentId: searchParams.get('agentId') || '',
+          source: searchParams.get('agentId') ? 'api.agent' : 'api.owner',
+          audit: !!searchParams.get('agentId'),
+        });
+        return json(res, 200, call.result);
       }
       if (action === 'changes' && method === 'GET') {
-        requireAgentTool(searchParams.get('agentId') || '', 'workspace.read');
-        return json(res, 200, { changes: task.fileChanges || [] });
+        const call = toolGateway.invokeTool({
+          taskId: task.id,
+          toolId: 'workspace.read',
+          operation: 'changes',
+          args: { op: 'changes' },
+          agentId: searchParams.get('agentId') || '',
+          source: searchParams.get('agentId') ? 'api.agent' : 'api.owner',
+          audit: !!searchParams.get('agentId'),
+        });
+        return json(res, 200, call.result);
       }
       if (action === 'diff' && method === 'GET') {
-        requireAgentTool(searchParams.get('agentId') || '', 'workspace.read');
-        return json(res, 200, workspaceDiff(task, searchParams.get('path') || ''));
+        const call = toolGateway.invokeTool({
+          taskId: task.id,
+          toolId: 'workspace.read',
+          operation: 'diff',
+          args: { op: 'diff', path: searchParams.get('path') || '' },
+          agentId: searchParams.get('agentId') || '',
+          source: searchParams.get('agentId') ? 'api.agent' : 'api.owner',
+          audit: !!searchParams.get('agentId'),
+        });
+        return json(res, 200, call.result);
       }
       if (action === 'fs' && method === 'POST') {
         const body = await readBody(req);
         const op = String(body.op || '').trim();
-        const meta = {
+        const toolId =
+          op === 'move'
+            ? 'workspace.move'
+            : op === 'delete'
+              ? 'workspace.delete'
+              : op === 'write' || op === 'mkdir'
+                ? 'workspace.write'
+                : '';
+        if (!toolId) return json(res, 400, { error: '不支持的 fs op' });
+        const args =
+          op === 'move'
+            ? { op, from: body.from, to: body.to }
+            : op === 'write'
+              ? { op, path: body.path, content: body.content }
+              : { op, path: body.path };
+        const call = toolGateway.invokeTool({
+          taskId: task.id,
+          toolId,
+          operation: op,
+          args,
           agentId: typeof body.agentId === 'string' ? body.agentId : '',
           stepId: typeof body.stepId === 'string' ? body.stepId : '',
-        };
-        if (op === 'write') {
-          requireAgentTool(meta.agentId, 'workspace.write');
-          return json(res, 200, {
-            ok: true,
-            result: writeWorkspaceEntry(task, body.path, body.content, meta),
-          });
-        }
-        if (op === 'mkdir') {
-          requireAgentTool(meta.agentId, 'workspace.write');
-          return json(res, 200, { ok: true, result: makeWorkspaceDir(task, body.path, meta) });
-        }
-        if (op === 'move') {
-          requireAgentTool(meta.agentId, 'workspace.move');
-          return json(res, 200, {
-            ok: true,
-            result: moveWorkspaceEntry(task, body.from, body.to, meta),
-          });
-        }
-        if (op === 'delete') {
-          requireAgentTool(meta.agentId, 'workspace.delete');
-          return json(res, 200, {
-            ok: true,
-            result: deleteWorkspaceEntry(task, body.path, meta),
-          });
-        }
-        return json(res, 400, { error: '不支持的 fs op' });
+          source: body.agentId ? 'api.agent' : 'api.owner',
+        });
+        return json(res, 200, { ok: true, result: call.result, callId: call.callId });
       }
       if (action === 'file' && method === 'GET') {
-        requireAgentTool(searchParams.get('agentId') || '', 'workspace.read');
         const rel = searchParams.get('path') || '';
-        return json(res, 200, readWorkspaceFile(task, rel));
+        const call = toolGateway.invokeTool({
+          taskId: task.id,
+          toolId: 'workspace.read',
+          operation: 'file',
+          args: { op: 'file', path: rel },
+          agentId: searchParams.get('agentId') || '',
+          source: searchParams.get('agentId') ? 'api.agent' : 'api.owner',
+          audit: !!searchParams.get('agentId'),
+        });
+        return json(res, 200, call.result);
       }
     }
 

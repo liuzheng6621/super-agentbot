@@ -9,7 +9,7 @@
 [![Node](https://img.shields.io/badge/node-%E2%89%A520.11-3c873a?logo=node.js&logoColor=white)](https://nodejs.org)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-blue)
 ![Build](https://img.shields.io/badge/build-none-lightgrey)
-![Tests](https://img.shields.io/badge/tests-38%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-60%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4)
 
@@ -20,6 +20,16 @@
 </div>
 
 ---
+
+## 当前版本
+
+本轮把“多智能体协作”从固定流水线推进到可追踪、可重规划、可审计的第一层平台：
+
+- **计划版本**：初版、返工和手动重规划都会生成不可变快照，已完成工序不会被重规划抹掉；自动重规划最多一次，避免无限重试。
+- **消息路由**：每条协作消息记录来源、目标、父消息、关联工序、产物引用和 `correlationId`。
+- **Tool Gateway 第一层**：平台 API 统一校验工具白名单、执行主体和工作区边界，并记录 `tool.call.start` / `tool.call.end` / `tool.policy.denied`。
+- **六视图工作区控制台**：文件、执行轨迹、计划版本、协作消息、工具审计、Diff 在同一工作区中查看。
+- **文件夹开工**：可从本机目录选择器选择已有项目，或使用 Git 隔离工作树并行开工。
 
 ## 为什么会有这个项目
 
@@ -42,7 +52,9 @@
 - 🚦 **真实质量门** — 评审前真的执行测试命令，`VERDICT: PASS` 才允许交付；FAIL 进入「修复 → 回归 → 复评」有界回环，轮次可配。测试入口按 `package.json scripts.test` → pytest → cargo → go → Makefile → `tests/` 依次探测，找不到就标 `missing` 让界面显示「没有测试入口」，绝不静默跳过；真实 CLI 任务同样执行这套质量门，而不是一律跳过。评审员缺位退到其他席位时会如实标注「评审代质量门」，不让自审看起来像独立把关。
 - 🎛 **工作流可视化配置** — 讨论开关与规模、工序并发、返工轮次都在顶栏 ⚙ 里改，即时落库；另带「快速 / 均衡 / 严谨」三档预设。
 - 🔁 **任务级流程覆盖** — 输入框旁可切「先讨论」或「直接开工」，只影响当前任务，不动全局默认。
-- 🧰 **Agent 工具白名单** — 每个成员声明可用工具，角色有默认策略，也能按成员覆盖；平台文件 API 会按 `agentId` 校验权限。
+- 🧭 **计划版本与有限重规划** — 计划以不可变快照保存；失败后自动重规划最多一次，手动重规划会保留已完成工序，方便在复杂项目中继续推进。
+- 🔗 **带路由的协作消息** — 消息不再只是聊天记录，还带来源、目标、父子关系、关联工序和产物引用，方便定位“谁把什么交给了谁”。
+- 🧰 **Agent 工具白名单与 Tool Gateway** — 每个成员声明可用工具，角色有默认策略，也能按成员覆盖；平台 API 会按 `agentId` 校验权限并写入工具审计。
 - 🌳 **Git 隔离工作区** — 每个任务可在独立 detached worktree 中执行；Windows 文件系统无法写 worktree 元数据时自动回退 shared clone，源仓库不受影响。
 
 **执行**
@@ -64,7 +76,7 @@
 **工程**
 
 - 📦 **零依赖、零构建** — 纯 Node.js + 原生 ESM，`node server/index.mjs` 就起来，前端不打包、不装包管理器。
-- ✅ **56 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、质量门返工与入口探测、体检判定、上下文预算、工作区文件闭环、Git 隔离、工具策略、真实工时统计、输出完整性判定与退出码分类。
+- ✅ **60 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、质量门返工与入口探测、体检判定、上下文预算、工作区文件闭环、Git 隔离、工具策略、计划版本、消息路由、Tool Gateway 审计、真实工时统计、输出完整性判定与退出码分类。
 
 ## 快速开始
 
@@ -204,14 +216,17 @@ AgentForge **不是基于 Magpie 框架实现**。Magpie 目前只是部分 CLI 
 | **Diff** | 对比 Git `HEAD`，并补齐未跟踪新文件的 unified diff；敏感、二进制和超限文件有保护 |
 | **上下文 / 策略** | 展示注入的消息与文件预算、最近协作、已知文件，以及每个 Agent 的真实工具白名单 |
 
-平台文件操作覆盖查、增、改、移、删，并带以下边界：
+平台文件操作覆盖查、增、改、移、删，并统一经过 Tool Gateway 第一层：
 
 - 路径必须是工作区内相对路径；拒绝 `..`、绝对路径和符号链接。
 - `.git`、`.agentforge` 不允许通过文件 API 直接读写。
 - `.env*`、私钥、`.npmrc`、`.pypirc` 等敏感文件禁止预览和平台写入。
 - 写入使用临时文件 + `fsync` + `rename`，并记录前后内容版本。
 - 删除进入 `.agentforge/trash`，不是不可恢复的硬删除。
-- Agent 工具策略目前是“提示词声明 + 平台 API 校验”。真实 CLI 仍是外部子进程，可以绕过平台策略直接使用自身 shell/文件能力；强制 Tool Gateway 尚未实现。
+- Agent 调用会校验工具白名单，并记录 `tool.call.start` / `tool.call.end` / `tool.policy.denied`；Owner 写操作同样留痕。
+- Owner UI 的只读请求不写入工具审计，避免“刷新工作区 → 产生审计事件 → 再次刷新”的反馈循环。
+- 真实 CLI 仍是外部子进程，可以绕过平台 API 直接使用自身 shell/文件能力；强制 CLI 沙箱或代理网关仍在路线图中。
+- 平台 `shell` 端点当前明确返回 `501`，不会把未执行的命令伪装成成功。
 
 Git 隔离支持两种模式：
 
@@ -229,7 +244,7 @@ Git 隔离支持两种模式：
 | **左栏** | 五个执行席位 + 工具池（在线状态、`SIM 演示` / `✓ CLI 可用` / `! 不可用`）、本机 CLI 扫描结果、「体检并换真实席位」、历史任务 |
 | **中栏** | 工作流阶段条（讨论 → 拆解 → 架构与实施 → 评审 → 交付，实时高亮负责人，可点击跳转）、按阶段分隔的协作时间线、流式输出、方案 / 质询 / 裁决标签、底部群聊输入框 |
 | **右栏** | 上下文包、方案讨论（提案人 / 评分 / 票数 / 胜出方案 / 质询记录）、DAG 链路（依赖 / 并行 / 尝试次数 / 返工）、产物源码、统计与 Bot Hook |
-| **全屏工作区控制台** | 左侧工作树与变更、中间文件 / 执行泳道 / Diff、右侧上下文与 Agent 工具策略；桌面和移动端都可直接进入 |
+| **全屏工作区控制台** | 左侧工作树与变更；中间六视图：文件 / 执行轨迹 / 计划版本 / 协作消息 / 工具审计 / Diff；右侧上下文与 Agent 工具策略；桌面和移动端都可直接进入 |
 | **统计面板** | 每个数字都来自落库事实：累计 TOKENS = 各成员 token 之和（输入与输出分开记账，`tokensIn` / `tokensOut`，不把成本低估一个数量级）；协作轮次 = 真实调用成员次数 `stats.agentRuns`；产物文件 = 产物清单条数；返工轮次 = `repairRound`；总耗时 = 各工序实际耗时之和（墙钟含排队与重试等待，只作悬浮提示）；质量门 = `passed / failed / missing / skipped / 未执行` 五态，中断的任务不会永远停在「待执行」 |
 | **顶栏** | 状态、⚙ 工作流设置、`SHIFT` 切换配色 |
 
@@ -255,12 +270,15 @@ Git 隔离支持两种模式：
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/api/state` | 全量状态（团队 / 任务 / 设置 / 当前任务） |
+| `GET` | `/api/tools` | 工具目录与输入 Schema |
 | `PATCH` | `/api/settings` | 工作流参数（白名单字段 + 范围夹紧） |
 | `POST` | `/api/tasks` | 创建 `{ goal, workspace?, isolation?: "direct"\|"worktree", flowMode?: "debate"\|"direct", autoRun? }` |
-| `GET` | `/api/tasks/:id` | 任务详情（消息、工序、产物、辩论） |
+| `GET` | `/api/tasks/:id` | 任务详情（消息、工序、产物、计划版本、工具审计） |
 | `POST` | `/api/tasks/:id/run` | 重新编排，可带 `{ flowMode }` |
 | `POST` | `/api/tasks/:id/stop` | 停止执行 |
 | `POST` | `/api/tasks/:id/chat` | `{ text }` 群聊，支持 `@成员名` |
+| `POST` | `/api/tasks/:id/replan` | 重规划未完成工序，可带 `{ reason?, steps? }` |
+| `GET` | `/api/tasks/:id/tools` | 当前任务的工具目录与工具事件 |
 | `GET` | `/api/tasks/:id/files` | 工作区文件列表（含字节数与纳秒 mtime） |
 | `GET` | `/api/tasks/:id/file?path=` | 读取单个文件 |
 | `GET` | `/api/tasks/:id/workspace` | 工作区树、变更、事件、摘要与 Git 信息 |
@@ -317,6 +335,8 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 │   ├── index.mjs         HTTP 路由、SSE、静态资源、单实例端口守卫
 │   ├── orchestrator.mjs  流水线编排、质量门、上下文组装、产物落盘
 │   ├── store.mjs         状态、席位、持久化、事件总线
+│   ├── collaboration.mjs 计划版本、消息信封与路由差异
+│   ├── tool-gateway.mjs  工具白名单、主体校验与调用审计
 │   ├── workspace.mjs     工作区树、读写、搜索、回收站、Diff、路径边界
 │   ├── dag.mjs           依赖图校验与并行调度
 │   ├── adapters.mjs      CLI 适配（argv / stdin / 免审批参数）、模拟流式、本机探测
@@ -335,7 +355,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 │   ├── screenshot.png
 │   ├── design-io-image-context.md
 │   └── agent-platform-roadmap.md
-├── tests/                8 个测试文件、56 个测试
+├── tests/                9 个测试文件、60 个测试
 ├── 安装到桌面.bat
 ├── 卸载桌面快捷方式.bat
 └── data/                 运行时数据（gitignore）
@@ -347,7 +367,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 npm test
 ```
 
-56 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、评审结论解析、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `missing` 判定、真实 CLI 任务同样执行质量门、评审员兜底不落到实现者、目录快照复用、上游瞬时故障（ECONNRESET / 429 / socket hang up）只重试一次且不掩盖真实失败、上下文预算（段序稳定性、中文 token 估算、原子写版本、spill 可还原）、工作区文件闭环与路径/敏感文件边界、Agent 工具策略、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计（只累加结束过的工序，不拿墙钟冒充）、输出完整性判定（半截提案 / 缺段质询 / 空步骤都会判不合格）、提案宽松解析（`A=7`、`B：8分`、`方案 C 7/10`）、退出码分类（超时 / 已停止 / 命令缺失 / `0xC0000142`）与参数拼装。
+60 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、评审结论解析、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `missing` 判定、真实 CLI 任务同样执行质量门、评审员兜底不落到实现者、目录快照复用、上游瞬时故障（ECONNRESET / 429 / socket hang up）只重试一次且不掩盖真实失败、上下文预算（段序稳定性、中文 token 估算、原子写版本、spill 可还原）、工作区文件闭环与路径/敏感文件边界、Agent 工具策略、计划版本与已完成工序保留、消息路由、Tool Gateway 权限与审计、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计（只累加结束过的工序，不拿墙钟冒充）、输出完整性判定（半截提案 / 缺段质询 / 空步骤都会判不合格）、提案宽松解析（`A=7`、`B：8分`、`方案 C 7/10`）、退出码分类（超时 / 已停止 / 命令缺失 / `0xC0000142`）与参数拼装。
 
 ## 已知边界
 
@@ -355,7 +375,7 @@ npm test
 - **`kimi` 只适合单行任务**：`-p` 与 `--auto` 互斥，只能走 argv，多行 prompt 会被 `cmd.exe` 截断。
 - **`trae-cli` 的行为取决于模型**：工具齐全（bash / 编辑 / 顺序思考），但某些模型只肯调顺序思考而不落盘——这是模型行为，不是配置问题。
 - **模拟模式**：一个可用 CLI 都没有时才会启用，产出仍是可运行的代码（`tests/*.test.js` 能直接 `node` 执行），但成员会明确标注 `SIM 演示`。
-- **工具策略不是强制网关**：平台 API 会校验工具白名单，但真实 CLI 仍是外部子进程，可以绕过平台直接使用自身工具；统一 Tool Gateway 尚未实现。
+- **Tool Gateway 仍是平台 API 层**：平台 API 已能校验工具白名单、记录调用和审计，但真实 CLI 仍是外部子进程，可以绕过平台直接使用自身工具；CLI 沙箱 / 代理网关仍未实现。
 - **Magpie 只是默认网关**：项目不依赖 Magpie 框架；Provider Profile、密钥引用和多 Provider 路由仍在路线图中。
 - **并发缺全局调度**：不同任务可并行且有独立工作区，但还没有 Provider/CLI 配额、Agent 租约、磁盘配额和任务优先级。
 
@@ -366,7 +386,9 @@ npm test
 - [x] 上下文预算（段序 / token 估算 / 原子写 / spill）
 - [x] 工作区文件闭环、全屏控制台、执行泳道与 Diff
 - [x] Agent 工具白名单与 Git worktree/clone 隔离
-- [ ] Tool Gateway（强制策略、审批、审计、文件租约）
+- [x] 计划版本、有限重规划、带路由消息与 Tool Gateway 第一层
+- [ ] CLI 沙箱 / 代理网关（拦截真实 CLI 内部工具调用）
+- [ ] 文件租约、跨 Agent 写冲突检测与事务级回滚
 - [ ] Provider Profile（自定义网关、凭据引用、路由与回退）
 - [ ] 全局 Scheduler（多任务配额、Agent 租约、工作区池）
 - [ ] 跨任务工作区总览、DAG 图与时间回放
