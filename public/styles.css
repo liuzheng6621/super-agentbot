@@ -1982,6 +1982,12 @@ kbd {
   color: var(--yellow);
 }
 
+.plan-overview .po-decision[data-degraded="true"] {
+  border-style: dashed;
+  border-color: var(--orange);
+  color: var(--orange);
+}
+
 .plan-list {
   display: flex;
   flex-direction: column;
@@ -2803,6 +2809,12 @@ kbd {
   color: var(--edge);
 }
 
+.debate-status[data-status="fallback"] b {
+  padding: 0 4px;
+  background: var(--yellow);
+  color: var(--edge);
+}
+
 .debate-people {
   display: flex;
   flex-wrap: wrap;
@@ -2837,6 +2849,18 @@ kbd {
   border: 2px solid var(--edge);
   background: var(--leaf);
   box-shadow: 3px 3px 0 var(--hard);
+}
+
+.debate-winner[data-degraded="true"] {
+  background: color-mix(in srgb, var(--yellow) 45%, var(--card));
+  border-style: dashed;
+}
+
+.dw-warning {
+  padding-top: 3px;
+  border-top: 1px dashed var(--edge);
+  color: var(--orange) !important;
+  opacity: 1 !important;
 }
 
 .dw-tag {
@@ -3111,6 +3135,19 @@ kbd {
   border-color: var(--orange);
 }
 
+.flow-node[data-status="blocked"] {
+  color: var(--muted);
+  border-color: var(--muted);
+  border-style: dashed;
+  opacity: 0.72;
+}
+
+.flow-node[data-status="warning"] {
+  color: var(--edge);
+  border-color: var(--yellow);
+  background: color-mix(in srgb, var(--yellow) 28%, transparent);
+}
+
 .flow-node[data-status="skipped"] {
   opacity: 0.55;
 }
@@ -3188,6 +3225,16 @@ kbd {
 
 .now-dot[data-status="error"] {
   background: var(--orange);
+}
+
+.now-dot[data-status="blocked"] {
+  background: var(--muted);
+  border-style: dashed;
+}
+
+.now-dot[data-status="warning"] {
+  background: var(--yellow);
+  border-color: var(--edge);
 }
 
 @keyframes now-pulse {

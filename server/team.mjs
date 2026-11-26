@@ -47,11 +47,13 @@ const FATAL =
 export function judgeHealth(res) {
   const out = (res.stdout || '').trim();
   const err = (res.stderr || '').trim();
-  const blob = `${out} ${err}`;
-  const fatal = FATAL.test(blob) || /not allowed|unauthorized/i.test(blob);
+  const fatalText = (text) => FATAL.test(text) || /not allowed|unauthorized/i.test(text);
   // 体检题就是「Reply with exactly: OK」：答出 OK 即算有回复，不管它包了多少装饰（trae-cli 会打一整套表格）
   const answered = /(^|[\s│|:=])OK($|[\s│|.,;])/m.test(out);
   const hasReply = out.length > 0 && (out.length < 400 || answered);
+  // stderr 里常有 Codex 的插件同步警告（例如 api key auth is not supported），
+  // 只要 stdout 已经给出有效短回答，就不能让这类日志噪音把成员判死。
+  const fatal = fatalText(out) || (fatalText(err) && !hasReply);
   // codex 这类 CLI 会吐完结果后继续等 stdin 直到超时：有回复就算可用，但如实标注
   const softOk = res.code === -3 && hasReply && !fatal;
   const ok = ((res.code === 0 && hasReply) || softOk) && !fatal;

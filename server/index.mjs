@@ -5,7 +5,7 @@ import { store, ROOT, DATA_DIR, WORKSPACE_DIR } from './store.mjs';
 import { startTask, stopTask, chat, listWorkspaceFiles, buildContextPack, isRunning, workMsOf } from './orchestrator.mjs';
 import { probeClis, spawnCli, clearResolveCache } from './adapters.mjs';
 import { adoptInstalledClis, rebalanceTeam } from './adopt.mjs';
-import { ensureRealTeam, refreshTeam } from './team.mjs';
+import { ensureRealTeam, refreshTeam, judgeHealth } from './team.mjs';
 
 const PORT = Number(process.env.PORT || 8787);
 // 本地桌面场景只监听回环；被托管平台注入 PORT 时（容器 / 云沙箱）需要对外绑定
@@ -264,10 +264,9 @@ const server = http.createServer(async (req, res) => {
           timeout: agent.cli.healthTimeout || 60000,
           cwd: ROOT,
         });
-        const ok = res2.code === 0;
-        const detail = (res2.stderr || res2.stdout || '').trim().slice(0, 200);
+        const health = judgeHealth(res2);
+        const ok = health.ok;
         // 单个体检结果必须落回智能体，否则界面会一直挂着上一次的「不可用」
-        const health = { ok, ms: res2.elapsed, note: ok ? '在线' : detail || `退出码 ${res2.code}`, checkedAt: Date.now() };
         store.updateAgent(agentId, { health });
         return json(res, 200, {
           ok,

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { store, randomUUID, ROLE_LABEL } from './store.mjs';
 import * as sim from './sim.mjs';
-import { streamText, spawnCli, sleep } from './adapters.mjs';
+import { streamText, spawnCli, sleep, classifyCliExit, describeCliResult } from './adapters.mjs';
 import { runDag, throwIfAborted } from './dag.mjs';
 import { writeFileAtomic, versionOf, spillText } from './fs.mjs';
 import { estimateTokens } from './tokens.mjs';
@@ -21,6 +21,18 @@ const STEP_KIND = {
   tester: 'tester',
   reviewer: 'reviewer',
 };
+
+/**
+ * 真实 CLI 的耗时由模型推理、工具调用和网关排队共同决定。
+ * 讨论阶段过去固定 150 秒，长提案交叉质询时会稳定触发假超时。
+ */
+export const CLI_TIMEOUTS = Object.freeze({
+  proposal: 360000,
+  critique: 360000,
+  decision: 240000,
+  step: 900000,
+  qualityGate: 300000,
+});
 
 /**
  * 席位缺席时的兜底顺序按角色分别排：评审员永远不落到实现者身上，
@@ -292,7 +304,25 @@ export function isTransientCliError(text) {
   return TRANSIENT_CLI_ERROR.test(String(text || ''));
 }
 
-async function cliMessage(task, agent, prompt, { kind = 'text', signal, timeout = 300000, message = {} } = {}) {
+export function shouldRetryCliResult(res) {
+  const info = classifyCliExit(res);
+  if (info.retryable) return true;
+  return isTransientCliError(`${res?.stdout || ''}\n${res?.stderr || ''}`);
+}
+
+async function cliMessage(
+  task,
+  agent,
+  prompt,
+  {
+    kind = 'text',
+    signal,
+    timeout = 300000,
+    message = {},
+    completeWhen = null,
+    settleMs = 0,
+  } = {},
+) {
   const msg = store.addMessage(task.id, {
     agentId: agent.id,
     name: agent.name,
@@ -327,6 +357,8 @@ async function cliMessage(task, agent, prompt, { kind = 'text', signal, timeout 
       cwd: task.workspace,
       signal,
       timeout,
+      completeWhen,
+      settleMs,
       onChunk: (d) => {
         clearHint();
         if (hintShown) {
@@ -348,13 +380,14 @@ async function cliMessage(task, agent, prompt, { kind = 'text', signal, timeout 
     }
     const combined = `${res.stdout || ''}
 ${res.stderr || ''}`;
-    if (res.code === 0 || attempt === 2 || signal?.aborted || !isTransientCliError(combined)) break;
+    if (res.code === 0 || attempt === 2 || signal?.aborted || !shouldRetryCliResult(res)) break;
+    const failure = classifyCliExit(res);
     store.appendMessage(
       task.id,
       msg.id,
       `
 
-> ⚠️ 上游连接抖动（${combined.match(TRANSIENT_CLI_ERROR)[0]}），2 秒后重试一次。
+> ⚠️ ${failure.kind === 'windows-init' ? failure.label : `上游连接抖动（${combined.match(TRANSIENT_CLI_ERROR)?.[0] || failure.label}）`}，2 秒后重试一次。
 
 `,
     );
@@ -367,18 +400,28 @@ ${res.stderr || ''}`;
   if (stderrText && (res.code !== 0 || !res.stdout.trim())) {
     store.appendMessage(task.id, msg.id, `\n\n\`\`\`log\n${stderrText.slice(-1600)}\n\`\`\``);
   }
-  if (res.code !== 0 && !res.stdout.trim()) {
+  if (res.code !== 0) {
+    const failure = classifyCliExit(res);
     store.appendMessage(
       task.id,
       msg.id,
-      `\n\n> ⚠️ CLI 退出码 ${res.code}，没有产生输出。请检查命令模板与环境变量。`,
+      `\n\n> ⚠️ ${failure.label}。${
+        res.partial
+          ? '已保留进程结束前的输出，但它可能不完整。'
+          : '没有产生输出。请检查命令模板、运行时环境和凭据。'
+      }`,
     );
   }
+  const failure = classifyCliExit(res);
   store.endMessage(task.id, msg.id, {
     tokens: estimateTokens(res.stdout),
     tokensIn: promptTokens,
     ms: res.elapsed,
     exitCode: res.code,
+    exitLabel: failure.label,
+    timedOut: !!res.timedOut,
+    partial: !!res.partial,
+    settledEarly: !!res.settledEarly,
   });
 
   // 收集 CLI 新增/修改的文件：先按 size + 纳秒 mtime 粗筛，命中项再算内容版本。
@@ -466,8 +509,13 @@ export function buildPrompt(task, agent, step, depsText, context, extra = {}) {
     extra.repairRound ? `# 返工轮次\n这是第 ${extra.repairRound} 轮修复。只处理评审阻塞项，不要扩大改动范围。` : '',
     extra.decision
       ? [
-          '# 已裁决的方案（必须遵循）',
-          `方案 ${extra.decision.winnerId} · ${extra.decision.winnerName} 提出 · 平均 ${extra.decision.average} 分 · ${extra.decision.votes} 票`,
+          `# ${extra.decision.degraded ? '降级采用的方案（需复核）' : '已裁决的方案（必须遵循）'}`,
+          `方案 ${extra.decision.winnerId} · ${extra.decision.winnerName} 提出 · ${
+            extra.decision.average == null ? '无有效评分' : `平均 ${extra.decision.average} 分`
+          } · ${extra.decision.votes} 票`,
+          extra.decision.degraded
+            ? '注意：本轮交叉质询没有形成有效评分，这是按顺序临时采用的方案，不能把“已采纳”写成事实。'
+            : '',
           '',
           clip(extra.decision.brief, 2400),
           '',
@@ -543,6 +591,9 @@ function buildSummaryPrompt(agent, task, outputs, context, extra = {}) {
     `- 评审：${extra.passed ? '通过' : '未通过'}`,
     `- 返工轮次：${extra.repairRound || 0}`,
     `- 自动化质量门：${extra.quality?.status || 'skipped'}`,
+    `- 方案讨论：${
+      extra.degraded ? '无有效交叉评分，已降级采用，必须人工复核' : '已完成评分裁决'
+    }`,
     '',
     '# 你的任务',
     '给出交付结论、遗留风险，以及需要用户拍板的 3 件事。不要宣称未通过的工序已经完成。中文 Markdown。',
@@ -633,22 +684,44 @@ export function selectDebateRoster(judge, { size = 4, poolSeats = 1 } = {}, forc
 export function parseProposalScores(text, { selfId = '' } = {}) {
   const scores = {};
   const value = String(text || '');
+  const normalizeId = (raw) => {
+    const cleaned = String(raw || '').replace(/[*`]/g, '').trim();
+    const match = cleaned.match(/^(?:方案\s*)?([A-F])(?:\s*方案)?$/i);
+    return match ? match[1].toUpperCase() : '';
+  };
+  const parseScore = (raw) => {
+    const match = String(raw || '').match(/\d{1,2}(?:\.\d+)?/);
+    if (!match) return null;
+    const score = Number(match[0]);
+    if (!Number.isFinite(score) || score < 1 || score > 10) return null;
+    return Math.round(score * 10) / 10;
+  };
+  const setScore = (rawId, rawScore) => {
+    const id = normalizeId(rawId);
+    const score = parseScore(rawScore);
+    if (!id || id === selfId || score == null || scores[id] != null) return;
+    scores[id] = score;
+  };
+
   for (const line of value.split(/\r?\n/)) {
     const trimmed = line.trim();
     if (!trimmed.startsWith('|')) continue;
     const cells = trimmed.replace(/^\|/, '').replace(/\|$/, '').split('|').map((c) => c.trim());
     if (cells.length < 2) continue;
-    const id = cells[0].replace(/[*`]/g, '').trim();
-    if (!/^[A-F]$/.test(id) || id === selfId) continue;
-    const score = Number(String(cells[1]).replace(/[^\d.]/g, ''));
-    if (!Number.isFinite(score) || score < 1 || score > 10) continue;
-    scores[id] = Math.round(score * 10) / 10;
+    setScore(cells[0], cells[1]);
   }
-  for (const match of value.matchAll(/方案\s*([A-F])\s*[:：]\s*(\d{1,2}(?:\.\d)?)/g)) {
-    const id = match[1];
-    const score = Number(match[2]);
-    if (id === selfId || scores[id] != null) continue;
-    if (score >= 1 && score <= 10) scores[id] = score;
+
+  // CLI 经常省略“方案”和表格，直接写成 A=7、B：8分 或 方案 C 7/10。
+  // 统一在去掉 Markdown 强调符后按行解析，已有分数不会被后出现的宽松格式覆盖。
+  const inline = value.replace(/[*`]/g, '');
+  const patterns = [
+    /(?:^|[\s,，;；。:：|])(?:方案\s*)?([A-F])\s*(?:方案)?\s*(?:评分|得分|分数)?\s*[:：=＝]\s*(\d{1,2}(?:\.\d+)?)\s*(?:\/\s*10|分)?/gi,
+    /(?:^|[\s,，;；。:：|])(?:方案\s*)?([A-F])\s*(?:方案)?\s*(?:评分|得分|分数)?\s*[:：=＝]?\s*(\d{1,2}(?:\.\d+)?)\s*(?:分|\/\s*10)/gi,
+    /(?:^|[\s,，;；。:：|])(?:方案\s*)?([A-F])\s*(?:方案)?\s*[（(]\s*(\d{1,2}(?:\.\d+)?)\s*(?:分|\/\s*10)?\s*[)）]/gi,
+    /(?:^|[\s,，;；。:：|])(?:方案\s*)?([A-F])\s*(?:方案)?\s*[-—–]\s*(\d{1,2}(?:\.\d+)?)\s*(?:分|\/\s*10)/gi,
+  ];
+  for (const pattern of patterns) {
+    for (const match of inline.matchAll(pattern)) setScore(match[1], match[2]);
   }
   return scores;
 }
@@ -712,6 +785,61 @@ function buildProposalPrompt(task, agent, angle, context) {
     .join('\n');
 }
 
+function proposalHeadingCount(text) {
+  const value = String(text || '');
+  const headings = value.matchAll(
+    /^\s{0,3}(?:#{1,6}\s*)?(?:\d+[.\u3001]\s*)?(?:\*\*|__)?\s*(\u6838\u5fc3\u4e3b\u5f20|\u6280\u672f\u8def\u7ebf|\u843d\u5730\u5de5\u5e8f|\u4ee3\u4ef7\u4e0e\u98ce\u9669|\u5de5\u4f5c\u91cf(?:\u4f30\u8ba1)?)\s*(?:\*\*|__)?\s*(?:[:\uFF1A]|$)/gm,
+  );
+  const keys = new Set();
+  for (const heading of headings) keys.add(heading[1]);
+  return keys.size;
+}
+
+export function isUsableProposalText(text) {
+  const value = String(text || '');
+  return value.trim().length >= 200 && proposalHeadingCount(value) >= 3;
+}
+
+export function isCompleteProposalText(text) {
+  return String(text || '').trim().length >= 400 && proposalHeadingCount(text) >= 5;
+}
+
+export function isCompleteCritiqueText(text, expectedIds = []) {
+  const value = String(text || '');
+  if (!/(?:\u9009\u62e9|\u63a8\u8350)\s*[:\uFF1A]/.test(value)) return false;
+  const scores = parseProposalScores(value);
+  return expectedIds.length > 0 && expectedIds.every((id) => scores[id] != null);
+}
+
+export function isCompleteStepText(text, role = '') {
+  const value = String(text || '');
+  if (value.trim().length < 20) return false;
+  if (role === 'reviewer') {
+    return /(?:VERDICT|\u8d28\u91cf\u95e8\u7ed3\u8bba)\s*[:\uFF1A]\s*(?:PASS|FAIL|\u901a\u8fc7|\u4e0d\u901a\u8fc7)/i.test(
+      value,
+    );
+  }
+  return /\u4e0b\u4e00\u6b65\u5efa\u8bae\s*[:\uFF1A]/.test(value);
+}
+
+export function isCompleteSummaryText(text) {
+  const value = String(text || '');
+  return (
+    value.trim().length >= 200 &&
+    /(?:\u4ea4\u4ed8\u7ed3\u8bba|\u4ea4\u4ed8\u6536\u53e3)/.test(value) &&
+    /\u9700\u8981\u7528\u6237\u62cd\u677f/.test(value)
+  );
+}
+
+export function isCompleteDecisionText(text) {
+  const value = String(text || '');
+  return (
+    value.trim().length >= 120 &&
+    /(?:\u91c7\u7eb3|\u88c1\u51b3)/.test(value) &&
+    /\u786c\u7ea6\u675f/.test(value)
+  );
+}
+
 function buildCritiquePrompt(task, agent, own, others) {
   return [
     `你是「${agent.name}」，团队里的${agent.title || ROLE_LABEL[agent.role] || '成员'}。现在进入交叉质询。`,
@@ -726,7 +854,7 @@ function buildCritiquePrompt(task, agent, own, others) {
     '1. 给每一份方案打 1-10 分，必须给出关键理由和一个硬伤。',
     `2. 不要给自己方案打分${own ? `（你的方案是 ${own.id}）` : ''}。`,
     '3. 输出表格，格式严格为：| 方案 | 评分 | 关键理由 | 硬伤 |',
-    '4. 最后一段说明你会选哪一个，以及为什么。',
+    '4. 最后一行必须单独输出 `选择：<方案编号>。`，并简要说明理由。',
     '',
     '只输出评审文本，不要修改任何文件。',
   ].join('\n');
@@ -772,7 +900,7 @@ async function mapPool(items, limit, fn) {
   return results;
 }
 
-async function runProposal(task, agent, { id, index, speed, signal }) {
+async function runProposal(task, agent, { id, index, speed, signal, timeout = CLI_TIMEOUTS.proposal }) {
   const angle = sim.angleByIndex(index);
   store.addProposal(task.id, {
     id,
@@ -790,19 +918,36 @@ async function runProposal(task, agent, { id, index, speed, signal }) {
       const res = await cliMessage(task, agent, buildProposalPrompt(task, agent, angle, buildContextPack(task)), {
         kind: 'proposal',
         signal,
-        timeout: 150000,
+        timeout,
+        completeWhen: isCompleteProposalText,
+        settleMs: 4000,
         message: { debate: { phase: 'proposal', proposalId: id } },
       });
       const text = (res.stdout || '').trim();
-      const ok = res.code === 0 && text.length >= 40;
-      const note = ok ? `CLI · ${(res.elapsed / 1000).toFixed(1)}s` : `提案失败 · 退出码 ${res.code}`;
+      const partial = res.code !== 0 && res.partial && isUsableProposalText(text);
+      const ok = (res.code === 0 && isUsableProposalText(text)) || partial;
+      const failure = classifyCliExit(res);
+      const note = ok
+        ? partial
+          ? `${failure.label} · 已保留不完整方案`
+          : `CLI · ${(res.elapsed / 1000).toFixed(1)}s`
+        : `提案失败 · ${failure.label}`;
       store.updateProposal(task.id, id, {
-        status: ok ? 'done' : 'failed',
-        text: ok ? clip(text, 5000) : clip((res.stderr || '').trim(), 600),
+        status: ok ? (partial ? 'partial' : 'done') : 'failed',
+        text: ok ? clip(text, 5000) : clip((text || res.stderr || '').trim(), 600),
         messageId: res.messageId,
         note,
       });
-      return { id, agent, angle, ok, text: ok ? text : '', note, messageId: res.messageId };
+      return {
+        id,
+        agent,
+        angle,
+        ok,
+        partial,
+        text: ok ? text : '',
+        note,
+        messageId: res.messageId,
+      };
     }
 
     const out = sim.proposalFor({ goal: task.goal, agent, index, id });
@@ -826,7 +971,7 @@ async function runProposal(task, agent, { id, index, speed, signal }) {
   }
 }
 
-async function runCritique(task, agent, { index, proposals, speed, signal }) {
+async function runCritique(task, agent, { index, proposals, speed, signal, timeout = CLI_TIMEOUTS.critique }) {
   const own = proposals.find((p) => p.agent.id === agent.id);
   const others = proposals.filter((p) => p.agent.id !== agent.id);
   if (!others.length) {
@@ -850,16 +995,28 @@ async function runCritique(task, agent, { index, proposals, speed, signal }) {
     let text = '';
     let scores = {};
     let reasons = {};
+    let partialOutput = false;
     if (agent.mode === 'cli') {
+      const expectedIds = others.map((p) => p.id);
       const res = await cliMessage(task, agent, buildCritiquePrompt(task, agent, own, others), {
         kind: 'critique',
         signal,
-        timeout: 150000,
+        timeout,
+        completeWhen: (value) => isCompleteCritiqueText(value, expectedIds),
+        settleMs: 3000,
         message: { debate: { phase: 'critique', selfId: own?.id || '' } },
       });
       text = (res.stdout || '').trim();
       scores = parseProposalScores(text, { selfId: own?.id || '' });
-      if (res.code !== 0 || !text) throw new Error(`质询失败 · 退出码 ${res.code}`);
+      partialOutput = res.code !== 0;
+      const valid = proposals.filter((p) => p.id !== own?.id && scores[p.id] != null);
+      if (!valid.length) {
+        throw new Error(
+          res.code === 0
+            ? '质询没有解析到有效评分'
+            : `质询失败 · ${classifyCliExit(res).label}${text ? '（输出中未找到评分表）' : ''}`,
+        );
+      }
     } else {
       const out = sim.critiqueFor({ goal: task.goal, agent, index, proposals: view });
       await streamMessage(task, agent, out.text, {
@@ -886,9 +1043,11 @@ async function runCritique(task, agent, { index, proposals, speed, signal }) {
       agentId: agent.id,
       name: agent.name,
       color: agent.color,
-      ok: true,
+      ok: valid.length > 0,
       count: valid.length,
-      note: valid.length ? `已评 ${valid.length} 份方案` : '未解析到有效评分',
+      note: valid.length
+        ? `已评 ${valid.length} 份方案${partialOutput ? ' · 来自不完整输出' : ''}`
+        : '未解析到有效评分',
     });
     return { ok: valid.length > 0, agent, scores };
   } catch (err) {
@@ -962,7 +1121,13 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
 
   const proposals = await mapPool(roster, cfg.concurrency, async (agent, index) => {
     const id = String.fromCharCode(65 + index);
-    return runProposal(task, agent, { id, index, speed, signal });
+    return runProposal(task, agent, {
+      id,
+      index,
+      speed,
+      signal,
+      timeout: CLI_TIMEOUTS.proposal,
+    });
   });
   throwIfAborted(signal);
 
@@ -978,7 +1143,7 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
       color: '#ff5538',
       kind: 'debate-intro',
       done: true,
-      text: `**方案讨论没有产生有效提案**\n\n${reasons}\n\n本轮跳过裁决，按默认路线继续实施。请检查这些成员的命令模板、API 地址或凭据（例如网关返回 405 时，提案和实现都会失败）。`,
+      text: `**方案讨论没有产生有效提案**\n\n${reasons}\n\n本轮不会假装裁决通过。请先修复这些成员的命令模板、运行时环境或凭据，再重新开工。`,
     });
     store.endMessage(task.id, msg.id, {});
     return null;
@@ -986,7 +1151,13 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
 
   store.setDebate(task.id, { status: 'critiquing' });
   const critiques = await mapPool(roster, cfg.concurrency, async (agent, index) =>
-    runCritique(task, agent, { index, proposals: valid, speed, signal }),
+    runCritique(task, agent, {
+      index,
+      proposals: valid,
+      speed,
+      signal,
+      timeout: CLI_TIMEOUTS.critique,
+    }),
   );
   throwIfAborted(signal);
 
@@ -994,7 +1165,11 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
   const ranking = rankProposals(latest.proposals);
   const winner = ranking[0];
   const voteCount = ranking.reduce((sum, p) => sum + p.votes, 0);
-  const confidence = winner.average == null ? 'low' : voteCount >= ranking.length ? 'high' : 'medium';
+  const degraded = voteCount === 0;
+  const confidence = degraded ? 'none' : voteCount >= ranking.length ? 'high' : 'medium';
+  const decisionReason = degraded
+    ? '交叉质询没有产生有效评分，按提案顺序降级采用，需人工复核后再视为正式裁决。'
+    : '';
 
   const decision = {
     winnerId: winner.id,
@@ -1007,6 +1182,8 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
     judgeId: judge?.id || '',
     judgeName: judge?.name || '编排器',
     confidence,
+    degraded,
+    reason: decisionReason,
     brief: clip(winner.text, 2000),
     ranking: ranking.map(({ text, ...rest }) => rest),
     critiqueCount: critiques.filter((c) => c.ok).length,
@@ -1014,8 +1191,8 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
   };
 
   const decisionText =
-    winner.average == null
-      ? `**裁决：方案 ${winner.id} · ${winner.angleLabel}**\n\n本轮交叉评分不足，无法比较，按风险最小的顺序临时采纳方案 ${winner.id}（${winner.name}）。建议下一轮补齐质询。`
+    degraded
+      ? `**降级采用：方案 ${winner.id} · ${winner.angleLabel}**\n\n本轮交叉质询没有产生有效评分，不能把它称为“已采纳”。系统按提案顺序临时采用方案 ${winner.id}（${winner.name}），继续执行但会标记为待人工确认。建议下一轮补齐质询。`
       : sim.decisionFor({
           goal: task.goal,
           ranking,
@@ -1025,11 +1202,26 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
         });
 
   try {
-    if (judge?.mode === 'cli') {
+    if (degraded) {
+      // 没有有效评分时，主持人 CLI 再跑一遍只会放大失败面；直接给出可审计的降级结论。
+      const msg = store.addMessage(task.id, {
+        agentId: 'system',
+        name: '编排器',
+        role: 'system',
+        title: 'DECISION',
+        color: '#fbbf24',
+        kind: 'decision',
+        done: true,
+        text: decisionText,
+      });
+      store.endMessage(task.id, msg.id, {});
+    } else if (judge?.mode === 'cli') {
       const res = await cliMessage(task, judge, buildDecisionPrompt(task, judge, ranking, winner), {
         kind: 'decision',
         signal,
-        timeout: 120000,
+        timeout: CLI_TIMEOUTS.decision,
+        completeWhen: isCompleteDecisionText,
+        settleMs: 5000,
         message: { debate: { phase: 'decision', winnerId: winner.id } },
       });
       if (res.code !== 0 || !res.stdout.trim()) throw new Error('裁决说明生成失败');
@@ -1056,7 +1248,7 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
     store.endMessage(task.id, msg.id, {});
   }
 
-  store.setDecision(task.id, decision);
+  store.setDecision(task.id, decision, degraded ? 'fallback' : 'decided');
   return { decision, ranking, participants: roster };
 }
 
@@ -1068,18 +1260,29 @@ async function runStep(task, agent, { step, kind, prompt, signal, speed, simOutp
   if (!agent) throw new Error('没有可用的智能体');
   if (agent.mode === 'cli') {
     agent.currentStepId = step?.id || '';
-    const res = await cliMessage(task, agent, prompt, { kind, signal, timeout: 300000 });
+    const res = await cliMessage(task, agent, prompt, {
+      kind,
+      signal,
+      timeout: CLI_TIMEOUTS.step,
+      completeWhen: step
+        ? (value) => isCompleteStepText(value, step.role)
+        : isCompleteSummaryText,
+      settleMs: 6000,
+    });
     const msg = store.getTask(task.id).messages.find((m) => m.id === res.messageId);
+    const stdoutText = (res.stdout || '').trim();
+    const text = stdoutText || msg?.text || '';
+    const failure = classifyCliExit(res);
     return {
-      ok: res.code === 0,
+      ok: res.code === 0 && !!stdoutText,
       code: res.code,
-      text: (res.stdout || '').trim() || msg?.text || '',
+      text,
       note:
-        res.code === 0
+        res.code === 0 && stdoutText
           ? `CLI · ${(res.elapsed / 1000).toFixed(1)}s`
-          : res.code === -3
-            ? 'CLI 超时'
-            : `CLI 失败 · 退出码 ${res.code}`,
+          : res.code === 0
+            ? 'CLI 成功但没有产生可交付输出'
+            : `CLI 失败 · ${failure.label}`,
     };
   }
 
@@ -1121,7 +1324,7 @@ async function runStep(task, agent, { step, kind, prompt, signal, speed, simOutp
 
 async function runStepWithRetry(task, agent, options) {
   const configured = agent.mode === 'cli' ? Number(store.db.settings.maxStepAttempts) || 2 : 1;
-  const maxAttempts = Math.max(1, configured);
+  const maxAttempts = Math.max(1, Number(options.maxAttempts) || configured);
   let last;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     if (options.step) {
@@ -1133,13 +1336,13 @@ async function runStepWithRetry(task, agent, options) {
       });
     }
     last = await runStep(task, agent, options);
-    if (last.ok || last.code !== -3 || attempt >= maxAttempts || options.signal?.aborted) {
+    if (last.ok || attempt >= maxAttempts || options.signal?.aborted || !shouldRetryCliResult(last)) {
       return { ...last, attempt };
     }
     if (options.step) {
       store.updateStep(task.id, options.step.id, {
         status: 'retrying',
-        note: `超时，准备第 ${attempt + 1} 次尝试`,
+        note: `${last.note || 'CLI 启动失败'}，准备第 ${attempt + 1} 次尝试`,
       });
     }
     await sleep(400 * attempt, options.signal);
@@ -1147,7 +1350,53 @@ async function runStepWithRetry(task, agent, options) {
   return { ...last, attempt: maxAttempts };
 }
 
-const TEST_TIMEOUT = 120000;
+/**
+ * 工序失败时的同角色回退顺序。
+ * 真实 CLI 任务只在 CLI 之间回退，避免用内置模拟结果掩盖真实进程故障；
+ * 评审席优先避开实现者，保留“实现与评审分离”的边界。
+ */
+export function stepAgentCandidates(step, preferred = null) {
+  const role = step?.role || preferred?.role || '';
+  const ordered = [];
+  const seenCommands = new Set();
+  const commandKey = (agent) => {
+    const command = String(agent?.cli?.command || '').trim().replace(/^["']|["']$/g, '');
+    if (!command) return '';
+    return path
+      .basename(command)
+      .replace(/\.(exe|cmd|bat|ps1)$/i, '')
+      .toLowerCase();
+  };
+  const push = (agent) => {
+    if (!agent || ordered.some((item) => item.id === agent.id)) return;
+    if (agent.mode === 'cli') {
+      const key = commandKey(agent);
+      if (key && seenCommands.has(key)) return;
+      if (key) seenCommands.add(key);
+    }
+    ordered.push(agent);
+  };
+
+  push(preferred);
+  for (const name of PICK_ORDER[role] || [role]) {
+    for (const agent of store.agents) {
+      if (agent.role === name && agent.seat !== false) push(agent);
+    }
+  }
+  for (const agent of store.agents) {
+    if (agent.seat !== false) push(agent);
+  }
+  for (const agent of store.agents) push(agent);
+
+  if (preferred?.mode === 'cli') {
+    // 真实 CLI 任务不能在故障后偷偷落到内置模拟成员；
+    // 没有可执行的 CLI 时返回空列表，让上层明确报错。
+    return ordered.filter((agent) => agent.mode === 'cli' && agent.cli?.command);
+  }
+  return ordered;
+}
+
+const TEST_TIMEOUT = CLI_TIMEOUTS.qualityGate;
 const PLACEHOLDER_TEST = /no test specified/i;
 
 /**
@@ -1290,69 +1539,106 @@ async function executeSteps(task, steps, { outputs, speed, signal }) {
     onUpdate: (stepId, patch) => store.updateStep(task.id, stepId, patch),
     run: async (step) => {
       const latest = store.getTask(task.id);
-      const agent = store.getAgent(step.agentId) || pickAgent(step.role);
-      if (!agent) return { ok: false, note: `没有可用的${ROLE_LABEL[step.role] || step.role}成员` };
-      store.updateStep(task.id, step.id, { agentId: agent.id });
-      agent.currentStepId = step.id;
+      const preferred = store.getAgent(step.agentId) || pickAgent(step.role);
+      const candidates = stepAgentCandidates(step, preferred);
+      if (!candidates.length) {
+        return { ok: false, note: `没有可用的${ROLE_LABEL[step.role] || step.role}成员` };
+      }
 
-      const extra = {
+      const baseExtra = {
         repairRound: step.round || 0,
         decision: latest.debate?.decision || null,
-        // 评审员落到实现者身上时如实标出来，别让自审看起来像独立评审
-        selfReview: isSelfReview(step.role, agent),
       };
       if (step.role === 'reviewer') {
-        extra.quality = await runQualityGate(latest, step, signal);
+        baseExtra.quality = await runQualityGate(latest, step, signal);
       }
-      const context = buildContextPack(latest, { files: knownFiles(latest) });
-      const depsText = dependencyText(latest, step, outputs);
-      const prompt = buildPrompt(latest, agent, step, depsText, context, extra);
-      const simOutputs = {
-        ...Object.fromEntries([...outputs].map(([id, value]) => [id, value.text])),
-        steps: Object.fromEntries([...outputs]),
-        repairRound: extra.repairRound,
-        quality: extra.quality,
-        decision: extra.decision,
-      };
 
-      const out = await runStepWithRetry(latest, agent, {
-        step,
-        kind: STEP_KIND[step.role] || 'text',
-        prompt,
-        signal,
-        speed,
-        simOutputs,
-      });
-      if (out.ok && step.role === 'reviewer') {
-        const verdict = parseReviewVerdict(out.text);
-        out.verdict = verdict === true ? 'pass' : verdict === false ? 'fail' : 'unknown';
-        out.passed = verdict === true && extra.quality?.status !== 'failed';
-        // 没有测试入口时不能说「质量门通过」——那一轮根本没有自动化把关，只有评审结论。
-        const gateMissing = extra.quality?.status === 'missing';
-        out.note = out.passed
-          ? extra.selfReview
-            ? gateMissing
-              ? '评审通过（没有测试入口，且是自审）'
-              : '质量门通过（自审：没有独立评审席位）'
-            : gateMissing
-              ? '评审通过（没有测试入口，未经自动化质量门）'
-              : '质量门通过'
-          : verdict === null
-            ? '缺少明确评审结论'
-            : '未通过，进入返工';
-      }
-      if (out.ok) {
-        outputs.set(step.id, {
-          stepId: step.id,
-          title: step.title,
-          role: step.role,
-          name: agent.name,
-          text: out.text,
-          passed: out.passed,
-          verdict: out.verdict,
+      let last = null;
+      for (let index = 0; index < candidates.length; index += 1) {
+        const agent = candidates[index];
+        const current = store.getTask(task.id);
+        store.updateStep(task.id, step.id, {
+          agentId: agent.id,
+          status: 'running',
+          note:
+            index > 0
+              ? `${preferred?.name || '原成员'} 失败，切换 ${agent.name} 重试`
+              : step.note || '',
         });
+        agent.currentStepId = step.id;
+
+        const extra = {
+          ...baseExtra,
+          // 评审员落到实现者身上时如实标出来，别让自审看起来像独立评审
+          selfReview: isSelfReview(step.role, agent),
+        };
+        const context = buildContextPack(current, { files: knownFiles(current) });
+        const depsText = dependencyText(current, step, outputs);
+        const prompt = buildPrompt(current, agent, step, depsText, context, extra);
+        const simOutputs = {
+          ...Object.fromEntries([...outputs].map(([id, value]) => [id, value.text])),
+          steps: Object.fromEntries([...outputs]),
+          repairRound: extra.repairRound,
+          quality: extra.quality,
+          decision: extra.decision,
+        };
+
+        const out = await runStepWithRetry(current, agent, {
+          step,
+          kind: STEP_KIND[step.role] || 'text',
+          prompt,
+          signal,
+          speed,
+          simOutputs,
+          // 首选成员允许按设置重试；切换成员后只给它一次机会，避免整条流水线被拖死。
+          maxAttempts: index === 0 ? undefined : 1,
+        });
+        if (out.ok && step.role === 'reviewer') {
+          const verdict = parseReviewVerdict(out.text);
+          out.verdict = verdict === true ? 'pass' : verdict === false ? 'fail' : 'unknown';
+          out.passed = verdict === true && extra.quality?.status !== 'failed';
+          // 没有测试入口时不能说「质量门通过」——那一轮根本没有自动化把关，只有评审结论。
+          const gateMissing = extra.quality?.status === 'missing';
+          out.note = out.passed
+            ? extra.selfReview
+              ? gateMissing
+                ? '评审通过（没有测试入口，且是自审）'
+                : '质量门通过（自审：没有独立评审席位）'
+              : gateMissing
+                ? '评审通过（没有测试入口，未经自动化质量门）'
+                : '质量门通过'
+            : verdict === null
+              ? '缺少明确评审结论'
+              : '未通过，进入返工';
+        }
+        if (out.ok) {
+          if (index > 0) out.note = `${out.note || '已完成'} · 由 ${agent.name} 接替`;
+          outputs.set(step.id, {
+            stepId: step.id,
+            title: step.title,
+            role: step.role,
+            name: agent.name,
+            text: out.text,
+            passed: out.passed,
+            verdict: out.verdict,
+          });
+          return out;
+        }
+
+        last = out;
+        if (signal?.aborted) return out;
+        if (index < candidates.length - 1) {
+          store.updateStep(task.id, step.id, {
+            status: 'retrying',
+            note: `${agent.name}：${out.note || '执行失败'}；准备切换 ${candidates[index + 1].name}`,
+          });
+        }
       }
-      return out;
+
+      if (last && candidates.length > 1) {
+        last.note = `${last.note || '执行失败'}；已尝试 ${candidates.map((agent) => agent.name).join('、')}`;
+      }
+      return last;
     },
   });
 }
@@ -1442,13 +1728,15 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
 
     const decision = debate?.decision;
     if (decision) {
+      const degraded = !!decision.degraded;
       store.updateStep(taskId, 'debate', {
         status: 'done',
         agentId: decision.judgeId || judge?.id || '',
-        title: `方案讨论与裁决 · 采纳方案 ${decision.winnerId}`,
-        note: `采纳方案 ${decision.winnerId} · ${
-          decision.average == null ? '无评分' : `${decision.average} 分`
+        title: `方案讨论与裁决 · ${degraded ? '降级采用' : '采纳'}方案 ${decision.winnerId}`,
+        note: `${degraded ? '降级采用' : '采纳'}方案 ${decision.winnerId} · ${
+          decision.average == null ? '无有效评分' : `${decision.average} 分`
         } · ${decision.votes} 票`,
+        degraded,
         endedAt: Date.now(),
       });
       outputs.set('debate', {
@@ -1457,8 +1745,11 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
         role: 'planner',
         name: decision.judgeName,
         text: [
-          `# 采纳方案 ${decision.winnerId} · ${decision.angleLabel}`,
-          `提案人：${decision.winnerName} · 平均 ${decision.average} 分 · ${decision.votes} 票`,
+          `# ${degraded ? '降级采用' : '采纳'}方案 ${decision.winnerId} · ${decision.angleLabel}`,
+          `提案人：${decision.winnerName} · ${
+            decision.average == null ? '无有效评分' : `平均 ${decision.average} 分`
+          } · ${decision.votes} 票`,
+          degraded ? `\n> ${decision.reason}` : '',
           '',
           decision.brief,
         ].join('\n'),
@@ -1467,6 +1758,10 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
     } else {
       const latest = store.getTask(taskId).debate;
       const reason = latest?.reason || '本轮未进行方案讨论';
+      if (latest?.status === 'failed') {
+        store.updateStep(taskId, 'debate', { status: 'error', note: reason, endedAt: Date.now() });
+        throw new Error(`方案讨论失败：${reason}`);
+      }
       store.updateStep(taskId, 'debate', { status: 'skipped', note: reason, endedAt: Date.now() });
       outputs.set('debate', {
         stepId: 'debate',
@@ -1547,6 +1842,7 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
           passed: !!review?.passed,
           repairRound,
           quality: store.getTask(taskId).quality,
+          degraded: !!decision?.degraded,
         },
       ),
       signal,
@@ -1561,7 +1857,8 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
     });
     if (!summary.ok) throw new Error(`交付收口失败：${summary.note}`);
 
-    const finalStatus = review?.passed ? 'done' : 'needs_attention';
+    const finalStatus =
+      review?.passed && !decision?.degraded ? 'done' : 'needs_attention';
     const finished = store.getTask(taskId);
     const quality = finished.quality || { status: 'pending' };
     store.updateTask(
@@ -1728,7 +2025,7 @@ export async function chat(taskId, text, { speed = 1 } = {}) {
         `${buildPrompt(task, agent, null, transcript, context)}\n\n# 用户说\n${text}`,
         { kind: 'text', signal },
       );
-      if (res.code !== 0) throw new Error(`CLI 退出码 ${res.code}`);
+      if (res.code !== 0) throw new Error(describeCliResult(res));
     } else {
       const out = sim.compose({ kind: 'chat', goal: task.goal, agent, outputs: { userText: text } });
       await streamMessage(task, agent, out.text, { kind: 'text', speed, signal });

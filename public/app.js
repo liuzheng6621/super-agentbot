@@ -369,6 +369,14 @@ const STEP_STATUS_TEXT = {
   skipped: "已跳过",
 };
 
+function isDegradedDecision(decision, debateStatus = "") {
+  return (
+    !!decision?.degraded ||
+    debateStatus === "fallback" ||
+    (!!decision && Number(decision.votes || 0) === 0)
+  );
+}
+
 function renderTasks() {
   $("#taskList").innerHTML = S.tasks.length
     ? S.tasks
@@ -424,6 +432,16 @@ function renderTopbar() {
 
 /* ---------------- 渲染：时间线 ---------------- */
 
+function friendlyCliText(value) {
+  return String(value || "")
+    .replace(/CLI 退出码 3221225794/g, "Windows 进程初始化失败（0xC0000142）")
+    .replace(/退出码 3221225794/g, "Windows 进程初始化失败（0xC0000142）")
+    .replace(/CLI 退出码 1073807364/g, "进程被外部终止（0x40010004）")
+    .replace(/退出码 1073807364/g, "进程被外部终止（0x40010004）")
+    .replace(/CLI 退出码 -3/g, "执行超时")
+    .replace(/退出码 -3/g, "执行超时");
+}
+
 function messageHtml(m) {
   const isUser = m.kind === "user" || m.agentId === "user";
   const color = m.color || "#b8d94f";
@@ -455,7 +473,7 @@ function messageHtml(m) {
       ${isUser ? "" : `<span class="avatar" style="--c:${color}">${initials(m.name)}</span>`}
       <div class="msg-main">
         ${head}
-        <div class="bubble" style="--c:${color}">${md(m.text || "")}</div>
+        <div class="bubble" style="--c:${color}">${md(friendlyCliText(m.text || ""))}</div>
         ${meta}
       </div>
       ${isUser ? `<span class="avatar" style="--c:${color}">${initials(m.name)}</span>` : ""}
@@ -560,7 +578,8 @@ function deriveFlow(t) {
     const list = st.steps;
     const any = (fn) => list.some(fn);
     if (any((s) => ["running", "retrying", "queued"].includes(s.status))) st.status = "active";
-    else if (any((s) => ["error", "blocked", "stopped"].includes(s.status))) st.status = "error";
+    else if (any((s) => ["error", "stopped"].includes(s.status))) st.status = "error";
+    else if (any((s) => s.status === "blocked")) st.status = "blocked";
     else if (list.every((s) => s.status === "done")) st.status = "done";
     else if (list.every((s) => s.status === "skipped")) st.status = "skipped";
     else if (any((s) => s.status === "done")) st.status = "active";
@@ -573,6 +592,11 @@ function deriveFlow(t) {
   if (dStatus === "skipped" || debateStep?.status === "skipped") {
     debate.status = "skipped";
     debate.note = t.debate?.reason || "本任务跳过了方案讨论";
+  } else if (isDegradedDecision(t.debate?.decision, dStatus)) {
+    debate.status = "warning";
+    debate.note = t.debate?.decision
+      ? `无有效交叉评分 · 降级采用方案 ${t.debate.decision.winnerId}`
+      : "讨论未形成有效评分";
   } else if (dStatus === "decided" || debateStep?.status === "done") {
     debate.status = "done";
     debate.note = t.debate?.decision ? `采纳方案 ${t.debate.decision.winnerId}` : "已裁决";
@@ -589,7 +613,12 @@ function deriveFlow(t) {
   const deliver = byId.get("deliver");
   const hasSummary = (t.messages || []).some((m) => m.kind === "summary" && m.done);
   if (["done", "needs_attention", "error", "stopped"].includes(t.status) || hasSummary) {
-    deliver.status = t.status === "error" || t.status === "stopped" ? "error" : "done";
+    deliver.status =
+      t.status === "error" || t.status === "stopped"
+        ? "error"
+        : t.status === "needs_attention"
+          ? "warning"
+          : "done";
     deliver.note = STATUS_TEXT[t.status] || "已收口";
   } else if (
     t.status === "running" &&
@@ -613,7 +642,7 @@ function deriveFlow(t) {
 
   return {
     stages,
-    current: stages.find((s) => s.status === "active" || s.status === "error") || null,
+    current: stages.find((s) => ["active", "error", "blocked", "warning"].includes(s.status)) || null,
     doneSteps: plan.filter((s) => s.status === "done").length,
     totalSteps: plan.length,
   };
@@ -639,7 +668,7 @@ function renderFlow() {
   // 有任务时用真实阶段条替代装饰性跑马灯，减少噪音
   if (ticker) ticker.hidden = true;
   const flow = deriveFlow(t);
-  const mark = { done: "✓", active: "●", error: "!", skipped: "–", pending: "" };
+  const mark = { done: "✓", active: "●", error: "!", blocked: "…", warning: "!", skipped: "–", pending: "" };
   $("#flowTrack").innerHTML = flow.stages
     .map(
       (s, i) => `<button class="flow-node" data-stage="${s.id}" data-status="${s.status}"
@@ -705,7 +734,9 @@ function renderPlan() {
       <span>${t.repairRound ? `返工 ${t.repairRound} 轮` : "首轮执行"}</span>
       ${
         t.debate?.decision
-          ? `<span class="po-decision" title="方案讨论结果">采纳方案 ${t.debate.decision.winnerId}</span>`
+          ? `<span class="po-decision" data-degraded="${isDegradedDecision(t.debate.decision, t.debate.status)}" title="方案讨论结果">${
+              isDegradedDecision(t.debate.decision, t.debate.status) ? "降级采用" : "采纳"
+            }方案 ${t.debate.decision.winnerId}</span>`
           : ""
       }
       <span class="po-quality" data-quality="${t.quality?.status || "pending"}">${qualityText}</span>`;
@@ -779,8 +810,10 @@ const DEBATE_STATUS = {
   proposing: "提案中",
   critiquing: "交叉质询中",
   decided: "已裁决",
+  fallback: "降级裁决",
   skipped: "已跳过",
   failed: "讨论失败",
+  stopped: "已停止",
 };
 
 function proposalScore(p) {
@@ -814,11 +847,12 @@ function renderDebate() {
   }
 
   const dec = d.decision;
+  const degraded = isDegradedDecision(dec, d.status);
   head.innerHTML = `
     <div class="debate-status" data-status="${d.status}">
       <b>${DEBATE_STATUS[d.status] || d.status}</b>
       <span>${d.participants.length} 位提案人</span>
-      ${dec ? `<em>${dec.average == null ? "无评分" : `${dec.average} 分`}</em>` : ""}
+      ${dec ? `<em>${degraded ? "无有效评分" : dec.average == null ? "无评分" : `${dec.average} 分`}</em>` : ""}
     </div>
     <div class="debate-people">
       ${d.participants
@@ -832,12 +866,15 @@ function renderDebate() {
     </div>
     ${
       dec
-        ? `<div class="debate-winner">
-            <span class="dw-tag">裁决</span>
+        ? `<div class="debate-winner" data-degraded="${degraded}">
+            <span class="dw-tag">${degraded ? "降级" : "裁决"}</span>
             <div class="dw-main">
               <b>方案 ${dec.winnerId} · ${escapeHtml(dec.angleLabel)}</b>
-              <span>${escapeHtml(dec.winnerName)} 提出 · 平均 ${dec.average ?? "—"} 分 · ${dec.votes} 票</span>
+              <span>${escapeHtml(dec.winnerName)} 提出 · ${
+                degraded ? "无有效交叉评分" : `平均 ${dec.average ?? "—"} 分`
+              } · ${dec.votes} 票</span>
               <span class="dw-judge">主持人 ${escapeHtml(dec.judgeName)}</span>
+              ${degraded ? `<span class="dw-warning">${escapeHtml(dec.reason || "按提案顺序临时采用，需人工复核")}</span>` : ""}
             </div>
           </div>`
         : ""
@@ -863,6 +900,7 @@ function renderDebate() {
     .map((p) => {
       const score = proposalScore(p);
       const win = dec && dec.winnerId === p.id;
+      const winLabel = degraded ? "临时采用" : "已采纳";
       const votes = (p.votes || [])
         .map(
           (v) =>
@@ -880,7 +918,9 @@ function renderDebate() {
         <div class="p-meta">${
           p.status === "failed"
             ? escapeHtml(p.note || "提案失败")
-            : `${p.votes?.length || 0} 票${win ? " · 已采纳" : ""}`
+            : p.status === "partial"
+              ? `${p.votes?.length || 0} 票 · 输出不完整${win ? ` · ${winLabel}` : ""}`
+              : `${p.votes?.length || 0} 票${win ? ` · ${winLabel}` : ""}`
         }</div>
         ${votes ? `<div class="p-votes">${votes}</div>` : ""}
         ${
@@ -903,7 +943,7 @@ function renderDebate() {
             (c) =>
               `<div class="dc-row ${c.ok ? "ok" : "fail"}">
                 <span class="dc-name" style="--c:${c.color}">${escapeHtml(c.name)}</span>
-                <span>${escapeHtml(c.note || (c.ok ? "已完成评分" : "质询失败"))}</span>
+                <span>${escapeHtml(friendlyCliText(c.note || (c.ok ? "已完成评分" : "质询失败")))}</span>
               </div>`,
           )
           .join("")}

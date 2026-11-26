@@ -50,24 +50,142 @@ function quoteArg(arg) {
   return `'${arg.replace(/'/g, `'\\''`)}'`;
 }
 
+function isGeminiCommand(command) {
+  const base = path
+    .basename(String(command || '').trim())
+    .replace(/\.(exe|cmd|bat|ps1)$/i, '')
+    .toLowerCase();
+  return base === 'gemini';
+}
+
+function isTraeCommand(command) {
+  const base = path
+    .basename(String(command || '').trim())
+    .replace(/\.(exe|cmd|bat|ps1)$/i, '')
+    .toLowerCase();
+  return base === 'trae-cli' || base === 'trae';
+}
+
+/**
+ * Gemini's interactive mode can wait forever even after stdin is closed.
+ * `--prompt=` switches it to headless mode while the actual prompt still
+ * travels through stdin, avoiding Windows command-line escaping issues.
+ */
+export function normalizeCliArgs(command, args = []) {
+  const normalized = Array.isArray(args) ? args.map((arg) => String(arg)) : [];
+  if (isGeminiCommand(command)) {
+    const hasPromptFlag = normalized.some(
+      (arg) => arg === '-p' || arg === '--prompt' || arg.startsWith('--prompt='),
+    );
+    return hasPromptFlag ? normalized : [...normalized, '--prompt='];
+  }
+  if (isTraeCommand(command) && normalized[0] === 'run') {
+    if (!normalized.some((arg) => arg === '--max-steps' || arg.startsWith('--max-steps='))) {
+      normalized.splice(1, 0, '--max-steps', '16');
+    }
+    if (
+      !normalized.some(
+        (arg) => arg === '--console-type' || arg.startsWith('--console-type='),
+      )
+    ) {
+      normalized.splice(1, 0, '--console-type', 'simple');
+    }
+  }
+  return normalized;
+}
+
 function buildArgs(agent, prompt) {
   const { args = [] } = agent.cli || {};
-  return (args.length ? args : ['-p', '{{prompt}}']).map((a) =>
-    String(a).replace(/\{\{prompt\}\}/g, prompt),
-  );
+  const normalized = normalizeCliArgs(agent.cli?.command, args.length ? args : ['-p', '{{prompt}}']);
+  return normalized.map((a) => a.replace(/\{\{prompt\}\}/g, prompt));
 }
 
 function buildCommand(agent, prompt) {
   const { command } = agent.cli || {};
   const finalArgs = buildArgs(agent, prompt);
-  return [command, ...finalArgs].map((a, i) => (i === 0 ? a : quoteArg(a))).join(' ');
+  // 命令本身也可能带空格（例如 Program Files 下的 CLI），不能只给参数加引号。
+  return [command, ...finalArgs].map((a) => quoteArg(a)).join(' ');
+}
+
+/**
+ * 把 Windows 的 32 位进程退出码显示成用户能搜索、能对照事件查看器的格式。
+ * Node 在 Windows 上通常把 0xC0000142 这类状态码作为无符号整数返回。
+ */
+export function formatExitCode(code) {
+  const value = Number(code);
+  if (!Number.isFinite(value)) return '未知';
+  if (value < 0) return String(value);
+  const unsigned = value >>> 0;
+  if (unsigned >= 0x40000000) {
+    return `${value} (0x${unsigned.toString(16).toUpperCase().padStart(8, '0')})`;
+  }
+  return String(value);
+}
+
+/**
+ * 把退出码翻译成可操作的失败类型。尤其不要把 0xC0000142 当成普通业务错误，
+ * 它表示 Windows 在进程/DLL 初始化阶段就失败了，重试和换成员比改 prompt 更有效。
+ */
+export function classifyCliExit(codeOrResult) {
+  const res = typeof codeOrResult === 'object' && codeOrResult ? codeOrResult : { code: codeOrResult };
+  const code = Number(res.code);
+  if (code === 0) return { kind: 'ok', label: '成功', retryable: false };
+  if (res.timedOut || code === -3) {
+    return { kind: 'timeout', label: '执行超时', retryable: false };
+  }
+  if (code === -4) return { kind: 'stopped', label: '已停止', retryable: false };
+  if (code === -2) return { kind: 'missing', label: '未配置 CLI 命令', retryable: false };
+  if (code === -1) return { kind: 'spawn', label: '进程启动失败', retryable: true };
+  if (code === 3221225794) {
+    return {
+      kind: 'windows-init',
+      label: 'Windows 进程初始化失败（0xC0000142）',
+      retryable: true,
+    };
+  }
+  if (code === 1073807364) {
+    return {
+      kind: 'terminated',
+      label: '进程被外部终止（0x40010004）',
+      retryable: false,
+    };
+  }
+  return { kind: 'cli', label: `CLI 退出码 ${formatExitCode(code)}`, retryable: false };
+}
+
+export function describeCliResult(res = {}) {
+  const failure = classifyCliExit(res);
+  if (failure.kind === 'ok') return '成功';
+  const detail = String(res.stderr || res.stdout || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180);
+  return detail ? `${failure.label}：${detail}` : failure.label;
+}
+
+function runtimePathEnv(env) {
+  const key = Object.keys(env).find((name) => name.toLowerCase() === 'path') || 'PATH';
+  const current = String(env[key] || '');
+  const parts = current.split(path.delimiter).filter(Boolean);
+  const known = new Set(parts.map((part) => part.toLowerCase()));
+  for (const dir of [path.dirname(process.execPath), ...commonBinDirs()]) {
+    if (!dir || known.has(dir.toLowerCase())) continue;
+    parts.unshift(dir);
+    known.add(dir.toLowerCase());
+  }
+  env[key] = parts.join(path.delimiter);
+  return env;
 }
 
 /**
  * 执行一次真实 CLI 调用，把 stdout 增量回调出去。
  * @returns {Promise<{code:number, stdout:string, stderr:string, elapsed:number}>}
  */
-export function spawnCli(agent, prompt, { cwd, onChunk, timeout = 180000, signal } = {}) {
+export function spawnCli(
+  agent,
+  prompt,
+  { cwd, onChunk, timeout = 180000, signal, completeWhen = null, settleMs = 0 } = {},
+) {
   return new Promise((resolve) => {
     const started = Date.now();
     if (!agent.cli?.command) {
@@ -75,11 +193,24 @@ export function spawnCli(agent, prompt, { cwd, onChunk, timeout = 180000, signal
       return;
     }
     // 与 buildCommand 保持同一套默认参数，避免既走参数又走 stdin
-    const declaredArgs = agent.cli.args?.length ? agent.cli.args : ['-p', '{{prompt}}'];
+    const declaredArgs = normalizeCliArgs(
+      agent.cli.command,
+      agent.cli.args?.length ? agent.cli.args : ['-p', '{{prompt}}'],
+    );
     const passByStdin = !declaredArgs.some((a) => String(a).includes('{{prompt}}'));
 
     const runCwd = cwd || agent.cli.cwd || process.cwd();
-    const env = {
+    let cwdOk = true;
+    try {
+      cwdOk = fs.statSync(runCwd).isDirectory();
+    } catch {
+      cwdOk = false;
+    }
+    if (!cwdOk) {
+      resolve({ code: -5, stdout: '', stderr: `工作目录不存在：${runCwd}`, elapsed: 0 });
+      return;
+    }
+    const env = runtimePathEnv({
       ...process.env,
       FORCE_COLOR: '0',
       NO_COLOR: '1',
@@ -88,8 +219,12 @@ export function spawnCli(agent, prompt, { cwd, onChunk, timeout = 180000, signal
       PYTHONIOENCODING: 'utf-8',
       // 单个 CLI 的自定义环境变量（如 gemini 的 GEMINI_API_KEY / GOOGLE_GEMINI_BASE_URL）
       ...(agent.cli.env || {}),
-    };
+    });
     const resolved = resolveCommand(agent.cli.command);
+    if (!resolved) {
+      resolve({ code: -2, stdout: '', stderr: `找不到 CLI 命令：${agent.cli.command}`, elapsed: 0 });
+      return;
+    }
     // 真 .exe 直连：Node 用宽字符命令行传参，中文不会被代码页吃掉，也没有引号转义问题
     const direct = resolved && !/\.(cmd|bat|ps1)$/i.test(resolved);
 
@@ -133,34 +268,69 @@ export function spawnCli(agent, prompt, { cwd, onChunk, timeout = 180000, signal
     let stderr = '';
     let settled = false;
     let onAbort = null;
-    const finish = (code, err) => {
+    let timer = null;
+    let settleTimer = null;
+    const finish = (code, err, extra = {}) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(settleTimer);
       if (onAbort) signal?.removeEventListener('abort', onAbort);
-      resolve({ code, stdout, stderr: stderr + (err ? String(err) : ''), elapsed: Date.now() - started });
+      resolve({
+        code,
+        stdout,
+        stderr: stderr + (err ? String(err) : ''),
+        elapsed: Date.now() - started,
+        partial: stdout.trim().length > 0,
+        ...extra,
+      });
     };
 
-    const timer = setTimeout(() => {
+    const scheduleSettle = () => {
+      if (settled || typeof completeWhen !== 'function' || !(Number(settleMs) > 0)) return;
+      let complete = false;
+      try {
+        complete = !!completeWhen(stdout);
+      } catch {
+        complete = false;
+      }
+      clearTimeout(settleTimer);
+      if (!complete) return;
+      settleTimer = setTimeout(() => {
+        if (settled) return;
+        let stillComplete = false;
+        try {
+          stillComplete = !!completeWhen(stdout);
+        } catch {
+          stillComplete = false;
+        }
+        if (!stillComplete) return;
+        killTree(child);
+        finish(0, '', { settledEarly: true });
+      }, Number(settleMs));
+    };
+
+    timer = setTimeout(() => {
       killTree(child);
-      finish(-3, `\n[超时] 超过 ${Math.round(timeout / 1000)}s 未结束，已终止`);
+      finish(-3, `\n[超时] 超过 ${Math.round(timeout / 1000)}s 未结束，已终止`, { timedOut: true });
     }, timeout);
 
-    child.on('error', (err) => finish(-1, err.message));
+    child.on('error', (err) => finish(-1, err.message, { spawnError: true }));
     child.stdout?.setEncoding('utf8');
     child.stdout?.on('data', (d) => {
       stdout += d;
       onChunk?.(d);
+      scheduleSettle();
     });
     child.stderr?.setEncoding('utf8');
     child.stderr?.on('data', (d) => {
       stderr += d;
     });
-    child.on('close', (code) => finish(code ?? 0));
+    child.on('close', (code, closeSignal) => finish(code ?? 0, '', { signal: closeSignal || '' }));
     if (signal) {
       onAbort = () => {
         killTree(child);
-        finish(-4, '已取消');
+        finish(-4, '已取消', { stopped: true });
       };
       if (signal.aborted) onAbort();
       else signal.addEventListener('abort', onAbort, { once: true });
@@ -210,12 +380,12 @@ const CANDIDATES = [
   // 因此它没法像上面几家那样绕开 cmd 引号：多行 prompt 会被 cmd.exe 截断，只适合单行任务。
   { command: 'kimi', label: 'Kimi Code', args: ['-p', '{{prompt}}', '--output-format', 'text'] },
   // Python 写的 CLI 需要 UTF-8 环境，否则 rich 控制台在 GBK 代码页下打 ✅ 会直接抛 UnicodeEncodeError
-  { command: 'trae-cli', label: 'Trae Agent', args: ['run', '--config-file', `${process.env.USERPROFILE || process.env.HOME}/.trae-cli/config.json`, '{{prompt}}'], healthTimeout: 60000 },
+  { command: 'trae-cli', label: 'Trae Agent', args: ['run', '--config-file', `${process.env.USERPROFILE || process.env.HOME}/.trae-cli/config.json`, '--max-steps', '16', '--console-type', 'simple', '{{prompt}}'], healthTimeout: 60000 },
   // workbuddy 是业务系统 CLI（jobs/crm/mcp），没有一次性提示词入口，不能当编排成员用
   { command: 'crush', label: 'Crush', args: ['run', '-y'] },
   { command: 'goose', label: 'Goose', args: ['run', '-t', '{{prompt}}'] },
   { command: 'aider', label: 'Aider', args: ['--message', '{{prompt}}', '--yes', '--openai-api-base', 'http://127.0.0.1:3425/v1', '--openai-api-key', 'magpie', '--model', `openai/${MAGPIE_MODEL}`, '--no-git'] },
-  { command: 'gemini', label: 'Gemini CLI', args: ['--skip-trust', '--approval-mode', 'yolo', '-m', MAGPIE_MODEL], env: { GEMINI_API_KEY: 'magpie', GOOGLE_GEMINI_BASE_URL: 'http://127.0.0.1:3425' } },
+  { command: 'gemini', label: 'Gemini CLI', args: ['--skip-trust', '--approval-mode', 'yolo', '-m', MAGPIE_MODEL, '--prompt='], env: { GEMINI_API_KEY: 'magpie', GOOGLE_GEMINI_BASE_URL: 'http://127.0.0.1:3425' } },
   { command: 'qwen', label: 'Qwen Code', args: ['--approval-mode', 'yolo', '--auth-type', 'openai', '--openai-api-key', 'magpie', '--openai-base-url', 'http://127.0.0.1:3425/v1', '-m', MAGPIE_MODEL] },
   { command: 'ollama', label: 'Ollama', args: ['run', 'qwen2.5-coder', '{{prompt}}'] },
 ];
@@ -282,6 +452,7 @@ function resolveUncached(command) {
 export function commonBinDirs() {
   const home = process.env.USERPROFILE || process.env.HOME || '';
   const dirs = [
+    path.dirname(process.execPath),
     path.join(home, '.local', 'bin'),
     process.env.APPDATA ? path.join(process.env.APPDATA, 'npm') : '',
     process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Links') : '',
@@ -315,6 +486,7 @@ function readVersion(exe) {
         shell: true,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
+        env: runtimePathEnv({ ...process.env }),
       });
     } catch {
       return finish(false);

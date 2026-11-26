@@ -16,6 +16,16 @@ const cand = (key, health) => ({ key, label: key, path: key, args: [], health })
 test('体检判定：正常回复 / 鉴权失败 / 超时收口', () => {
   assert.equal(judgeHealth({ code: 0, stdout: 'OK\n', stderr: '', elapsed: 100 }).ok, true);
   assert.equal(
+    judgeHealth({
+      code: 0,
+      stdout: '在线\n',
+      stderr: 'WARN codex_core_plugins::manager: api key auth is not supported',
+      elapsed: 100,
+    }).ok,
+    true,
+    '正常短回复旁的 Codex 插件警告不应判死',
+  );
+  assert.equal(
     judgeHealth({ code: 1, stdout: 'API Error: 405 Not Allowed', stderr: '', elapsed: 100 }).ok,
     false,
     '网关 405 不能算可用',

@@ -126,6 +126,16 @@ class Store {
             }
             recovered = true;
           }
+          // 兼容旧版本：0 票裁决曾被错误地显示为「已采纳」。
+          // 旧数据没有 degraded 字段，启动时补上，避免历史任务继续误导。
+          if (t.debate?.decision && !t.debate.decision.degraded && Number(t.debate.decision.votes || 0) === 0) {
+            t.debate.decision.degraded = true;
+            t.debate.decision.confidence = 'none';
+            t.debate.decision.reason ||=
+              '交叉质询没有产生有效评分，按提案顺序临时采用，需人工复核。';
+            if (t.debate.status === 'decided') t.debate.status = 'fallback';
+            recovered = true;
+          }
           for (const m of t.messages || []) if (!m.done) m.done = true;
         }
         if (recovered) this.flush();
@@ -668,12 +678,12 @@ class Store {
     return critique;
   }
 
-  setDecision(taskId, decision) {
+  setDecision(taskId, decision, status = 'decided') {
     const task = this.getTask(taskId);
     if (!task) return null;
     task.debate ||= { proposals: [], critiques: [] };
     task.debate.decision = decision;
-    task.debate.status = 'decided';
+    task.debate.status = status;
     this._emitDebate(task);
     return decision;
   }
