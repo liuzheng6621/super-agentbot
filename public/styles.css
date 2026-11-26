@@ -1976,6 +1976,11 @@ kbd {
   border-color: var(--yellow);
   color: var(--yellow);
 }
+.plan-overview .po-quality[data-quality="missing"] {
+  border-style: dashed;
+  border-color: var(--yellow);
+  color: var(--yellow);
+}
 
 .plan-list {
   display: flex;

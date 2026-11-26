@@ -85,6 +85,7 @@ class Store {
     this.db = emptyDb();
     this.listeners = new Set();
     this._saveTimer = null;
+    this._lastSerialized = null;
     this._load();
   }
 
@@ -148,10 +149,14 @@ class Store {
     clearTimeout(this._saveTimer);
     this._saveTimer = null;
     try {
+      const json = JSON.stringify(this.db, null, 2);
+      // 内容没变就别重写：恢复流程会无条件 flush 一次
+      if (json === this._lastSerialized) return;
       fs.mkdirSync(DATA_DIR, { recursive: true });
       const tmp = `${DB_FILE}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(this.db, null, 2), 'utf8');
+      fs.writeFileSync(tmp, json, 'utf8');
       fs.renameSync(tmp, DB_FILE);
+      this._lastSerialized = json;
     } catch (err) {
       console.error('[store] 持久化失败:', err.message);
     }
@@ -363,7 +368,7 @@ class Store {
       repairRound: 0,
       quality: { status: 'pending' },
       debate: { status: 'pending', proposals: [], critiques: [], decision: null },
-      stats: { tokens: 0, agentRuns: 0, files: 0, ms: 0 },
+      stats: { tokens: 0, tokensIn: 0, tokensOut: 0, agentRuns: 0, files: 0, ms: 0 },
       workspace: root,
       // 用已有目录开工时，不替用户新建/改动它的目录结构
       external,
@@ -477,6 +482,22 @@ class Store {
     return message;
   }
 
+  /** 记一次真实发出去的提示词：token 账必须算输入，只算输出会把成本低估一个数量级。 */
+  countPrompt(taskId, agentId, tokens) {
+    const task = this.getTask(taskId);
+    if (!task || !tokens) return 0;
+    const n = Math.max(0, Math.round(tokens));
+    task.stats.tokens += n;
+    task.stats.tokensIn = (task.stats.tokensIn || 0) + n;
+    if (agentId) {
+      const agent = this.getAgent(agentId);
+      if (agent) agent.stats.tokens += n;
+    }
+    this.broadcast({ type: 'task.stats', taskId, stats: task.stats });
+    this.save();
+    return n;
+  }
+
   appendMessage(taskId, messageId, delta) {
     const task = this.getTask(taskId);
     if (!task) return;
@@ -489,6 +510,7 @@ class Store {
       if (agent) agent.stats.tokens += deltaTokens;
     }
     task.stats.tokens += deltaTokens;
+    task.stats.tokensOut = (task.stats.tokensOut || 0) + deltaTokens;
     this.broadcast({ type: 'message.delta', taskId, runId: task.runId || null, id: messageId, delta });
   }
 

@@ -692,9 +692,11 @@ function renderPlan() {
       ? "质量门通过"
       : t.quality?.status === "failed"
         ? "质量门未通过"
-        : t.quality?.status === "skipped"
-          ? "评审代质量门"
-          : "质量门待执行";
+        : t.quality?.status === "missing"
+          ? "没有测试入口"
+          : t.quality?.status === "skipped"
+            ? "评审代质量门"
+            : "质量门待执行";
   if (overview) {
     overview.hidden = false;
     overview.innerHTML = `
@@ -955,25 +957,54 @@ function renderStats() {
     grid.innerHTML = '<p class="hint">选择一个任务查看统计。</p>';
     return;
   }
-  const items = [
-    ["累计 TOKENS", (t.stats?.tokens || 0).toLocaleString()],
-    ["协作轮次", pad2(t.stats?.agentRuns || t.messages?.filter((m) => m.agentId !== "user").length || 0)],
-    ["产物文件", pad2(t.artifacts?.length || 0)],
-    ["返工轮次", pad2(t.repairRound || 0)],
-    [
-      "质量门",
-      t.quality?.status === "passed"
-        ? "PASS"
-        : t.quality?.status === "failed"
-          ? "FAIL"
-          : t.quality?.status === "skipped"
+  const stats = t.stats || {};
+  const artifacts = t.artifacts?.length ?? t.files ?? 0;
+  const gate = t.quality?.status || "pending";
+  const terminal = ["done", "error", "stopped", "needs_attention"].includes(t.status);
+  const gateText =
+    gate === "passed"
+      ? "PASS"
+      : gate === "failed"
+        ? "FAIL"
+        : gate === "missing"
+          ? "无入口"
+          : gate === "skipped"
             ? "评审代判"
-            : "待执行",
+            : gate === "running"
+              ? "运行中"
+              : gate === "not-run" || (gate === "pending" && terminal)
+                ? "未执行"
+                : "待执行";
+  const gateHint = t.quality?.reason || t.quality?.command || "任务还在跑，质量门尚未开始";
+  const elapsed = stats.ms
+    ? fmtMs(stats.ms)
+    : t.running
+      ? "进行中"
+      : t.endedAt && t.createdAt
+        ? fmtMs(t.endedAt - t.createdAt)
+        : "—";
+  const elapsedHint = stats.wallMs
+    ? `墙钟 ${fmtMs(stats.wallMs)}（含排队、重试与等待）`
+    : "尚未记录工时";
+  const items = [
+    [
+      "累计 TOKENS",
+      (stats.tokens || 0).toLocaleString(),
+      stats.tokensIn === undefined
+        ? "历史任务只统计了输出文本，没有记录输入提示词"
+        : `输入 ${stats.tokensIn.toLocaleString()} + 输出 ${(stats.tokensOut || 0).toLocaleString()}（按字符类估算，CJK 1 字≈1 token）`,
     ],
-    ["总耗时", fmtMs(t.stats?.ms || (t.endedAt && t.createdAt ? t.endedAt - t.createdAt : 0))],
+    ["协作轮次", stats.agentRuns === undefined ? "—" : pad2(stats.agentRuns), "真实调用成员的次数"],
+    ["产物文件", pad2(artifacts), "工作区里记录在案的产物数"],
+    ["返工轮次", pad2(t.repairRound || 0), "评审不通过后重跑的轮数"],
+    ["质量门", gateText, gateHint],
+    ["总耗时", elapsed, elapsedHint],
   ];
   grid.innerHTML = items
-    .map(([label, value]) => `<div class="stat"><div class="s-label">${label}</div><div class="s-value">${value}</div></div>`)
+    .map(
+      ([label, value, hint]) =>
+        `<div class="stat" title="${escapeHtml(hint || "")}"><div class="s-label">${label}</div><div class="s-value">${value}</div></div>`,
+    )
     .join("");
   const ws = $("#workspacePath");
   if (ws) {

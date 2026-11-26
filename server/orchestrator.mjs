@@ -11,6 +11,8 @@ import { estimateTokens } from './tokens.mjs';
 const running = new Map();
 /** agentId -> 正在执行的任务数，避免并行任务把状态互相改回 idle */
 const activeAgents = new Map();
+/** taskId -> 最近一次目录快照，一道工序只扫一遍磁盘 */
+const fileIndex = new Map();
 
 const STEP_KIND = {
   planner: 'plan',
@@ -20,13 +22,40 @@ const STEP_KIND = {
   reviewer: 'reviewer',
 };
 
-function pickAgent(role, fallback = 'coder') {
-  return (
-    store.findAgentByRole(role) ||
-    store.findAgentByRole(fallback) ||
-    store.agents.find((a) => a.seat !== false) ||
-    store.agents[0]
-  );
+/**
+ * 席位缺席时的兜底顺序按角色分别排：评审员永远不落到实现者身上，
+ * 否则「评审与实现分离」会静默失效——自己写、自己审、还显示质量门通过。
+ */
+const PICK_ORDER = {
+  planner: ['planner', 'architect', 'reviewer', 'coder', 'tester'],
+  architect: ['architect', 'planner', 'coder', 'reviewer', 'tester'],
+  coder: ['coder', 'tester', 'architect', 'planner', 'reviewer'],
+  tester: ['tester', 'coder', 'architect', 'planner', 'reviewer'],
+  reviewer: ['reviewer', 'tester', 'architect', 'planner'],
+};
+
+export function isSelfReview(role, agent) {
+  return role === 'reviewer' && agent?.role === 'coder';
+}
+
+/** 真实工时：所有工序实际耗时之和，不含排队、重试等待与人工空闲。 */
+export function workMsOf(task) {
+  return (task?.plan || []).reduce((sum, step) => {
+    if (!step.startedAt) return sum;
+    const end = step.endedAt || (step.status === 'running' ? Date.now() : 0);
+    return end > step.startedAt ? sum + (end - step.startedAt) : sum;
+  }, 0);
+}
+
+export function pickAgent(role) {
+  const order = PICK_ORDER[role] || [role];
+  for (const name of order) {
+    const found = store.findAgentByRole(name);
+    if (found) return found;
+  }
+  // 一个席位都没有时只能退到任意成员，调用方用 isSelfReview 如实标注
+  const seats = store.agents.filter((a) => a.seat !== false);
+  return seats.find((a) => a.role !== 'coder') || seats[0] || store.agents[0] || null;
 }
 
 function safeJoin(root, rel) {
@@ -39,11 +68,22 @@ function safeJoin(root, rel) {
 export function writeWorkspaceFile(task, relPath, content, meta = {}) {
   const abs = safeJoin(task.workspace, relPath);
   writeFileAtomic(abs, content);
-  const stat = fs.statSync(abs);
+  const stat = fs.statSync(abs, { bigint: true });
+  const bytes = Buffer.byteLength(content);
+  // 自己写的文件立刻记进本任务的目录快照，下一步就不用再全量扫一遍
+  const cached = fileIndex.get(task.id);
+  if (cached) {
+    cached.set(relPath, {
+      path: relPath,
+      bytes,
+      mtimeMs: Number(stat.mtimeMs),
+      mtimeNs: stat.mtimeNs.toString(),
+    });
+  }
   store.addArtifact(task.id, {
     path: relPath,
-    bytes: Buffer.byteLength(content),
-    mtimeMs: stat.mtimeMs,
+    bytes,
+    mtimeMs: Number(stat.mtimeMs),
     version: versionOf(abs) || '',
     lang: path.extname(relPath).slice(1) || 'text',
     agentId: meta.agentId || '',
@@ -67,7 +107,11 @@ const SKIP_DIRS = new Set([
 ]);
 const MAX_SCAN_FILES = 20000;
 
+/** 只为测试与观测：全量目录扫描次数 */
+export const scanStats = { calls: 0 };
+
 export function listWorkspaceFiles(task) {
+  scanStats.calls += 1;
   const out = [];
   const walk = (dir, prefix = '', depth = 0) => {
     if (out.length >= MAX_SCAN_FILES || depth > 12) return;
@@ -103,7 +147,19 @@ export function listWorkspaceFiles(task) {
   return out;
 }
 
-export function buildContextPack(task, { maxMessages = 8, maxFiles = 80 } = {}) {
+/** 扫一次并记住：下一步直接拿它当 before，不用再走一遍磁盘。 */
+export function snapshotFiles(task) {
+  const files = listWorkspaceFiles(task);
+  fileIndex.set(task.id, new Map(files.map((f) => [f.path, f])));
+  return files;
+}
+
+function knownFiles(task) {
+  const cached = fileIndex.get(task.id);
+  return cached ? [...cached.values()] : snapshotFiles(task);
+}
+
+export function buildContextPack(task, { maxMessages = 8, maxFiles = 80, files } = {}) {
   return {
     goal: task.goal,
     workspace: task.workspace,
@@ -116,7 +172,7 @@ export function buildContextPack(task, { maxMessages = 8, maxFiles = 80 } = {}) 
       status: s.status,
       round: s.round || 0,
     })),
-    files: listWorkspaceFiles(task)
+    files: (files || listWorkspaceFiles(task))
       .filter((f) => f.bytes > 0)
       .slice(0, maxFiles),
     messages: task.messages
@@ -228,6 +284,14 @@ async function streamMessage(task, agent, text, { kind = 'text', signal, speed =
   return msg;
 }
 
+// 上游网关/网络层的瞬时故障特征。命中才算「抖动」，否则按真实失败上报。
+const TRANSIENT_CLI_ERROR =
+  /ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|socket hang up|429|rate limit|temporarily unavailable|model is unavailable|upstream request failed|\b50[234]\b/i;
+
+export function isTransientCliError(text) {
+  return TRANSIENT_CLI_ERROR.test(String(text || ''));
+}
+
 async function cliMessage(task, agent, prompt, { kind = 'text', signal, timeout = 300000, message = {} } = {}) {
   const msg = store.addMessage(task.id, {
     agentId: agent.id,
@@ -241,7 +305,7 @@ async function cliMessage(task, agent, prompt, { kind = 'text', signal, timeout 
   });
   beginAgent(agent, `${agent.cli?.command || 'CLI'} 运行中`);
 
-  const before = new Map(listWorkspaceFiles(task).map((f) => [f.path, f]));
+  const before = fileIndex.get(task.id) || new Map(snapshotFiles(task).map((f) => [f.path, f]));
   let hintShown = false;
   let hintTimer = setTimeout(() => {
     hintShown = true;
@@ -254,9 +318,12 @@ async function cliMessage(task, agent, prompt, { kind = 'text', signal, timeout 
     }
   };
 
-  let res;
-  try {
-    res = await spawnCli(agent, prompt, {
+  // 提示词是真金白银发出去的 token，先记账再执行
+  const promptTokens = estimateTokens(prompt);
+  store.countPrompt(task.id, agent.id, promptTokens);
+
+  const runOnce = () =>
+    spawnCli(agent, prompt, {
       cwd: task.workspace,
       signal,
       timeout,
@@ -269,8 +336,29 @@ async function cliMessage(task, agent, prompt, { kind = 'text', signal, timeout 
         store.appendMessage(task.id, msg.id, d);
       },
     });
-  } catch (err) {
-    res = { code: -1, stdout: '', stderr: err.message, elapsed: 0 };
+
+  // 上游网关抖一下（ECONNRESET / 429 / 握手超时）不该让整条流水线塌掉：
+  // 只有明确的瞬时错误才重试一次，真实失败（退出码非 0 且无瞬时特征）照旧上报。
+  let res;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      res = await runOnce();
+    } catch (err) {
+      res = { code: -1, stdout: '', stderr: err.message, elapsed: 0 };
+    }
+    const combined = `${res.stdout || ''}
+${res.stderr || ''}`;
+    if (res.code === 0 || attempt === 2 || signal?.aborted || !isTransientCliError(combined)) break;
+    store.appendMessage(
+      task.id,
+      msg.id,
+      `
+
+> ⚠️ 上游连接抖动（${combined.match(TRANSIENT_CLI_ERROR)[0]}），2 秒后重试一次。
+
+`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 2000));
   }
   clearHint();
 
@@ -288,13 +376,14 @@ async function cliMessage(task, agent, prompt, { kind = 'text', signal, timeout 
   }
   store.endMessage(task.id, msg.id, {
     tokens: estimateTokens(res.stdout),
+    tokensIn: promptTokens,
     ms: res.elapsed,
     exitCode: res.code,
   });
 
   // 收集 CLI 新增/修改的文件：先按 size + 纳秒 mtime 粗筛，命中项再算内容版本。
   // 内容没变就不重复记 artifact——CLI 把同一个文件重写一遍不该算一次产出。
-  const after = listWorkspaceFiles(task);
+  const after = snapshotFiles(task);
   for (const f of after) {
     const prev = before.get(f.path);
     const touched = !prev || prev.bytes !== f.bytes || prev.mtimeNs !== f.mtimeNs;
@@ -386,7 +475,18 @@ export function buildPrompt(task, agent, step, depsText, context, extra = {}) {
         ].join('\n')
       : '',
     extra.quality
-      ? `# 自动化质量门\n状态：${extra.quality.status}\n${extra.quality.log ? `\n\`\`\`log\n${clip(extra.quality.log, 3000)}\n\`\`\`` : ''}`
+      ? [
+          '# 自动化质量门',
+          `状态：${extra.quality.status}`,
+          extra.quality.command ? `入口：${extra.quality.command}（退出码 ${extra.quality.code}）` : '',
+          extra.quality.reason ? `说明：${extra.quality.reason}` : '',
+          extra.quality.log ? `\n\`\`\`log\n${clip(extra.quality.log, 3000)}\n\`\`\`` : '',
+        ]
+          .filter(Boolean)
+          .join('\n')
+      : '',
+    extra.selfReview
+      ? '注意：这一轮没有独立评审席位，由实现者本人复核，结论里要如实写明「自审」。'
       : '',
     '',
     '# 输出要求',
@@ -1047,60 +1147,122 @@ async function runStepWithRetry(task, agent, options) {
   return { ...last, attempt: maxAttempts };
 }
 
-function testFileForTask(task) {
-  return `tests/${sim.pickModule(task.goal).name}.test.js`;
+const TEST_TIMEOUT = 120000;
+const PLACEHOLDER_TEST = /no test specified/i;
+
+/**
+ * 从工作区探测真实测试入口。找不到就返回 null——宁可显示「没有测试入口」，
+ * 也不要像以前那样在 CLI 模式下直接 skipped，假装质量门跑过了。
+ */
+export function detectTestCommand(task) {
+  const root = task.workspace;
+  const abs = (rel) => path.join(root, rel);
+  const exists = (rel) => {
+    try {
+      return fs.existsSync(abs(rel));
+    } catch {
+      return false;
+    }
+  };
+  const read = (rel) => {
+    try {
+      return fs.readFileSync(abs(rel), 'utf8');
+    } catch {
+      return '';
+    }
+  };
+
+  if (exists('package.json')) {
+    try {
+      const pkg = JSON.parse(read('package.json'));
+      const script = pkg?.scripts?.test;
+      if (typeof script === 'string' && script.trim() && !PLACEHOLDER_TEST.test(script)) {
+        return {
+          command: 'npm',
+          args: ['test', '--silent'],
+          label: 'npm test',
+          source: `package.json scripts.test: ${script.trim().slice(0, 80)}`,
+        };
+      }
+    } catch {
+      /* package.json 坏了就当没有 */
+    }
+  }
+  if (exists('pyproject.toml') || exists('pytest.ini') || exists('tox.ini') || exists('setup.cfg')) {
+    return { command: 'python', args: ['-m', 'pytest', '-q'], label: 'pytest', source: 'Python 测试配置' };
+  }
+  if (exists('Cargo.toml')) {
+    return { command: 'cargo', args: ['test', '--quiet'], label: 'cargo test', source: 'Cargo.toml' };
+  }
+  if (exists('go.mod')) {
+    return { command: 'go', args: ['test', './...'], label: 'go test ./...', source: 'go.mod' };
+  }
+  if (exists('Makefile') && /^test\s*:/m.test(read('Makefile'))) {
+    return { command: 'make', args: ['test'], label: 'make test', source: 'Makefile' };
+  }
+  try {
+    if (exists('tests')) {
+      const names = fs.readdirSync(abs('tests'));
+      if (names.some((n) => /\.(test|spec)\.(m?js|cjs)$/.test(n))) {
+        return {
+          command: process.execPath,
+          args: ['--test', 'tests/'],
+          label: 'node --test tests/',
+          source: 'tests/ 目录',
+        };
+      }
+    }
+  } catch {
+    /* 目录读不到就跳过这一条 */
+  }
+  // 最后才用关键词模板猜出的文件名，且必须真的存在
+  const rel = `tests/${sim.pickModule(task.goal).name}.test.js`;
+  if (exists(rel)) return { command: process.execPath, args: [rel], label: `node ${rel}`, source: '关键词模板' };
+  return null;
 }
 
-async function runQualityGate(task, step, signal) {
+export async function runQualityGate(task, step, signal) {
+  const round = step?.round || 0;
   const plan = store.getTask(task.id).plan;
   const implementation = [...plan].reverse().find((s) => s.role === 'coder' && s.status === 'done');
   const testDesign = [...plan].reverse().find((s) => s.role === 'tester' && s.status === 'done');
   const coder = implementation && store.getAgent(implementation.agentId);
   const tester = testDesign && store.getAgent(testDesign.agentId);
-  const rel = testFileForTask(task);
-  const abs = path.join(task.workspace, rel);
+  const cliMode = !!task.external || coder?.mode === 'cli' || tester?.mode === 'cli';
 
-  if (task.external || coder?.mode === 'cli' || tester?.mode === 'cli') {
+  // 真实 CLI 任务同样要跑工作区里真实存在的测试入口，不再一律 skipped
+  const detected = detectTestCommand(task);
+  if (!detected) {
     const quality = {
-      status: 'skipped',
-      reason: '真实 CLI 任务不自动执行生成代码，以评审 VERDICT 作为质量门',
+      status: 'missing',
+      reason:
+        '工作区里没找到可执行的测试入口（package.json scripts.test / pytest / Cargo / go.mod / Makefile / tests/），这一轮只能靠评审 VERDICT 判定',
+      cli: cliMode,
       checkedAt: Date.now(),
-      round: step?.round || 0,
-    };
-    store.updateTask(task.id, { quality });
-    return quality;
-  }
-  if (!fs.existsSync(abs)) {
-    const quality = {
-      status: 'failed',
-      reason: `未找到测试文件 ${rel}`,
-      code: -1,
-      log: '',
-      checkedAt: Date.now(),
-      round: step?.round || 0,
+      round,
     };
     store.updateTask(task.id, { quality });
     return quality;
   }
 
-  store.updateTask(task.id, {
-    quality: { status: 'running', command: `node ${rel}`, round: step?.round || 0 },
+  store.updateTask(task.id, { quality: { status: 'running', command: detected.label, round } });
+  const res = await spawnCli({ cli: { command: detected.command, args: detected.args } }, '', {
+    cwd: task.workspace,
+    timeout: TEST_TIMEOUT,
+    signal,
   });
-  const res = await spawnCli(
-    { cli: { command: process.execPath, args: [rel] } },
-    '',
-    { cwd: task.workspace, timeout: 30000, signal },
-  );
   throwIfAborted(signal);
 
   const status = res.code === 0 ? 'passed' : 'failed';
   const quality = {
     status,
-    command: `node ${rel}`,
+    command: detected.label,
+    source: detected.source,
+    cli: cliMode,
     code: res.code,
     log: clip(`${res.stdout}\n${res.stderr}`.trim(), 4000),
     checkedAt: Date.now(),
-    round: step?.round || 0,
+    round,
   };
   store.updateTask(task.id, { quality });
 
@@ -1112,7 +1274,7 @@ async function runQualityGate(task, step, signal) {
     color: status === 'passed' ? '#34d399' : '#ff5538',
     kind: 'quality',
     done: true,
-    text: `**自动化质量门 · ${status === 'passed' ? '通过' : '未通过'}**\n\n- 命令：\`${quality.command}\`\n- 退出码：\`${res.code}\`${
+    text: `**自动化质量门 · ${status === 'passed' ? '通过' : '未通过'}**\n\n- 入口：\`${detected.label}\`（${detected.source}）\n- 退出码：\`${res.code}\`${
       quality.log ? `\n\n\`\`\`log\n${clip(quality.log, 1800)}\n\`\`\`` : ''
     }`,
   });
@@ -1133,11 +1295,16 @@ async function executeSteps(task, steps, { outputs, speed, signal }) {
       store.updateStep(task.id, step.id, { agentId: agent.id });
       agent.currentStepId = step.id;
 
-      const extra = { repairRound: step.round || 0, decision: latest.debate?.decision || null };
+      const extra = {
+        repairRound: step.round || 0,
+        decision: latest.debate?.decision || null,
+        // 评审员落到实现者身上时如实标出来，别让自审看起来像独立评审
+        selfReview: isSelfReview(step.role, agent),
+      };
       if (step.role === 'reviewer') {
         extra.quality = await runQualityGate(latest, step, signal);
       }
-      const context = buildContextPack(latest);
+      const context = buildContextPack(latest, { files: knownFiles(latest) });
       const depsText = dependencyText(latest, step, outputs);
       const prompt = buildPrompt(latest, agent, step, depsText, context, extra);
       const simOutputs = {
@@ -1160,8 +1327,16 @@ async function executeSteps(task, steps, { outputs, speed, signal }) {
         const verdict = parseReviewVerdict(out.text);
         out.verdict = verdict === true ? 'pass' : verdict === false ? 'fail' : 'unknown';
         out.passed = verdict === true && extra.quality?.status !== 'failed';
+        // 没有测试入口时不能说「质量门通过」——那一轮根本没有自动化把关，只有评审结论。
+        const gateMissing = extra.quality?.status === 'missing';
         out.note = out.passed
-          ? '质量门通过'
+          ? extra.selfReview
+            ? gateMissing
+              ? '评审通过（没有测试入口，且是自审）'
+              : '质量门通过（自审：没有独立评审席位）'
+            : gateMissing
+              ? '评审通过（没有测试入口，未经自动化质量门）'
+              : '质量门通过'
           : verdict === null
             ? '缺少明确评审结论'
             : '未通过，进入返工';
@@ -1387,14 +1562,16 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
     if (!summary.ok) throw new Error(`交付收口失败：${summary.note}`);
 
     const finalStatus = review?.passed ? 'done' : 'needs_attention';
-    const quality = store.getTask(taskId).quality || { status: 'pending' };
+    const finished = store.getTask(taskId);
+    const quality = finished.quality || { status: 'pending' };
     store.updateTask(
       taskId,
       {
         status: finalStatus,
         endedAt: Date.now(),
         quality,
-        stats: { ...store.getTask(taskId).stats, ms: Date.now() - startedAt },
+        // 真实工时＝各工序实际耗时之和；墙钟另记，含排队、重试与等待
+        stats: { ...finished.stats, ms: workMsOf(finished), wallMs: Date.now() - startedAt },
       },
       'task.status',
     );
@@ -1408,6 +1585,8 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
           store.updateStep(taskId, step.id, {
             status: aborted ? 'stopped' : 'blocked',
             note: aborted ? '已停止' : '任务中断',
+            // 中断也要落 endedAt，否则这一步的耗时算不进去，工时永远是 0
+            ...(step.startedAt ? { endedAt: Date.now() } : {}),
           });
         }
       }
@@ -1419,15 +1598,20 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
         }
         store.setDebate(taskId, { status: aborted ? 'stopped' : 'failed' });
       }
-      store.updateTask(
-        taskId,
-        {
-          status: aborted ? 'stopped' : 'error',
-          endedAt: Date.now(),
-          error: aborted ? '已停止' : err.message,
-        },
-        'task.status',
-      );
+      const broken = store.getTask(taskId);
+      const gate = broken?.quality || { status: 'pending' };
+      const patch = {
+        status: aborted ? 'stopped' : 'error',
+        endedAt: Date.now(),
+        error: aborted ? '已停止' : err.message,
+        // 中断时质量门确实没跑过，别让它永远停在「待执行」
+        quality:
+          gate.status === 'pending'
+            ? { status: 'not-run', reason: aborted ? '已停止，质量门未执行' : '工序中断，质量门未执行' }
+            : gate,
+      };
+      if (broken) patch.stats = { ...broken.stats, ms: workMsOf(broken), wallMs: Date.now() - startedAt };
+      store.updateTask(taskId, patch, 'task.status');
     }
     return false;
   } finally {

@@ -200,7 +200,7 @@ const CANDIDATES = [
   // 下面这些命令在本机是 .cmd/.ps1 包装器，只能过 cmd.exe：prompt 一律改走 stdin。
   // 理由：cmd.exe 会把参数里的换行当成命令分隔符，多行 prompt 一旦进了命令行，
   // 后面的 flag（如 gemini 的 --skip-trust）就被截断，实测报「not running in a trusted directory」。
-  { command: 'opencode', label: 'OpenCode', args: ['run', '--auto'] },
+  { command: 'opencode', label: 'OpenCode', args: ['run', '--auto'], healthTimeout: 60000 },
   { command: 'cursor-agent', label: 'Cursor Agent', args: ['-p', '{{prompt}}'] },
   { command: 'copilot', label: 'Copilot CLI', args: ['-p', '{{prompt}}'] },
   { command: 'cn', label: 'Continue CLI', args: ['-p', '{{prompt}}'] },
@@ -224,7 +224,23 @@ const CANDIDATES = [
  * 只靠退出码判断会误判：很多 CLI 的 --version 会去等 stdin 或跑很久。
  * 所以先用 where.exe 确认命令真实存在，再尽力读取版本。
  */
+const resolveCache = new Map();
+
+/** 探测结果缓存：每次 CLI 调用都同步跑一遍 where.exe 会阻塞事件循环。 */
 export function resolveCommand(command) {
+  const key = String(command || '').trim();
+  if (resolveCache.has(key)) return resolveCache.get(key);
+  const found = resolveUncached(key);
+  resolveCache.set(key, found);
+  return found;
+}
+
+/** CLI 装卸或 PATH 变化后，由 /api/probe、/api/team/refresh 显式失效。 */
+export function clearResolveCache() {
+  resolveCache.clear();
+}
+
+function resolveUncached(command) {
   try {
     const raw = String(command || '').trim();
     if (raw && (path.isAbsolute(raw) || /[\\/]/.test(raw)) && fs.existsSync(raw)) return path.resolve(raw);

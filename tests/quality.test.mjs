@@ -1,0 +1,182 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-quality-'));
+process.env.AGENTFORGE_DATA_DIR = temp;
+
+const { store } = await import('../server/store.mjs');
+const {
+  detectTestCommand,
+  pickAgent,
+  isSelfReview,
+  buildContextPack,
+  runQualityGate,
+  isTransientCliError,
+  scanStats,
+  workMsOf,
+} = await import('../server/orchestrator.mjs');
+
+function workspace(files) {
+  const dir = fs.mkdtempSync(path.join(temp, 'ws-'));
+  for (const [rel, body] of Object.entries(files)) {
+    const p = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, body);
+  }
+  return { id: 'probe', goal: '做一个待办 API', workspace: dir };
+}
+
+test('只有上游瞬时故障才重试，真实失败照旧上报', () => {
+  assert.equal(isTransientCliError('Error: Transport: ECONNRESET: The socket connection was closed unexpectedly.'), true);
+  assert.equal(isTransientCliError('fetch failed: ETIMEDOUT'), true);
+  assert.equal(isTransientCliError('429 Too Many Requests'), true);
+  assert.equal(isTransientCliError('socket hang up'), true);
+  assert.equal(isTransientCliError('Error: Upstream request failed: Model is unavailable.'), true);
+  assert.equal(isTransientCliError('HTTP 502 Bad Gateway'), true);
+  assert.equal(isTransientCliError('Error: Cannot find module "express"'), false);
+  assert.equal(isTransientCliError('error: no test specified'), false);
+  assert.equal(isTransientCliError(''), false);
+  assert.equal(isTransientCliError(undefined), false);
+});
+
+test('测试入口探测：npm / pytest / cargo / go / Makefile / node:test / 都没有', () => {
+  const npm = detectTestCommand(
+    workspace({ 'package.json': JSON.stringify({ scripts: { test: 'node --test tests/' } }) }),
+  );
+  assert.equal(npm.command, 'npm');
+  assert.match(npm.source, /scripts\.test/);
+
+  const placeholder = detectTestCommand(
+    workspace({ 'package.json': JSON.stringify({ scripts: { test: 'echo "Error: no test specified" && exit 1' } }) }),
+  );
+  assert.equal(placeholder, null, '占位脚本不算测试入口');
+
+  assert.equal(detectTestCommand(workspace({ 'pyproject.toml': '[tool.pytest.ini_options]\n' })).command, 'python');
+  assert.equal(detectTestCommand(workspace({ 'Cargo.toml': '[package]\n' })).command, 'cargo');
+  assert.equal(detectTestCommand(workspace({ 'go.mod': 'module x\n' })).command, 'go');
+  assert.equal(detectTestCommand(workspace({ Makefile: 'test:\n\tnode --test\n' })).command, 'make');
+
+  const nodeTests = detectTestCommand(workspace({ 'tests/a.test.js': '' }));
+  assert.deepEqual(nodeTests.args, ['--test', 'tests/']);
+  assert.equal(nodeTests.command, process.execPath);
+
+  assert.equal(detectTestCommand(workspace({ 'README.md': '# 空' })), null, '什么都没有就必须返回 null');
+});
+
+test('评审员缺位时先退到测试员/架构师，绝不落到实现者身上', () => {
+  const original = store.agents.map((a) => ({ id: a.id, seat: a.seat }));
+  const seatOnly = (roles) => {
+    for (const a of store.agents) a.seat = roles.includes(a.role);
+  };
+  try {
+    seatOnly(['planner', 'architect', 'coder', 'tester']);
+    assert.equal(pickAgent('reviewer').role, 'tester', '没有评审席位时退到测试员');
+
+    seatOnly(['planner', 'architect', 'coder']);
+    assert.equal(pickAgent('reviewer').role, 'architect');
+
+    seatOnly(['coder']);
+    const only = pickAgent('reviewer');
+    assert.equal(only.role, 'coder');
+    assert.equal(isSelfReview('reviewer', only), true, '只剩实现者时必须标成自审');
+    assert.equal(isSelfReview('coder', only), false);
+  } finally {
+    for (const o of original) {
+      const a = store.getAgent(o.id);
+      if (a) a.seat = o.seat;
+    }
+  }
+});
+
+test('上下文包可以直接复用目录快照，不再重复扫描', () => {
+  const task = { id: 'ctx-task', goal: '看板', workspace: temp, status: 'running', mode: 'auto', plan: [], messages: [] };
+  const before = scanStats.calls;
+  const pack = buildContextPack(task, { files: [{ path: 'virtual.js', bytes: 10, mtimeMs: 1, mtimeNs: '1' }] });
+  assert.equal(scanStats.calls, before, '传了快照就不该再扫目录');
+  assert.deepEqual(
+    pack.files.map((f) => f.path),
+    ['virtual.js'],
+  );
+
+  buildContextPack(task);
+  assert.equal(scanStats.calls, before + 1, '不传快照才扫一次');
+});
+
+test('质量门会真的跑工作区里的测试入口，找不到入口就报 missing', async () => {
+  const signal = new AbortController().signal;
+
+  const failing = store.createTask({
+    goal: '质量门失败样本',
+    workspace: workspace({ 'package.json': JSON.stringify({ scripts: { test: 'node -e "process.exit(1)"' } }) })
+      .workspace,
+  });
+  const failed = await runQualityGate(failing, { round: 0 }, signal);
+  assert.equal(failed.status, 'failed', '测试退出码非 0 必须判失败');
+  assert.equal(failed.code, 1);
+  assert.equal(store.getTask(failing.id).quality.status, 'failed', '结论要落库');
+
+  const passing = store.createTask({
+    goal: '质量门通过样本',
+    workspace: workspace({ 'package.json': JSON.stringify({ scripts: { test: 'node -e "process.exit(0)"' } }) })
+      .workspace,
+  });
+  const passed = await runQualityGate(passing, { round: 0 }, signal);
+  assert.equal(passed.status, 'passed');
+  assert.equal(passed.code, 0);
+
+  const empty = store.createTask({ goal: '没有测试入口', workspace: workspace({ 'README.md': '# 空' }).workspace });
+  const missing = await runQualityGate(empty, { round: 0 }, signal);
+  assert.equal(missing.status, 'missing', '找不到入口不能假装通过，也不能静默 skipped');
+  assert.match(missing.reason, /没找到可执行的测试入口/);
+});
+
+test('workMsOf 只累加真实工序耗时，不拿墙钟冒充', () => {
+  assert.equal(workMsOf(undefined), 0);
+  assert.equal(workMsOf({ plan: [] }), 0);
+  assert.equal(
+    workMsOf({
+      plan: [
+        { startedAt: 1000, endedAt: 1500 },
+        { startedAt: 2000, endedAt: 2600 },
+        { startedAt: 3000, status: 'pending' },
+        { startedAt: 4000, endedAt: 3900 },
+      ],
+    }),
+    1100,
+    '只算结束过的工序，未结束与倒挂的跨度都不计入',
+  );
+});
+
+test('token 账必须算输入，不能只算输出', () => {
+  const task = store.createTask({ goal: 'token 记账样本', workspace: workspace({ 'a.txt': 'x' }).workspace });
+  assert.equal(task.stats.tokensIn, 0, '新任务输入计数从 0 开始');
+  const agent = store.agents[0];
+
+  store.countPrompt(task.id, agent?.id, 1200);
+  const msg = store.addMessage(task.id, {
+    agentId: agent?.id || '',
+    name: 'probe',
+    role: 'coder',
+    title: '实现工程师',
+    kind: 'text',
+    text: '',
+  });
+  store.appendMessage(task.id, msg.id, '一二三四五');
+
+  const stats = store.getTask(task.id).stats;
+  assert.equal(stats.tokensIn, 1200, '发出去的提示词必须入账');
+  assert.equal(stats.tokensOut, 5, '输出按 CJK 一字一 token 估算');
+  assert.equal(stats.tokens, 1205, '累计 = 输入 + 输出');
+});
+
+test.after(() => {
+  store.flush();
+  try {
+    fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
+  } catch {
+    /* Windows 上偶发占用，交给系统清理 */
+  }
+});

@@ -2,8 +2,8 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { store, ROOT, DATA_DIR, WORKSPACE_DIR } from './store.mjs';
-import { startTask, stopTask, chat, listWorkspaceFiles, buildContextPack, isRunning } from './orchestrator.mjs';
-import { probeClis, spawnCli } from './adapters.mjs';
+import { startTask, stopTask, chat, listWorkspaceFiles, buildContextPack, isRunning, workMsOf } from './orchestrator.mjs';
+import { probeClis, spawnCli, clearResolveCache } from './adapters.mjs';
 import { adoptInstalledClis, rebalanceTeam } from './adopt.mjs';
 import { ensureRealTeam, refreshTeam } from './team.mjs';
 
@@ -63,8 +63,14 @@ function readBody(req, limit = 2 * 1024 * 1024) {
 }
 
 function taskDetail(task) {
+  const summary = store.taskSummary(task);
+  // 老任务当时没记工时，按工序时间补算，别拿墙钟（含排队与重试等待）冒充
+  if (!summary.stats?.ms) {
+    const real = workMsOf(task);
+    if (real) summary.stats = { ...summary.stats, ms: real };
+  }
   return {
-    ...store.taskSummary(task),
+    ...summary,
     plan: task.plan,
     messages: task.messages,
     artifacts: task.artifacts,
@@ -154,7 +160,8 @@ const server = http.createServer(async (req, res) => {
     /* ---- 全量状态 ---- */
     if (pathname === '/api/state' && method === 'GET') {
       const tasks = store.tasks.map((t) => store.taskSummary(t));
-      const active = store.tasks[0];
+      // 优先给正在跑的那条全量详情；都没在跑时退回最新一条（tasks[0] 是最新）
+      const active = store.tasks.find((t) => isRunning(t.id)) || store.tasks[0];
       return json(res, 200, {
         agents: store.agents,
         tasks,
@@ -173,6 +180,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 201, { agent: store.addAgent(body) });
     }
     if (pathname === '/api/probe' && method === 'GET') {
+      clearResolveCache();
       return json(res, 200, { candidates: await probeClis() });
     }
 
@@ -241,6 +249,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, await ensureRealTeam());
     }
     if (pathname === '/api/team/refresh' && method === 'POST') {
+      clearResolveCache();
       return json(res, 200, await refreshTeam());
     }
 
@@ -251,11 +260,20 @@ const server = http.createServer(async (req, res) => {
       if (!agent) return json(res, 404, { error: '智能体不存在' });
       if (agentMatch[2] && method === 'POST') {
         if (!agent.cli?.command) return json(res, 400, { ok: false, message: '未配置 CLI 命令' });
-        const res2 = await spawnCli(agent, '只回答两个字：在线', { timeout: 60000, cwd: ROOT });
+        const res2 = await spawnCli(agent, '只回答两个字：在线', {
+          timeout: agent.cli.healthTimeout || 60000,
+          cwd: ROOT,
+        });
+        const ok = res2.code === 0;
+        const detail = (res2.stderr || res2.stdout || '').trim().slice(0, 200);
+        // 单个体检结果必须落回智能体，否则界面会一直挂着上一次的「不可用」
+        const health = { ok, ms: res2.elapsed, note: ok ? '在线' : detail || `退出码 ${res2.code}`, checkedAt: Date.now() };
+        store.updateAgent(agentId, { health });
         return json(res, 200, {
-          ok: res2.code === 0,
+          ok,
           code: res2.code,
           ms: res2.elapsed,
+          health,
           output: (res2.stdout || res2.stderr || '').trim().slice(0, 500),
         });
       }
@@ -392,6 +410,7 @@ const server = http.createServer(async (req, res) => {
 
     return json(res, 404, { error: '接口不存在' });
   } catch (err) {
+    if (err?.message === '请求体过大') return json(res, 413, { error: '请求体过大' });
     console.error('[api]', err);
     return json(res, 500, { error: err.message });
   }

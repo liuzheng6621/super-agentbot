@@ -9,7 +9,7 @@
 [![Node](https://img.shields.io/badge/node-%E2%89%A520.11-3c873a?logo=node.js&logoColor=white)](https://nodejs.org)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-blue)
 ![Build](https://img.shields.io/badge/build-none-lightgrey)
-![Tests](https://img.shields.io/badge/tests-32%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-38%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4)
 
@@ -39,7 +39,7 @@
 
 - 🧠 **方案辩论先行** — 4 个执行席位 + 1 个工具池 CLI 各出一版方案（契约先行 / 最小闭环 / 测试先行 / 风险优先 / 分阶段交付），互相匿名打 1–10 分并各指一个硬伤，主持人按平均分裁决；只有 1 份有效提案或评分不足时会在裁决里标注置信度，不假装形成共识。
 - 🔀 **依赖图并行** — 架构定稿后「实现」与「测试设计」并行推进，DAG 校验依赖与环路，失败按依赖链传播，取消是即时生效而不是等当前工序跑完。
-- 🚦 **真实质量门** — 评审前真的执行测试命令，`VERDICT: PASS` 才允许交付；FAIL 进入「修复 → 回归 → 复评」有界回环，轮次可配。
+- 🚦 **真实质量门** — 评审前真的执行测试命令，`VERDICT: PASS` 才允许交付；FAIL 进入「修复 → 回归 → 复评」有界回环，轮次可配。测试入口按 `package.json scripts.test` → pytest → cargo → go → Makefile → `tests/` 依次探测，找不到就标 `missing` 让界面显示「没有测试入口」，绝不静默跳过；真实 CLI 任务同样执行这套质量门，而不是一律跳过。评审员缺位退到其他席位时会如实标注「评审代质量门」，不让自审看起来像独立把关。
 - 🎛 **工作流可视化配置** — 讨论开关与规模、工序并发、返工轮次都在顶栏 ⚙ 里改，即时落库；另带「快速 / 均衡 / 严谨」三档预设。
 - 🔁 **任务级流程覆盖** — 输入框旁可切「先讨论」或「直接开工」，只影响当前任务，不动全局默认。
 
@@ -60,7 +60,7 @@
 **工程**
 
 - 📦 **零依赖、零构建** — 纯 Node.js + 原生 ESM，`node server/index.mjs` 就起来，前端不打包、不装包管理器。
-- ✅ **32 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、质量门返工、体检判定、上下文预算。
+- ✅ **39 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、质量门返工与入口探测、体检判定、上下文预算、真实工时统计。
 
 ## 快速开始
 
@@ -117,8 +117,8 @@ flowchart TD
 | `planner` | 拆需求、排工序、收口 | 任务分解、交付结论 | claude → dsh → qwen → gemini |
 | `architect` | 技术方案、接口契约 | 设计文档 | gemini → claude → dsh → kimi |
 | `coder` | 落代码、写文件 | 源码文件 | codex → opencode → trae-cli → dsh |
-| `tester` | 用例矩阵、回归验证 | 测试用例、缺陷单 | opencode → dsh → trae-cli → crush |
-| `reviewer` | 评审、PASS / FAIL 质量门 | 评审意见 | claude → dsh → trae-cli → kimi |
+| `tester` | 用例矩阵、回归验证 | 测试用例、缺陷单 | opencode → crush → codex → gemini → dsh |
+| `reviewer` | 评审、PASS / FAIL 质量门 | 评审意见 | dsh → claude → kimi → qwen → gemini |
 
 席位采用 **主执行人 + 工具池**：每个角色只有一个主执行人，多接的 CLI 留在池里随时可上位。角色可增删改，提示词、命令、参数都能在界面上编辑。
 
@@ -181,6 +181,7 @@ flowchart TD
 | **左栏** | 五个执行席位 + 工具池（在线状态、`SIM 演示` / `✓ CLI 可用` / `! 不可用`）、本机 CLI 扫描结果、「体检并换真实席位」、历史任务 |
 | **中栏** | 工作流阶段条（讨论 → 拆解 → 架构与实施 → 评审 → 交付，实时高亮负责人，可点击跳转）、按阶段分隔的协作时间线、流式输出、方案 / 质询 / 裁决标签、底部群聊输入框 |
 | **右栏** | 上下文包、方案讨论（提案人 / 评分 / 票数 / 胜出方案 / 质询记录）、DAG 链路（依赖 / 并行 / 尝试次数 / 返工）、产物源码、统计与 Bot Hook |
+| **统计面板** | 每个数字都来自落库事实：累计 TOKENS = 各成员 token 之和（输入与输出分开记账，`tokensIn` / `tokensOut`，不把成本低估一个数量级）；协作轮次 = 真实调用成员次数 `stats.agentRuns`；产物文件 = 产物清单条数；返工轮次 = `repairRound`；总耗时 = 各工序实际耗时之和（墙钟含排队与重试等待，只作悬浮提示）；质量门 = `passed / failed / missing / skipped / 未执行` 五态，中断的任务不会永远停在「待执行」 |
 | **顶栏** | 状态、⚙ 工作流设置、`SHIFT` 切换配色 |
 
 群聊里一次 `@` 多位成员，会自动组成讨论组出方案——这是「临时开个小会」的最短路径。
@@ -275,7 +276,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 ├── docs/
 │   ├── screenshot.png
 │   └── design-io-image-context.md
-├── tests/                6 套、32 个测试
+├── tests/                7 个测试文件、39 个测试
 ├── 安装到桌面.bat
 ├── 卸载桌面快捷方式.bat
 └── data/                 运行时数据（gitignore）
@@ -287,7 +288,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 npm test
 ```
 
-32 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、评审结论解析、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、以及上下文预算（段序稳定性、中文 token 估算、原子写版本、spill 可还原）。
+39 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、评审结论解析、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `missing` 判定、真实 CLI 任务同样执行质量门、评审员兜底不落到实现者、目录快照复用、上游瞬时故障（ECONNRESET / 429 / socket hang up）只重试一次且不掩盖真实失败、上下文预算（段序稳定性、中文 token 估算、原子写版本、spill 可还原），以及真实工时统计（只累加结束过的工序，不拿墙钟冒充）。
 
 ## 已知边界
 

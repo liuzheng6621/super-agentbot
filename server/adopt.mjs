@@ -14,8 +14,9 @@ const ROLE_PREFERENCES = {
   planner: ['claude', 'qwen', 'gemini', 'kimi'],
   architect: ['gemini', 'claude', 'kimi', 'qwen'],
   coder: ['codex', 'cursor-agent', 'aider', 'trae-cli', 'opencode', 'crush', 'dsh'],
-  tester: ['opencode', 'crush', 'dsh', 'codex', 'gemini'],
-  reviewer: ['claude', 'kimi', 'qwen', 'gemini'],
+  tester: ['opencode', 'crush', 'codex', 'gemini', 'dsh'],
+  // 评审要读全量产物再下结论，慢的 CLI（trae-cli 一次评审能跑满 300s）不能占这个席位
+  reviewer: ['dsh', 'claude', 'kimi', 'qwen', 'gemini'],
 };
 
 /** 命令名归一化：绝对路径 / .cmd / .exe 都折成同一个名字，避免重复接管 */
@@ -50,8 +51,11 @@ export function rebalanceTeam() {
       .sort((a, b) => {
         const ai = prefs.indexOf(baseName(a.cli.command));
         const bi = prefs.indexOf(baseName(b.cli.command));
-        const ar = (a.role === role ? 20 : 0) + (a.seat !== false ? 8 : 0) + (ai < 0 ? -10 : 10 - ai);
-        const br = (b.role === role ? 20 : 0) + (b.seat !== false ? 8 : 0) + (bi < 0 ? -10 : 10 - bi);
+        // 现有人选只做微弱加权，让 ROLE_PREFERENCES 说了算。seat 标志不参与打分：
+        // 它由上一次编排写入，拿它加权等于把上一轮的结果当成理由（tester 被 dsh 粘住、
+        // reviewer 被 trae-cli 粘住就是这么来的）。
+        const ar = (a.role === role ? 2 : 0) + (ai < 0 ? -10 : 10 - ai);
+        const br = (b.role === role ? 2 : 0) + (bi < 0 ? -10 : 10 - bi);
         return br - ar;
       });
     const chosen = ranked[0];
