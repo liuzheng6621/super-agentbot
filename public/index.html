@@ -194,6 +194,7 @@
               <button class="tab active" data-tab="context">上下文</button>
               <button class="tab" data-tab="debate">讨论</button>
               <button class="tab" data-tab="plan">执行链路</button>
+              <button class="tab" data-tab="workspace">工作区</button>
               <button class="tab" data-tab="files">产物</button>
               <button class="tab" data-tab="stats">统计</button>
             </div>
@@ -216,6 +217,60 @@
               <div class="plan-overview" id="planOverview" hidden></div>
               <div class="plan-list" id="planList">
                 <p class="hint">任务开始后，这里会显示每道工序的状态。</p>
+              </div>
+            </div>
+
+            <div class="pane" id="pane-workspace" hidden>
+              <div class="workspace-head">
+                <div class="workspace-identity">
+                  <span class="workspace-kicker" id="workspaceKind">WORKSPACE</span>
+                  <strong id="workspaceName">未选择任务</strong>
+                </div>
+                <button class="icon-btn" id="workspaceExpand" type="button" title="打开全屏工作区控制台" aria-label="打开全屏工作区控制台">⛶</button>
+                <button class="icon-btn" id="workspaceRefresh" type="button" title="刷新工作区" aria-label="刷新工作区">↻</button>
+              </div>
+              <div class="workspace-path" id="workspacePathLabel">—</div>
+              <div class="workspace-meta" id="workspaceMeta"></div>
+              <div class="workspace-stats" id="workspaceStats"></div>
+              <div class="workspace-toolbar">
+                <input id="workspaceSearch" type="search" placeholder="搜索文件内容" autocomplete="off" />
+                <button class="btn btn-ghost sm" id="workspaceSearchBtn" type="button">搜索</button>
+                <button class="btn btn-ghost sm" id="workspaceNewFile" type="button">新建</button>
+              </div>
+              <div class="workspace-search-results" id="workspaceSearchResults" hidden></div>
+              <div class="workspace-section-head">
+                <span>文件树</span>
+                <em id="workspaceTreeCount">0</em>
+              </div>
+              <div class="workspace-tree" id="workspaceTree">
+                <p class="hint">选择任务后显示工作区目录。</p>
+              </div>
+              <div class="workspace-section-head">
+                <span>变更</span>
+                <em id="workspaceChangeCount">0</em>
+              </div>
+              <div class="workspace-changes" id="workspaceChanges">
+                <p class="hint">暂无文件变更。</p>
+              </div>
+              <div class="workspace-section-head">
+                <span>执行事件</span>
+                <em id="workspaceEventCount">0</em>
+              </div>
+              <div class="workspace-events" id="workspaceEvents">
+                <p class="hint">任务运行后会记录工具调用和文件变更。</p>
+              </div>
+              <div class="workspace-file-view" id="workspaceFileView" hidden>
+                <div class="workspace-file-head">
+                  <span id="workspaceFilePath">—</span>
+                  <button class="icon-btn" id="workspaceFileClose" type="button" aria-label="关闭文件预览">×</button>
+                </div>
+                <div class="workspace-file-actions">
+                  <button class="btn btn-ghost sm" id="workspaceFileEdit" type="button">编辑</button>
+                  <button class="btn btn-primary sm" id="workspaceFileSave" type="button" hidden>保存</button>
+                  <button class="btn btn-ghost sm danger" id="workspaceFileDelete" type="button">删除</button>
+                </div>
+                <pre id="workspaceFilePreview"><code id="workspaceFileCode"></code></pre>
+                <textarea id="workspaceFileEditor" rows="12" spellcheck="false" hidden></textarea>
               </div>
             </div>
 
@@ -252,6 +307,117 @@
           </div>
         </aside>
       </div>
+
+      <!-- 工作区控制台：文件树、编辑器、执行轨迹与上下文的独立工作视图 -->
+      <section class="workspace-console" id="workspaceConsole" hidden aria-label="工作区控制台">
+        <header class="wc-top">
+          <div class="wc-brand">
+            <span class="wc-mark" aria-hidden="true">⌘</span>
+            <div class="wc-brand-copy">
+              <p>WORKSPACE CONSOLE / <span id="wcTaskCode">NO TASK</span></p>
+              <h2 id="wcTitle">未选择任务</h2>
+            </div>
+          </div>
+          <div class="wc-meta" id="wcMeta"></div>
+          <div class="wc-actions">
+            <button class="btn btn-ghost sm" id="wcRefresh" type="button">刷新</button>
+            <button class="btn btn-ghost sm" id="wcClose" type="button">返回协作台</button>
+          </div>
+        </header>
+
+        <div class="wc-layout">
+          <aside class="wc-sidebar">
+            <div class="wc-path" id="wcPath">—</div>
+            <div class="wc-panel-head">
+              <span>工作树 / TREE</span>
+              <em id="wcTreeCount">00</em>
+            </div>
+            <div class="wc-search">
+              <input id="wcSearch" type="search" placeholder="搜索文件名或内容" autocomplete="off" />
+              <button class="btn btn-primary sm" id="wcSearchBtn" type="button">搜索</button>
+            </div>
+            <div class="wc-search-results" id="wcSearchResults" hidden></div>
+            <div class="wc-tree" id="wcTree"></div>
+            <div class="wc-panel-head">
+              <span>变更 / CHANGES</span>
+              <em id="wcChangeCount">00</em>
+            </div>
+            <div class="wc-changes" id="wcChanges"></div>
+          </aside>
+
+          <main class="wc-main">
+            <div class="wc-main-head">
+              <div class="wc-view-tabs" id="wcViewTabs">
+                <button class="wc-view-tab active" type="button" data-wc-view="file">文件</button>
+                <button class="wc-view-tab" type="button" data-wc-view="execution">执行轨迹</button>
+                <button class="wc-view-tab" type="button" data-wc-view="diff">DIFF</button>
+              </div>
+              <span class="wc-file-state" id="wcFileState">选择一个文件开始</span>
+            </div>
+
+            <section class="wc-view" id="wcFileView">
+              <div class="wc-file-head">
+                <span id="wcFilePath">—</span>
+                <div class="wc-file-actions">
+                  <button class="btn btn-ghost sm" id="wcEdit" type="button" hidden>编辑</button>
+                  <button class="btn btn-primary sm" id="wcSave" type="button" hidden>保存</button>
+                  <button class="btn btn-ghost sm danger" id="wcDelete" type="button" hidden>删除</button>
+                </div>
+              </div>
+              <div class="wc-empty" id="wcFileEmpty">
+                <b>从左侧工作树选择文件</b>
+                <span>支持预览、编辑、新建与移入回收站。大文件和二进制文件只展示元信息。</span>
+              </div>
+              <pre class="wc-code" id="wcCodeBlock" hidden><code id="wcCode"></code></pre>
+              <textarea class="wc-editor" id="wcEditor" rows="18" spellcheck="false" hidden></textarea>
+            </section>
+
+            <section class="wc-view" id="wcExecutionView" hidden>
+              <div class="wc-lanes-head">
+                <div>
+                  <span class="wc-eyebrow">AGENT LANES</span>
+                  <h3>谁在执行，卡在哪一步</h3>
+                </div>
+                <span class="wc-run-status" id="wcRunStatus">—</span>
+              </div>
+              <div class="wc-lanes" id="wcLanes"></div>
+              <div class="wc-panel-head">
+                <span>工具与运行事件 / EVENT STREAM</span>
+                <em id="wcEventCount">00</em>
+              </div>
+              <div class="wc-events" id="wcEvents"></div>
+            </section>
+
+            <section class="wc-view" id="wcDiffView" hidden>
+              <div class="wc-diff-head">
+                <div>
+                  <span class="wc-eyebrow">WORKSPACE DIFF</span>
+                  <h3 id="wcDiffTitle">选择变更查看差异</h3>
+                </div>
+                <button class="btn btn-ghost sm" id="wcDiffRefresh" type="button">刷新 Diff</button>
+              </div>
+              <pre class="wc-diff" id="wcDiff">当前工作区不是 Git 仓库，或还没有选择文件。</pre>
+            </section>
+          </main>
+
+          <aside class="wc-inspector">
+            <div class="wc-panel-head">
+              <span>上下文 / CONTEXT</span>
+              <em id="wcContextCount">00</em>
+            </div>
+            <div class="wc-context" id="wcContext"></div>
+            <div class="wc-panel-head">
+              <span>工具策略 / TOOLS</span>
+              <em id="wcPolicyCount">00</em>
+            </div>
+            <div class="wc-policy" id="wcPolicy"></div>
+            <div class="wc-panel-head">
+              <span>运行摘要 / RUN</span>
+            </div>
+            <div class="wc-summary" id="wcSummary"></div>
+          </aside>
+        </div>
+      </section>
 
       <div class="mask" id="mask"></div>
 
@@ -297,6 +463,14 @@
                 作为该角色主执行人
               </span>
             </label>
+            <div class="field tool-policy-field">
+              <div class="tool-policy-head">
+                <span>工具权限</span>
+                <button type="button" class="link-btn" id="agentToolsDefault">角色默认</button>
+              </div>
+              <div class="tool-policy-grid" id="agentTools"></div>
+              <p class="hint">平台文件操作会按此策略校验；真实 CLI 子进程仍需独立沙箱约束。</p>
+            </div>
             <div class="cli-fields" id="cliFields" hidden>
               <label class="field">
                 <span>命令</span>
@@ -329,6 +503,10 @@
               <span class="dir-path" id="dirPath">我的电脑</span>
             </div>
             <div class="dir-list" id="dirList"></div>
+            <label class="dir-worktree">
+              <input type="checkbox" id="dirWorktree" />
+              <span><b>Git 隔离工作树</b><em>每个任务从当前 HEAD 创建独立工作树，多个任务并行时不互相踩文件。</em></span>
+            </label>
             <p class="hint">选已有目录：所有 CLI 成员都在这里执行，改动也落在这里；不选则自动新建独立工作区。</p>
           </div>
           <footer class="modal-foot">

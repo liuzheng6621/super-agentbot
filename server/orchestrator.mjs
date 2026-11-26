@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { store, randomUUID, ROLE_LABEL } from './store.mjs';
+import { store, randomUUID, ROLE_LABEL, TOOL_CATALOG } from './store.mjs';
 import * as sim from './sim.mjs';
 import { streamText, spawnCli, sleep, classifyCliExit, describeCliResult } from './adapters.mjs';
 import { runDag, throwIfAborted } from './dag.mjs';
@@ -100,6 +100,7 @@ export function writeWorkspaceFile(task, relPath, content, meta = {}) {
     lang: path.extname(relPath).slice(1) || 'text',
     agentId: meta.agentId || '',
     stepId: meta.stepId || '',
+    source: 'simulation',
   });
   return abs;
 }
@@ -172,6 +173,7 @@ function knownFiles(task) {
 }
 
 export function buildContextPack(task, { maxMessages = 8, maxFiles = 80, files } = {}) {
+  const allFiles = files || listWorkspaceFiles(task);
   return {
     goal: task.goal,
     workspace: task.workspace,
@@ -184,7 +186,7 @@ export function buildContextPack(task, { maxMessages = 8, maxFiles = 80, files }
       status: s.status,
       round: s.round || 0,
     })),
-    files: (files || listWorkspaceFiles(task))
+    files: allFiles
       .filter((f) => f.bytes > 0)
       .slice(0, maxFiles),
     messages: task.messages
@@ -196,6 +198,12 @@ export function buildContextPack(task, { maxMessages = 8, maxFiles = 80, files }
         kind: m.kind || 'text',
         text: String(m.text).replace(/\s+/g, ' ').slice(0, 300),
       })),
+    budget: {
+      maxMessages,
+      maxFiles,
+      messagesAvailable: task.messages.length,
+      filesAvailable: allFiles.length,
+    },
   };
 }
 
@@ -334,6 +342,18 @@ async function cliMessage(
     ...message,
   });
   beginAgent(agent, `${agent.cli?.command || 'CLI'} 运行中`);
+  const toolCall = store.addTaskEvent(task.id, {
+    type: 'tool.call.start',
+    agentId: agent.id,
+    stepId: agent.currentStepId || '',
+    data: {
+      tool: 'cli',
+      command: agent.cli?.command || '',
+      args: agent.cli?.args || [],
+      cwd: task.workspace,
+      timeout,
+    },
+  });
 
   const before = fileIndex.get(task.id) || new Map(snapshotFiles(task).map((f) => [f.path, f]));
   let hintShown = false;
@@ -426,6 +446,22 @@ ${res.stderr || ''}`;
 
   // 收集 CLI 新增/修改的文件：先按 size + 纳秒 mtime 粗筛，命中项再算内容版本。
   // 内容没变就不重复记 artifact——CLI 把同一个文件重写一遍不该算一次产出。
+  store.addTaskEvent(task.id, {
+    type: 'tool.call.end',
+    agentId: agent.id,
+    stepId: agent.currentStepId || '',
+    data: {
+      callId: toolCall?.id || '',
+      tool: 'cli',
+      command: agent.cli?.command || '',
+      code: res.code,
+      elapsed: res.elapsed,
+      timedOut: !!res.timedOut,
+      stdout: clip(res.stdout || '', 1600),
+      stderr: clip(res.stderr || '', 1600),
+    },
+  });
+
   const after = snapshotFiles(task);
   for (const f of after) {
     const prev = before.get(f.path);
@@ -437,6 +473,16 @@ ${res.stderr || ''}`;
       mtimeMs: f.mtimeMs,
       version: versionOf(path.join(task.workspace, f.path)) || '',
       lang: path.extname(f.path).slice(1),
+      agentId: agent.id,
+      stepId: agent.currentStepId || '',
+      beforeVersion: prev?.version || '',
+      source: 'cli',
+    });
+  }
+  const afterPaths = new Set(after.map((f) => f.path));
+  for (const [relPath] of before) {
+    if (afterPaths.has(relPath)) continue;
+    store.markArtifactDeleted(task.id, relPath, {
       agentId: agent.id,
       stepId: agent.currentStepId || '',
     });
@@ -491,11 +537,24 @@ function dependencyText(task, step, outputs) {
     .join('\n\n---\n\n');
 }
 
+function toolPolicyBlock(agent) {
+  const allowed = new Set(Array.isArray(agent?.tools) ? agent.tools : []);
+  const labels = TOOL_CATALOG.filter((tool) => allowed.has(tool.id)).map(
+    (tool) => `${tool.label} (${tool.id})`,
+  );
+  return [
+    '# 工具权限',
+    labels.length ? `- 允许: ${labels.join('、')}` : '- 允许: 无',
+    '- 未列出的平台能力不得调用；需要时说明阻塞，不要绕过权限边界。',
+  ].join('\n');
+}
+
 export function buildPrompt(task, agent, step, depsText, context, extra = {}) {
   const role = step?.role || agent.role;
   const lines = [
     stableBlock(context),
     `你是「${agent.name}」，团队中的${agent.title}。`,
+    toolPolicyBlock(agent),
     '',
     '# 项目目标',
     task.goal,
@@ -560,6 +619,7 @@ function buildPlanPrompt(agent, task, context = null) {
   return [
     stableBlock(context),
     `你是「${agent.name}」，团队里的${agent.title}。`,
+    toolPolicyBlock(agent),
     '',
     '# 项目目标',
     task.goal,
@@ -578,6 +638,7 @@ function buildSummaryPrompt(agent, task, outputs, context, extra = {}) {
   return [
     stableBlock(context),
     `你是「${agent.name}」，团队里的${agent.title}。本轮协作已结束，由你做交付收口。`,
+    toolPolicyBlock(agent),
     '',
     '# 项目目标',
     task.goal,
@@ -761,6 +822,7 @@ function buildProposalPrompt(task, agent, angle, context) {
   return [
     stableBlock(context),
     `你是「${agent.name}」，团队里的${agent.title || ROLE_LABEL[agent.role] || '成员'}。`,
+    toolPolicyBlock(agent),
     '',
     '# 项目目标',
     task.goal,
@@ -843,6 +905,7 @@ export function isCompleteDecisionText(text) {
 function buildCritiquePrompt(task, agent, own, others) {
   return [
     `你是「${agent.name}」，团队里的${agent.title || ROLE_LABEL[agent.role] || '成员'}。现在进入交叉质询。`,
+    toolPolicyBlock(agent),
     '',
     '# 项目目标',
     task.goal,
@@ -863,6 +926,7 @@ function buildCritiquePrompt(task, agent, own, others) {
 function buildDecisionPrompt(task, judge, ranking, winner) {
   return [
     `你是「${judge.name}」，本轮方案讨论的主持人。成员已经完成提案与交叉评分，现在由你宣布裁决。`,
+    toolPolicyBlock(judge),
     '',
     '# 项目目标',
     task.goal,
@@ -1698,6 +1762,11 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
     quality: { status: 'pending' },
     stats: { ...task.stats, ms: 0 },
   });
+  store.addTaskEvent(taskId, {
+    type: 'run.start',
+    runId,
+    data: { goal: task.goal, workspace: task.workspace, speed },
+  });
 
   try {
     const judge = pickAgent('planner');
@@ -1872,6 +1941,16 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
       },
       'task.status',
     );
+    store.addTaskEvent(taskId, {
+      type: 'run.end',
+      runId,
+      data: {
+        status: finalStatus,
+        repairRound,
+        quality: store.getTask(taskId)?.quality || null,
+        ms: Date.now() - startedAt,
+      },
+    });
     return finalStatus === 'done';
   } catch (err) {
     const aborted = signal.aborted || err?.name === 'AbortError' || /aborted/.test(err.message);
@@ -1909,6 +1988,15 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
       };
       if (broken) patch.stats = { ...broken.stats, ms: workMsOf(broken), wallMs: Date.now() - startedAt };
       store.updateTask(taskId, patch, 'task.status');
+      store.addTaskEvent(taskId, {
+        type: 'run.error',
+        runId,
+        data: {
+          aborted,
+          error: patch.error,
+          ms: Date.now() - startedAt,
+        },
+      });
     }
     return false;
   } finally {

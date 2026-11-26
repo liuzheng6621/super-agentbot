@@ -1,11 +1,23 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { store, ROOT, DATA_DIR, WORKSPACE_DIR } from './store.mjs';
+import { store, ROOT, DATA_DIR, WORKSPACE_DIR, TOOL_CATALOG, ROLE_TOOLS } from './store.mjs';
 import { startTask, stopTask, chat, listWorkspaceFiles, buildContextPack, isRunning, workMsOf } from './orchestrator.mjs';
 import { probeClis, spawnCli, clearResolveCache } from './adapters.mjs';
 import { adoptInstalledClis, rebalanceTeam } from './adopt.mjs';
 import { ensureRealTeam, refreshTeam, judgeHealth } from './team.mjs';
+import {
+  WorkspaceError,
+  deleteWorkspaceEntry,
+  makeWorkspaceDir,
+  moveWorkspaceEntry,
+  readWorkspaceFile,
+  searchWorkspace,
+  workspaceDiff,
+  workspaceInfo,
+  workspaceSnapshot,
+  writeWorkspaceEntry,
+} from './workspace.mjs';
 
 const PORT = Number(process.env.PORT || 8787);
 // 本地桌面场景只监听回环；被托管平台注入 PORT 时（容器 / 云沙箱）需要对外绑定
@@ -78,9 +90,24 @@ function taskDetail(task) {
     error: task.error || null,
     running: isRunning(task.id),
     workspace: task.workspace,
+    sourceWorkspace: task.sourceWorkspace || task.workspace,
+    worktree: task.worktree || null,
+    workspaceInfo: workspaceInfo(task),
     external: !!task.external,
+    fileChanges: task.fileChanges || [],
+    events: (task.events || []).slice(-160),
     context: buildContextPack(task),
   };
+}
+
+function requireAgentTool(agentId, toolId) {
+  if (!agentId) return;
+  const agent = store.getAgent(agentId);
+  if (!agent) throw new WorkspaceError('智能体不存在', 404);
+  const allowed = new Set(Array.isArray(agent.tools) ? agent.tools : []);
+  if (!allowed.has(toolId)) {
+    throw new WorkspaceError(`智能体「${agent.name}」没有 ${toolId} 权限`, 403);
+  }
 }
 
 /* ---------------------------- SSE ---------------------------- */
@@ -166,13 +193,19 @@ const server = http.createServer(async (req, res) => {
         agents: store.agents,
         tasks,
         settings: { ...store.db.settings },
+        toolCatalog: TOOL_CATALOG,
+        roleTools: ROLE_TOOLS,
         activeTask: active ? taskDetail(active) : null,
       });
     }
 
     /* ---- 智能体 ---- */
     if (pathname === '/api/agents' && method === 'GET') {
-      return json(res, 200, { agents: store.agents });
+      return json(res, 200, {
+        agents: store.agents,
+        toolCatalog: TOOL_CATALOG,
+        roleTools: ROLE_TOOLS,
+      });
     }
     if (pathname === '/api/agents' && method === 'POST') {
       const body = await readBody(req);
@@ -298,6 +331,7 @@ const server = http.createServer(async (req, res) => {
           goal,
           mode: body.mode === 'manual' ? 'manual' : 'auto',
           workspace: typeof body.workspace === 'string' ? body.workspace : '',
+          isolation: body.isolation === 'worktree' ? 'worktree' : 'direct',
           debate: body.flowMode === 'direct' || body.flowMode === 'debate' ? body.flowMode : null,
         });
       } catch (err) {
@@ -310,7 +344,9 @@ const server = http.createServer(async (req, res) => {
       return json(res, 201, { task: taskDetail(store.getTask(task.id)) });
     }
 
-    const taskMatch = pathname.match(/^\/api\/tasks\/([\w-]+)(?:\/(run|stop|chat|files|file))?$/);
+    const taskMatch = pathname.match(
+      /^\/api\/tasks\/([\w-]+)(?:\/(run|stop|chat|files|file|workspace|search|events|changes|diff|fs))?$/,
+    );
     if (taskMatch) {
       const task = store.getTask(taskMatch[1]);
       if (!task) return json(res, 404, { error: '任务不存在' });
@@ -348,27 +384,68 @@ const server = http.createServer(async (req, res) => {
         return json(res, 202, { ok: true });
       }
       if (action === 'files' && method === 'GET') {
+        requireAgentTool(searchParams.get('agentId') || '', 'workspace.read');
         return json(res, 200, { files: listWorkspaceFiles(task) });
       }
+      if (action === 'workspace' && method === 'GET') {
+        requireAgentTool(searchParams.get('agentId') || '', 'workspace.read');
+        return json(res, 200, workspaceSnapshot(task));
+      }
+      if (action === 'search' && method === 'GET') {
+        requireAgentTool(searchParams.get('agentId') || '', 'workspace.search');
+        return json(res, 200, searchWorkspace(task, searchParams.get('q') || ''));
+      }
+      if (action === 'events' && method === 'GET') {
+        requireAgentTool(searchParams.get('agentId') || '', 'workspace.read');
+        const limit = Math.max(1, Math.min(800, Number(searchParams.get('limit')) || 160));
+        return json(res, 200, { events: (task.events || []).slice(-limit) });
+      }
+      if (action === 'changes' && method === 'GET') {
+        requireAgentTool(searchParams.get('agentId') || '', 'workspace.read');
+        return json(res, 200, { changes: task.fileChanges || [] });
+      }
+      if (action === 'diff' && method === 'GET') {
+        requireAgentTool(searchParams.get('agentId') || '', 'workspace.read');
+        return json(res, 200, workspaceDiff(task, searchParams.get('path') || ''));
+      }
+      if (action === 'fs' && method === 'POST') {
+        const body = await readBody(req);
+        const op = String(body.op || '').trim();
+        const meta = {
+          agentId: typeof body.agentId === 'string' ? body.agentId : '',
+          stepId: typeof body.stepId === 'string' ? body.stepId : '',
+        };
+        if (op === 'write') {
+          requireAgentTool(meta.agentId, 'workspace.write');
+          return json(res, 200, {
+            ok: true,
+            result: writeWorkspaceEntry(task, body.path, body.content, meta),
+          });
+        }
+        if (op === 'mkdir') {
+          requireAgentTool(meta.agentId, 'workspace.write');
+          return json(res, 200, { ok: true, result: makeWorkspaceDir(task, body.path, meta) });
+        }
+        if (op === 'move') {
+          requireAgentTool(meta.agentId, 'workspace.move');
+          return json(res, 200, {
+            ok: true,
+            result: moveWorkspaceEntry(task, body.from, body.to, meta),
+          });
+        }
+        if (op === 'delete') {
+          requireAgentTool(meta.agentId, 'workspace.delete');
+          return json(res, 200, {
+            ok: true,
+            result: deleteWorkspaceEntry(task, body.path, meta),
+          });
+        }
+        return json(res, 400, { error: '不支持的 fs op' });
+      }
       if (action === 'file' && method === 'GET') {
+        requireAgentTool(searchParams.get('agentId') || '', 'workspace.read');
         const rel = searchParams.get('path') || '';
-        const base = path.resolve(task.workspace);
-        const abs = path.resolve(base, rel);
-        if (!abs.startsWith(base + path.sep)) return json(res, 403, { error: '非法路径' });
-        let stat = null;
-        try {
-          stat = fs.statSync(abs);
-        } catch {
-          return json(res, 404, { error: '文件不存在' });
-        }
-        if (!stat.isFile()) return json(res, 404, { error: '不是文件' });
-        if (stat.size > 2 * 1024 * 1024) return json(res, 413, { error: '文件过大，仅支持预览 2MB 以内' });
-        try {
-          const content = fs.readFileSync(abs, 'utf8');
-          return json(res, 200, { path: rel, content, bytes: stat.size });
-        } catch (err) {
-          return json(res, 415, { error: `无法以文本方式读取：${err.message}` });
-        }
+        return json(res, 200, readWorkspaceFile(task, rel));
       }
     }
 
@@ -410,6 +487,9 @@ const server = http.createServer(async (req, res) => {
     return json(res, 404, { error: '接口不存在' });
   } catch (err) {
     if (err?.message === '请求体过大') return json(res, 413, { error: '请求体过大' });
+    if (err instanceof WorkspaceError) {
+      return json(res, err.status || 400, { error: err.message });
+    }
     console.error('[api]', err);
     return json(res, 500, { error: err.message });
   }

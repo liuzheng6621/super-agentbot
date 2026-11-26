@@ -13,7 +13,7 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4)
 
-[快速开始](#快速开始) · [工作原理](#工作原理) · [接入本机-cli](#接入本机-cli) · [上下文预算](#上下文预算) · [HTTP-API](#http-api) · [常见问题](#常见问题)
+[快速开始](#快速开始) · [工作原理](#工作原理) · [接入本机-cli](#接入本机-cli) · [上下文预算](#上下文预算) · [工作区与工具](#工作区与工具策略) · [HTTP-API](#http-api) · [常见问题](#常见问题)
 
 <img src="docs/screenshot.png" alt="AgentForge 工作台" width="100%">
 
@@ -42,11 +42,13 @@
 - 🚦 **真实质量门** — 评审前真的执行测试命令，`VERDICT: PASS` 才允许交付；FAIL 进入「修复 → 回归 → 复评」有界回环，轮次可配。测试入口按 `package.json scripts.test` → pytest → cargo → go → Makefile → `tests/` 依次探测，找不到就标 `missing` 让界面显示「没有测试入口」，绝不静默跳过；真实 CLI 任务同样执行这套质量门，而不是一律跳过。评审员缺位退到其他席位时会如实标注「评审代质量门」，不让自审看起来像独立把关。
 - 🎛 **工作流可视化配置** — 讨论开关与规模、工序并发、返工轮次都在顶栏 ⚙ 里改，即时落库；另带「快速 / 均衡 / 严谨」三档预设。
 - 🔁 **任务级流程覆盖** — 输入框旁可切「先讨论」或「直接开工」，只影响当前任务，不动全局默认。
+- 🧰 **Agent 工具白名单** — 每个成员声明可用工具，角色有默认策略，也能按成员覆盖；平台文件 API 会按 `agentId` 校验权限。
+- 🌳 **Git 隔离工作区** — 每个任务可在独立 detached worktree 中执行；Windows 文件系统无法写 worktree 元数据时自动回退 shared clone，源仓库不受影响。
 
 **执行**
 
 - 🖥 **10 个本机 CLI 真接入** — 启动后台并发体检每个 CLI，只有「真回了话且没有鉴权错误」的才占执行席位；同一个 CLI 可兼任多角色（`OpenCode · 架构师`）。
-- 🔌 **任意 OpenAI / Anthropic 兼容网关** — 用 `AGENTFORGE_MODEL` 一个变量把全部 CLI 指向同一个本地网关或自建代理。
+- 🔌 **多 CLI 与可配模型名** — 通过 `AGENTFORGE_MODEL` 统一覆盖模型名；Provider、网关和凭据仍由各 CLI 适配器决定，统一 Provider Profile 见 Roadmap。
 - 🧾 **产物带内容版本** — 每个产物记录 `version`（sha256 前 16 位），改写即换版本，可判断「这一步到底动了什么」。
 - 🧷 **不合格输出不流转** — 每个角色的回复都要过结构校验：提案需 5 段标题、质询需覆盖全部方案、步骤需可执行产出；半截回复或「我无法完成」直接重试，不把残稿喂给下一步。
 - 💾 **原子写入** — 临时文件 → `fsync` → `rename`，Windows 占用自动退避重试，不会留下半截文件。
@@ -55,13 +57,14 @@
 
 - ⚡ **SSE 实时流** — 逐字输出、Markdown / 表格 / 代码块渲染、阶段条实时高亮、点击工序跳到对应时间线。
 - 🗂 **三栏工作台** — 左栏席位与历史，中栏时间线与群聊，右栏上下文 / 辩论记录 / DAG / 产物源码。
+- 🖥 **全屏工作区控制台** — 文件树 / 搜索 / 预览 / 编辑、按 Agent 分组的执行泳道、Git diff、上下文预算和工具策略在同一屏查看。
 - 🌗 **两套配色** — 顶栏 `SHIFT` 切换日间与夜间。
 - 🪟 **桌面模式** — 不打包 Electron，用系统浏览器 `--app` 模式得到独立窗口与任务栏图标，双击即用。
 
 **工程**
 
 - 📦 **零依赖、零构建** — 纯 Node.js + 原生 ESM，`node server/index.mjs` 就起来，前端不打包、不装包管理器。
-- ✅ **48 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、质量门返工与入口探测、体检判定、上下文预算、真实工时统计、输出完整性判定与退出码分类。
+- ✅ **56 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、质量门返工与入口探测、体检判定、上下文预算、工作区文件闭环、Git 隔离、工具策略、真实工时统计、输出完整性判定与退出码分类。
 
 ## 快速开始
 
@@ -171,6 +174,12 @@ CLI 是不可控的第三方进程，所以调用不是「起进程 → 收字�
 | **输出完整性** | `isCompleteProposalText()` / `isCompleteCritiqueText()` / `isCompleteStepText()` / `isCompleteSummaryText()` / `isCompleteDecisionText()` 按角色校验结构（提案需 5 段标题、质询需覆盖全部方案、步骤需可执行产出），不合格自动重试 | CLI 经常「退出码 0 但只回半段」「回一句无法完成」；这种产出若直接进下一步，后面全盘皆错 |
 | **运行时 PATH** | `runtimePathEnv()` 把 Node 自身目录与 npm / WinGet / Programs 等常见 bin 目录补进子进程 PATH | 从桌面快捷方式启动时继承的 PATH 残缺，`claude.cmd` 之类会报「找不到命令」 |
 
+### 与 Magpie 的关系
+
+AgentForge **不是基于 Magpie 框架实现**。Magpie 目前只是部分 CLI 适配器中的默认兼容网关：`server/adapters.mjs` 为 Codex、Aider、Gemini、Qwen 等命令硬编码了 `http://127.0.0.1:3425`、模型名或环境变量。`AGENTFORGE_MODEL` 只能改模型名，不能定义 Provider、凭据、路由和回退。
+
+要把泛用性从「适配某个 CLI」提升到「适配任意兼容网关」，需要独立 Provider Profile 层，把 base URL、模型、密钥引用和 CLI 参数模板从源码中拆出去。完整字段设计、迁移顺序和验收标准见 [docs/agent-platform-roadmap.md](docs/agent-platform-roadmap.md)。
+
 ## 上下文预算
 
 多工序流水线最容易悄悄变贵的地方是上下文。这里的四条规则都带测试守护：
@@ -184,6 +193,33 @@ CLI 是不可控的第三方进程，所以调用不是「起进程 → 收字�
 
 设计依据与完整取舍写在 [docs/design-io-image-context.md](docs/design-io-image-context.md)。
 
+## 工作区与工具策略
+
+工作区控制台不是静态文件列表，而是把“文件、执行、审查”放在同一条任务链路里：
+
+| 视图 | 能做什么 |
+| --- | --- |
+| **文件** | 浏览工作树、搜索内容、预览文本/二进制状态、编辑保存、新建、移入回收站 |
+| **执行泳道** | 按 Agent 分组显示工序、依赖数、运行状态和尝试次数；事件流记录工具调用、文件变更和运行结果 |
+| **Diff** | 对比 Git `HEAD`，并补齐未跟踪新文件的 unified diff；敏感、二进制和超限文件有保护 |
+| **上下文 / 策略** | 展示注入的消息与文件预算、最近协作、已知文件，以及每个 Agent 的真实工具白名单 |
+
+平台文件操作覆盖查、增、改、移、删，并带以下边界：
+
+- 路径必须是工作区内相对路径；拒绝 `..`、绝对路径和符号链接。
+- `.git`、`.agentforge` 不允许通过文件 API 直接读写。
+- `.env*`、私钥、`.npmrc`、`.pypirc` 等敏感文件禁止预览和平台写入。
+- 写入使用临时文件 + `fsync` + `rename`，并记录前后内容版本。
+- 删除进入 `.agentforge/trash`，不是不可恢复的硬删除。
+- Agent 工具策略目前是“提示词声明 + 平台 API 校验”。真实 CLI 仍是外部子进程，可以绕过平台策略直接使用自身 shell/文件能力；强制 Tool Gateway 尚未实现。
+
+Git 隔离支持两种模式：
+
+- `worktree`：`git worktree add --detach`，每个任务独立目录，删除任务时只清理工作树。
+- `clone`：当 Windows 文件系统无法写 `.git/worktrees` 时自动回退到 `git clone --shared`，并在界面标记 `CLONE 回退`。
+
+同一进程内可以并行运行多个任务，每个任务使用独立工作区；目前还没有全局 Scheduler、Provider 并发配额和 Agent 租约，详见路线图。
+
 ## 界面
 
 三栏工作台，所有状态由 SSE 推送，无轮询。
@@ -193,6 +229,7 @@ CLI 是不可控的第三方进程，所以调用不是「起进程 → 收字�
 | **左栏** | 五个执行席位 + 工具池（在线状态、`SIM 演示` / `✓ CLI 可用` / `! 不可用`）、本机 CLI 扫描结果、「体检并换真实席位」、历史任务 |
 | **中栏** | 工作流阶段条（讨论 → 拆解 → 架构与实施 → 评审 → 交付，实时高亮负责人，可点击跳转）、按阶段分隔的协作时间线、流式输出、方案 / 质询 / 裁决标签、底部群聊输入框 |
 | **右栏** | 上下文包、方案讨论（提案人 / 评分 / 票数 / 胜出方案 / 质询记录）、DAG 链路（依赖 / 并行 / 尝试次数 / 返工）、产物源码、统计与 Bot Hook |
+| **全屏工作区控制台** | 左侧工作树与变更、中间文件 / 执行泳道 / Diff、右侧上下文与 Agent 工具策略；桌面和移动端都可直接进入 |
 | **统计面板** | 每个数字都来自落库事实：累计 TOKENS = 各成员 token 之和（输入与输出分开记账，`tokensIn` / `tokensOut`，不把成本低估一个数量级）；协作轮次 = 真实调用成员次数 `stats.agentRuns`；产物文件 = 产物清单条数；返工轮次 = `repairRound`；总耗时 = 各工序实际耗时之和（墙钟含排队与重试等待，只作悬浮提示）；质量门 = `passed / failed / missing / skipped / 未执行` 五态，中断的任务不会永远停在「待执行」 |
 | **顶栏** | 状态、⚙ 工作流设置、`SHIFT` 切换配色 |
 
@@ -219,13 +256,19 @@ CLI 是不可控的第三方进程，所以调用不是「起进程 → 收字�
 | --- | --- | --- |
 | `GET` | `/api/state` | 全量状态（团队 / 任务 / 设置 / 当前任务） |
 | `PATCH` | `/api/settings` | 工作流参数（白名单字段 + 范围夹紧） |
-| `POST` | `/api/tasks` | 创建 `{ goal, flowMode?: "debate"\|"direct", autoRun? }` |
+| `POST` | `/api/tasks` | 创建 `{ goal, workspace?, isolation?: "direct"\|"worktree", flowMode?: "debate"\|"direct", autoRun? }` |
 | `GET` | `/api/tasks/:id` | 任务详情（消息、工序、产物、辩论） |
 | `POST` | `/api/tasks/:id/run` | 重新编排，可带 `{ flowMode }` |
 | `POST` | `/api/tasks/:id/stop` | 停止执行 |
 | `POST` | `/api/tasks/:id/chat` | `{ text }` 群聊，支持 `@成员名` |
 | `GET` | `/api/tasks/:id/files` | 工作区文件列表（含字节数与纳秒 mtime） |
 | `GET` | `/api/tasks/:id/file?path=` | 读取单个文件 |
+| `GET` | `/api/tasks/:id/workspace` | 工作区树、变更、事件、摘要与 Git 信息 |
+| `GET` | `/api/tasks/:id/search?q=` | 工作区全文搜索 |
+| `GET` | `/api/tasks/:id/events?limit=` | 任务事件流（工具调用 / 文件变更 / 运行结果） |
+| `GET` | `/api/tasks/:id/changes` | 文件变更账本 |
+| `GET` | `/api/tasks/:id/diff?path=` | 对比 `HEAD` 的 unified diff（含未跟踪文件） |
+| `POST` | `/api/tasks/:id/fs` | `{ op: "write"\|"mkdir"\|"move"\|"delete", path/from/to, content?, agentId? }` |
 | `POST` | `/api/context-preview` | `{ goal, workspace? }` 预览上下文包 |
 | `GET` `POST` | `/api/agents` | 团队列表 / 新增成员 |
 | `PATCH` `DELETE` | `/api/agents/:id` | 修改 / 移除成员 |
@@ -240,6 +283,8 @@ CLI 是不可控的第三方进程，所以调用不是「起进程 → 收字�
 | `GET` | `/api/health` | 健康检查 |
 | `POST` | `/api/shutdown` | 优雅退出 |
 | `POST` | `/api/hooks/:token` | 外部触发（Bot Hook） |
+
+工作区读取接口支持可选的 `agentId` 查询参数；传入后会校验该 Agent 是否拥有 `workspace.read` / `workspace.search`。`/fs` 写入、移动、删除同样校验对应工具。
 
 ### Bot Hook
 
@@ -272,6 +317,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 │   ├── index.mjs         HTTP 路由、SSE、静态资源、单实例端口守卫
 │   ├── orchestrator.mjs  流水线编排、质量门、上下文组装、产物落盘
 │   ├── store.mjs         状态、席位、持久化、事件总线
+│   ├── workspace.mjs     工作区树、读写、搜索、回收站、Diff、路径边界
 │   ├── dag.mjs           依赖图校验与并行调度
 │   ├── adapters.mjs      CLI 适配（argv / stdin / 免审批参数）、模拟流式、本机探测
 │   ├── team.mjs          体检判定与真实席位组建
@@ -287,8 +333,9 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 ├── desktop/              桌面启动器、快捷方式安装、图标生成
 ├── docs/
 │   ├── screenshot.png
-│   └── design-io-image-context.md
-├── tests/                7 个测试文件、48 个测试
+│   ├── design-io-image-context.md
+│   └── agent-platform-roadmap.md
+├── tests/                8 个测试文件、56 个测试
 ├── 安装到桌面.bat
 ├── 卸载桌面快捷方式.bat
 └── data/                 运行时数据（gitignore）
@@ -300,7 +347,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 npm test
 ```
 
-48 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、评审结论解析、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `missing` 判定、真实 CLI 任务同样执行质量门、评审员兜底不落到实现者、目录快照复用、上游瞬时故障（ECONNRESET / 429 / socket hang up）只重试一次且不掩盖真实失败、上下文预算（段序稳定性、中文 token 估算、原子写版本、spill 可还原）、真实工时统计（只累加结束过的工序，不拿墙钟冒充）、输出完整性判定（半截提案 / 缺段质询 / 空步骤都会判不合格）、提案宽松解析（`A=7`、`B：8分`、`方案 C 7/10`）、退出码分类（超时 / 已停止 / 命令缺失 / `0xC0000142`）与参数拼装。
+56 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、评审结论解析、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `missing` 判定、真实 CLI 任务同样执行质量门、评审员兜底不落到实现者、目录快照复用、上游瞬时故障（ECONNRESET / 429 / socket hang up）只重试一次且不掩盖真实失败、上下文预算（段序稳定性、中文 token 估算、原子写版本、spill 可还原）、工作区文件闭环与路径/敏感文件边界、Agent 工具策略、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计（只累加结束过的工序，不拿墙钟冒充）、输出完整性判定（半截提案 / 缺段质询 / 空步骤都会判不合格）、提案宽松解析（`A=7`、`B：8分`、`方案 C 7/10`）、退出码分类（超时 / 已停止 / 命令缺失 / `0xC0000142`）与参数拼装。
 
 ## 已知边界
 
@@ -308,12 +355,21 @@ npm test
 - **`kimi` 只适合单行任务**：`-p` 与 `--auto` 互斥，只能走 argv，多行 prompt 会被 `cmd.exe` 截断。
 - **`trae-cli` 的行为取决于模型**：工具齐全（bash / 编辑 / 顺序思考），但某些模型只肯调顺序思考而不落盘——这是模型行为，不是配置问题。
 - **模拟模式**：一个可用 CLI 都没有时才会启用，产出仍是可运行的代码（`tests/*.test.js` 能直接 `node` 执行），但成员会明确标注 `SIM 演示`。
+- **工具策略不是强制网关**：平台 API 会校验工具白名单，但真实 CLI 仍是外部子进程，可以绕过平台直接使用自身工具；统一 Tool Gateway 尚未实现。
+- **Magpie 只是默认网关**：项目不依赖 Magpie 框架；Provider Profile、密钥引用和多 Provider 路由仍在路线图中。
+- **并发缺全局调度**：不同任务可并行且有独立工作区，但还没有 Provider/CLI 配额、Agent 租约、磁盘配额和任务优先级。
 
 ## Roadmap
 
 - [x] 真实 CLI 体检组队（10 个 CLI 实测跑通）
 - [x] 方案辩论、DAG 并行、质量门返工
 - [x] 上下文预算（段序 / token 估算 / 原子写 / spill）
+- [x] 工作区文件闭环、全屏控制台、执行泳道与 Diff
+- [x] Agent 工具白名单与 Git worktree/clone 隔离
+- [ ] Tool Gateway（强制策略、审批、审计、文件租约）
+- [ ] Provider Profile（自定义网关、凭据引用、路由与回退）
+- [ ] 全局 Scheduler（多任务配额、Agent 租约、工作区池）
+- [ ] 跨任务工作区总览、DAG 图与时间回放
 - [ ] 附件与读图（把截图交给视觉模型看 UI）
 - [ ] 读后写守卫（改动未经读取的文件时要求先读，防盲改）
 - [ ] 正规压缩（长任务的摘要式上下文压缩）

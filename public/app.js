@@ -7,16 +7,28 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 const S = {
   agents: [],
+  toolCatalog: [],
+  roleTools: {},
   tasks: [],
   task: null,
   settings: {},
   probe: [],
   dir: "",
+  worktree: false,
   flowMode: "debate",
   tab: "plan",
   atBottom: true,
   pending: new Map(),
   openStep: "",
+  workspace: null,
+  workspaceLoading: false,
+  workspacePreviewPath: "",
+  workspacePreviewData: null,
+  workspaceRefreshTimer: null,
+  workspaceConsoleOpen: false,
+  workspaceConsoleView: "file",
+  workspaceDiffPath: "",
+  workspaceDiff: null,
 };
 
 /* ---------------- 工具 ---------------- */
@@ -256,7 +268,7 @@ function agentRowHtml(a, reserve = false) {
         <i class="tag role" data-role="${reserve ? "tool" : a.role}">${role}</i>
         ${healthTag}
       </span>
-      <span class="agent-role">${escapeHtml(detail)}</span>
+      <span class="agent-role">${escapeHtml(detail)}${Array.isArray(a.tools) ? ` · ${a.tools.length} TOOLS` : ""}</span>
     </span>
     <span class="agent-right">
       <span class="runs">${pad2(a.stats?.runs || 0)}</span>
@@ -398,7 +410,9 @@ function renderTopbar() {
   const t = S.task;
   $("#topbarTitle").textContent = t ? t.title : "未选择任务";
   $("#topbarSub").textContent = t
-    ? t.external && t.workspace
+    ? t.worktree && t.sourceWorkspace
+      ? `${t.goal} · 工作树 ${shortPath(t.sourceWorkspace)}`
+      : t.external && t.workspace
       ? `${t.goal} · 📁 ${shortPath(t.workspace)}`
       : t.goal
     : "描述一个目标，团队会自己分工";
@@ -972,18 +986,652 @@ function renderFiles() {
     .join("");
 }
 
+const WORKSPACE_EVENT_LABEL = {
+  "run.start": "运行开始",
+  "run.end": "运行结束",
+  "run.error": "运行中断",
+  "tool.call.start": "工具调用",
+  "tool.call.end": "工具完成",
+  "file.changed": "文件变更",
+  "fs.write": "写入文件",
+  "fs.mkdir": "新建目录",
+  "fs.move": "移动路径",
+  "fs.delete": "移入回收站",
+};
+
+function workspaceStatusBadge(status) {
+  if (!status) return "";
+  return `<i class="ws-status" data-status="${escapeHtml(status)}">${escapeHtml(status)}</i>`;
+}
+
+function workspacePathData(path) {
+  return escapeHtml(encodeURIComponent(path || ""));
+}
+
+function workspaceTreeHtml(nodes) {
+  return (nodes || [])
+    .map((node) => {
+      if (node.type === "dir") {
+        return `<details class="ws-dir" open>
+          <summary>${workspaceStatusBadge(node.status)}<span class="ws-file-name">${escapeHtml(node.name)}</span></summary>
+          <div class="ws-dir-children">${workspaceTreeHtml(node.children)}</div>
+        </details>`;
+      }
+      return `<button class="ws-file" type="button" data-workspace-file="${workspacePathData(node.path)}" title="${escapeHtml(node.path)}">
+        ${workspaceStatusBadge(node.status)}
+        <span class="ws-file-name">${escapeHtml(node.name)}</span>
+        <span class="ws-file-size">${node.sensitive ? "LOCK" : fmtBytes(node.bytes)}</span>
+      </button>`;
+    })
+    .join("");
+}
+
+function workspaceChangeHtml(change) {
+  const path = change.previousPath
+    ? `${change.previousPath} → ${change.path}`
+    : change.path;
+  const openable = change.status !== "D" && change.path;
+  return `<div class="workspace-change" ${openable ? `data-workspace-file="${workspacePathData(change.path)}"` : ""}>
+    ${workspaceStatusBadge(change.status)}
+    <div class="workspace-change-main">
+      <b>${escapeHtml(path)}</b>
+      <span>${escapeHtml(change.source || "workspace")}${change.stepId ? ` · ${escapeHtml(change.stepId)}` : ""}${change.agentId ? ` · ${escapeHtml(change.agentId.slice(0, 8))}` : ""}</span>
+    </div>
+  </div>`;
+}
+
+function workspaceEventTone(event) {
+  if (event.type === "run.error") return "error";
+  if (event.type.startsWith("run.")) return "run";
+  if (event.type.startsWith("tool.")) return "tool";
+  return "file";
+}
+
+function workspaceEventSummary(event) {
+  const data = event.data || {};
+  if (event.type === "tool.call.start" || event.type === "tool.call.end") {
+    return `${data.command || "CLI"}${data.code === undefined ? "" : ` · exit ${data.code}`}`;
+  }
+  if (event.type === "file.changed") {
+    return `${data.status || "M"} · ${data.path || ""}`;
+  }
+  if (event.type === "run.end") {
+    return `${data.status || "done"}${data.ms ? ` · ${fmtMs(data.ms)}` : ""}`;
+  }
+  if (event.type === "run.error") return data.error || "运行中断";
+  return data.path || data.from || data.command || "";
+}
+
+function workspaceEventHtml(event) {
+  const label = WORKSPACE_EVENT_LABEL[event.type] || event.type;
+  return `<div class="workspace-event" data-tone="${workspaceEventTone(event)}">
+    <span class="ws-status">${escapeHtml(label.slice(0, 1))}</span>
+    <div class="workspace-event-main">
+      <b>${escapeHtml(label)}</b>
+      <span>${escapeHtml(workspaceEventSummary(event))} · ${fmtTime(event.at)}</span>
+    </div>
+  </div>`;
+}
+
+function renderWorkspace() {
+  const info = S.workspace?.info || S.task?.workspaceInfo;
+  const summary = S.workspace?.summary || {};
+  const changes = S.workspace?.changes || S.task?.fileChanges || [];
+  const events = S.workspace?.events || S.task?.events || [];
+
+  $("#workspaceKind").textContent = info?.isolation === "clone"
+    ? "GIT CLONE ISOLATION"
+    : info?.worktree
+      ? "GIT WORKTREE"
+    : info?.isGit
+      ? "GIT WORKSPACE"
+      : "WORKSPACE";
+  $("#workspaceName").textContent = info?.name || "未选择任务";
+  $("#workspacePathLabel").textContent = info?.path || "—";
+  $("#workspaceMeta").innerHTML = info
+    ? [
+        `<span>${info.external ? "外部目录" : "自动工作区"}</span>`,
+        info.isGit ? `<span>${escapeHtml(info.branch || "detached")}</span>` : "<span>非 Git</span>",
+        info.head ? `<span>HEAD ${escapeHtml(info.head)}</span>` : "",
+        info.source ? `<span title="${escapeHtml(info.source)}">源 ${escapeHtml(shortPath(info.source))}</span>` : "",
+        info.isolation === "clone"
+          ? `<span title="${escapeHtml(info.fallbackReason || "worktree 不可用")}">CLONE 回退</span>`
+          : "",
+      ]
+        .filter(Boolean)
+        .join("")
+    : "";
+
+  $("#workspaceStats").innerHTML = [
+    ["文件", summary.files || 0],
+    ["目录", summary.directories || 0],
+    ["变更", changes.length],
+    ["事件", events.length],
+  ]
+    .map(([label, value]) => `<div class="workspace-stat"><b>${pad2(value)}</b><span>${label}</span></div>`)
+    .join("");
+
+  $("#workspaceTreeCount").textContent = pad2(S.workspace?.entries || 0);
+  $("#workspaceChangeCount").textContent = pad2(changes.length);
+  $("#workspaceEventCount").textContent = pad2(events.length);
+  $("#workspaceTree").innerHTML = S.workspace
+    ? workspaceTreeHtml(S.workspace.tree) || '<p class="hint">工作区为空。</p>'
+    : '<p class="hint">选择任务后显示工作区目录。</p>';
+  $("#workspaceChanges").innerHTML = changes.length
+    ? changes.slice().reverse().map(workspaceChangeHtml).join("")
+    : '<p class="hint">暂无文件变更。</p>';
+  $("#workspaceEvents").innerHTML = events.length
+    ? events.slice().reverse().slice(0, 80).map(workspaceEventHtml).join("")
+    : '<p class="hint">任务运行后会记录工具调用和文件变更。</p>';
+  renderWorkspaceSearch();
+  renderWorkspaceConsole();
+}
+
+function renderWorkspaceSearch() {
+  const box = $("#workspaceSearchResults");
+  const search = S.workspace?.search;
+  if (!search?.query) {
+    box.hidden = true;
+    box.innerHTML = "";
+    return;
+  }
+  box.hidden = false;
+  box.innerHTML = search.results?.length
+    ? search.results
+        .map(
+          (item) => `<button class="ws-search-item" type="button" data-workspace-file="${workspacePathData(item.path)}">
+            <b>${escapeHtml(item.path)}:${item.line}:${item.column}</b>
+            <span>${escapeHtml(item.text || "")}</span>
+          </button>`,
+        )
+        .join("")
+    : '<p class="hint">没有匹配内容。</p>';
+}
+
+function workspaceConsoleSearchHtml() {
+  const search = S.workspace?.search;
+  if (!search?.query) return "";
+  if (!search.results?.length) return '<p class="wc-empty-line">没有匹配内容。</p>';
+  return search.results
+    .map(
+      (item) => `<button class="wc-search-item" type="button" data-workspace-file="${workspacePathData(item.path)}">
+        <b>${escapeHtml(item.path)}:${item.line}:${item.column}</b>
+        <span>${escapeHtml(item.text || "")}</span>
+      </button>`,
+    )
+    .join("");
+}
+
+function workspaceConsoleEventHtml(event) {
+  const label = WORKSPACE_EVENT_LABEL[event.type] || event.type;
+  return `<div class="wc-event">
+    <b>${escapeHtml(label)}</b>
+    <span>${escapeHtml(workspaceEventSummary(event) || "—")}</span>
+    <em>${fmtTime(event.at)}</em>
+  </div>`;
+}
+
+function workspaceConsoleContextHtml() {
+  const context = S.task?.context || {};
+  const files = context.files || [];
+  const messages = context.messages || [];
+  const budget = context.budget || {};
+  return `
+    <div class="wc-context-card">
+      <b>GOAL / 当前目标</b>
+      <p>${escapeHtml(context.goal || S.task?.goal || "—")}</p>
+    </div>
+    <div class="wc-context-card">
+      <b>BUDGET / 注入预算</b>
+      <p>消息 ${messages.length}/${budget.messagesAvailable ?? messages.length} · 文件 ${files.length}/${budget.filesAvailable ?? files.length}</p>
+    </div>
+    <div class="wc-context-card">
+      <b>RECENT / 最近协作</b>
+      ${
+        messages.length
+          ? messages
+              .slice(-4)
+              .reverse()
+              .map(
+                (message) => `<p><strong>${escapeHtml(message.name || "AI")}</strong> · ${escapeHtml(
+                  String(message.text || "").slice(0, 220),
+                )}</p>`,
+              )
+              .join("")
+          : '<p>暂无近期协作摘要。</p>'
+      }
+    </div>
+    <div class="wc-context-card">
+      <b>FILES / 已知上下文</b>
+      ${
+        files.length
+          ? files
+              .slice(0, 12)
+              .map(
+                (file) =>
+                  `<div class="wc-file-chip"><span>${escapeHtml(file.path)}</span><i>${fmtBytes(file.bytes)}</i></div>`,
+              )
+              .join("")
+          : '<p>工作区还没有可读取的文件。</p>'
+      }
+    </div>`;
+}
+
+function workspacePolicyAgents() {
+  const plan = S.task?.plan || [];
+  const ids = [...new Set(plan.map((step) => step.agentId).filter(Boolean))];
+  return ids.length
+    ? ids.map((id) => S.agents.find((item) => item.id === id)).filter(Boolean)
+    : S.agents.filter((agent) => agent.seat !== false);
+}
+
+function workspaceConsolePolicyHtml() {
+  const agents = workspacePolicyAgents();
+  if (!agents.length) return '<p class="wc-empty-line">团队里还没有可展示的成员策略。</p>';
+  const labels = new Map(S.toolCatalog.map((tool) => [tool.id, tool.label]));
+  return agents
+    .map((agent) => {
+      const tools = Array.isArray(agent.tools)
+        ? agent.tools
+        : S.roleTools?.[agent.role] || [];
+      return `<div class="wc-policy-card">
+        <b>${escapeHtml(agent.name)} · ${escapeHtml(ROLE_META[agent.role]?.short || agent.role)}</b>
+        <div class="wc-tool-list">${
+          tools.length
+            ? tools
+                .map(
+                  (tool) =>
+                    `<span title="${escapeHtml(tool)}">${escapeHtml(labels.get(tool) || tool)}</span>`,
+                )
+                .join("")
+            : '<span class="off">NO TOOLS</span>'
+        }</div>
+      </div>`;
+    })
+    .join("");
+}
+
+function workspaceConsoleSummaryHtml() {
+  const task = S.task;
+  if (!task) return "";
+  const stats = task.stats || {};
+  const done = (task.plan || []).filter((step) => step.status === "done").length;
+  const changes = S.workspace?.changes || task.fileChanges || [];
+  const events = S.workspace?.events || task.events || [];
+  return `
+    <div class="wc-summary-card"><b>STATUS</b><p>${escapeHtml(STATUS_TEXT[task.status] || task.status)}</p></div>
+    <div class="wc-summary-card"><b>PROGRESS</b><p>${done}/${(task.plan || []).length} 工序完成</p></div>
+    <div class="wc-summary-card"><b>QUALITY</b><p>${escapeHtml(task.quality?.status || "pending")}</p></div>
+    <div class="wc-summary-card"><b>ACTIVITY</b><p>${changes.length} 个变更 · ${events.length} 个事件</p></div>
+    <div class="wc-summary-card"><b>TOKENS</b><p>${Number(stats.tokens || 0).toLocaleString()}</p></div>`;
+}
+
+function workspaceConsoleLanesHtml() {
+  const plan = S.task?.plan || [];
+  if (!plan.length) return '<p class="wc-empty-line">任务开始后，这里会按成员展示工序与依赖。</p>';
+  const groups = new Map();
+  for (const step of plan) {
+    const key = step.agentId || `role:${step.role}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(step);
+  }
+  return [...groups.entries()]
+    .map(([key, steps]) => {
+      const agent = S.agents.find((item) => item.id === key);
+      const role = agent?.role || steps[0]?.role;
+      const name = agent?.name || ROLE_META[role]?.short || role || "未分配";
+      const avatar = agent
+        ? avatarHtml(agent)
+        : `<span class="avatar" style="--c:#b8d94f">${initials(name)}</span>`;
+      return `<div class="wc-lane">
+        <div class="wc-lane-agent">${avatar}<span>${escapeHtml(name)}</span></div>
+        <div class="wc-lane-steps">
+          ${steps
+            .map(
+              (step) => `<div class="wc-step" data-status="${escapeHtml(step.status || "pending")}" title="${escapeHtml(
+                step.note || "",
+              )}">
+                <b>${escapeHtml(step.title || step.id)}</b>
+                <span>${escapeHtml(STEP_STATUS_TEXT[step.status] || step.status || "pending")}${
+                  step.needs?.length ? ` · 依赖 ${step.needs.length}` : ""
+                }${step.attempt > 1 ? ` · 尝试 ${step.attempt}` : ""}</span>
+              </div>`,
+            )
+            .join("")}
+        </div>
+      </div>`;
+    })
+    .join("");
+}
+
+function renderWorkspaceConsoleFile() {
+  const empty = $("#wcFileEmpty");
+  const codeBlock = $("#wcCodeBlock");
+  const code = $("#wcCode");
+  const editor = $("#wcEditor");
+  const data = S.workspacePreviewData;
+  const path = S.workspacePreviewPath;
+  if (!data || !path) {
+    $("#wcFilePath").textContent = "—";
+    $("#wcFileState").textContent = "选择一个文件开始";
+    empty.hidden = false;
+    codeBlock.hidden = true;
+    editor.hidden = true;
+    $("#wcEdit").hidden = true;
+    $("#wcSave").hidden = true;
+    $("#wcDelete").hidden = true;
+    return;
+  }
+  $("#wcFilePath").textContent = path;
+  $("#wcFileState").textContent = `${data.binary ? "BINARY" : (data.lang || "text").toUpperCase()} · ${fmtBytes(
+    data.bytes,
+  )} · ${data.version ? data.version.slice(0, 10) : "unversioned"}`;
+  empty.hidden = true;
+  code.textContent = data.binary ? "[binary file]" : data.content || "";
+  const editing = !editor.hidden;
+  if (!editing) editor.value = data.binary ? "" : data.content || "";
+  codeBlock.hidden = data.binary ? false : editing;
+  editor.hidden = data.binary || !editing;
+  $("#wcEdit").hidden = !!data.binary;
+  $("#wcSave").hidden = !editing;
+  $("#wcDelete").hidden = false;
+}
+
+function renderWorkspaceConsole() {
+  const root = $("#workspaceConsole");
+  if (!root) return;
+  if (!S.task) {
+    S.workspace = null;
+    S.workspacePreviewPath = "";
+    S.workspacePreviewData = null;
+    S.workspaceDiffPath = "";
+    S.workspaceDiff = null;
+    $("#wcTitle").textContent = "未选择任务";
+    $("#wcTaskCode").textContent = "NO TASK";
+    $("#wcMeta").innerHTML = "";
+    $("#wcPath").textContent = "—";
+    $("#wcTree").innerHTML = '<p class="hint">先选择一个任务。</p>';
+    $("#wcChanges").innerHTML = '<p class="hint">暂无文件变更。</p>';
+    $("#wcSearchResults").hidden = true;
+    $("#wcSearchResults").innerHTML = "";
+    $("#wcLanes").innerHTML = '<p class="wc-empty-line">选择任务后显示执行泳道。</p>';
+    $("#wcEvents").innerHTML = '<p class="hint">选择任务后显示运行事件。</p>';
+    $("#wcContext").innerHTML = "";
+    $("#wcPolicy").innerHTML = "";
+    $("#wcSummary").innerHTML = "";
+    $("#wcDiff").textContent = "";
+    $("#wcRunStatus").textContent = "—";
+    $("#wcTreeCount").textContent = "00";
+    $("#wcChangeCount").textContent = "00";
+    $("#wcEventCount").textContent = "00";
+    $("#wcContextCount").textContent = "00";
+    $("#wcPolicyCount").textContent = "00";
+    renderWorkspaceConsoleFile();
+    return;
+  }
+  const info = S.workspace?.info || S.task.workspaceInfo;
+  const summary = S.workspace?.summary || {};
+  const changes = S.workspace?.changes || S.task.fileChanges || [];
+  const events = S.workspace?.events || S.task.events || [];
+  $("#wcTitle").textContent = S.task.title;
+  $("#wcTaskCode").textContent = String(S.task.id || "").slice(0, 8).toUpperCase();
+  $("#wcMeta").innerHTML = info
+    ? [
+        `<span>${
+          info.isolation === "clone"
+            ? "GIT CLONE"
+            : info.isolation === "worktree"
+              ? "GIT WORKTREE"
+              : info.external
+                ? "外部工作区"
+                : "自动工作区"
+        }</span>`,
+        `<span>${info.isGit ? escapeHtml(info.branch || "detached") : "非 Git"}</span>`,
+        info.head ? `<span>HEAD ${escapeHtml(info.head)}</span>` : "",
+        info.source ? `<span title="${escapeHtml(info.source)}">源 ${escapeHtml(shortPath(info.source))}</span>` : "",
+        info.isolation === "clone"
+          ? `<span title="${escapeHtml(info.fallbackReason || "worktree 不可用")}">CLONE 回退</span>`
+          : "",
+        `<span>${summary.files || 0} files</span>`,
+      ]
+        .filter(Boolean)
+        .join("")
+    : "";
+  $("#wcPath").textContent = info?.path || "—";
+  $("#wcTreeCount").textContent = pad2(S.workspace?.entries || 0);
+  $("#wcChangeCount").textContent = pad2(changes.length);
+  $("#wcEventCount").textContent = pad2(events.length);
+  $("#wcContextCount").textContent = pad2((S.task.context?.files || []).length);
+  $("#wcPolicyCount").textContent = pad2(workspacePolicyAgents().length);
+  $("#wcTree").innerHTML = S.workspace
+    ? workspaceTreeHtml(S.workspace.tree) || '<p class="hint">工作区为空。</p>'
+    : '<p class="hint">正在读取工作树…</p>';
+  $("#wcChanges").innerHTML = changes.length
+    ? changes.slice().reverse().map(workspaceChangeHtml).join("")
+    : '<p class="hint">暂无文件变更。</p>';
+  const searchResults = $("#wcSearchResults");
+  const searchHtml = workspaceConsoleSearchHtml();
+  searchResults.hidden = !searchHtml;
+  searchResults.innerHTML = searchHtml;
+  $("#wcLanes").innerHTML = workspaceConsoleLanesHtml();
+  $("#wcEvents").innerHTML = events.length
+    ? events.slice().reverse().slice(0, 120).map(workspaceConsoleEventHtml).join("")
+    : '<p class="hint">任务运行后会记录工具调用、文件变更和运行结果。</p>';
+  $("#wcRunStatus").textContent = STATUS_TEXT[S.task.status] || S.task.status || "—";
+  $("#wcContext").innerHTML = workspaceConsoleContextHtml();
+  $("#wcPolicy").innerHTML = workspaceConsolePolicyHtml();
+  $("#wcSummary").innerHTML = workspaceConsoleSummaryHtml();
+  renderWorkspaceConsoleFile();
+  setWorkspaceConsoleView(S.workspaceConsoleView, { render: false });
+}
+
+function setWorkspaceConsoleView(view, { render = true } = {}) {
+  const next = ["file", "execution", "diff"].includes(view) ? view : "file";
+  S.workspaceConsoleView = next;
+  $$("#wcViewTabs [data-wc-view]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.wcView === next);
+  });
+  $("#wcFileView").hidden = next !== "file";
+  $("#wcExecutionView").hidden = next !== "execution";
+  $("#wcDiffView").hidden = next !== "diff";
+  if (render && next === "diff") loadWorkspaceConsoleDiff();
+}
+
+async function loadWorkspaceConsoleDiff() {
+  if (!S.task) return;
+  const path = S.workspaceDiffPath || S.workspacePreviewPath || "";
+  $("#wcDiffTitle").textContent = path || "整个工作区";
+  $("#wcDiff").textContent = "正在读取 Git diff…";
+  try {
+    const data = await api(
+      `/api/tasks/${S.task.id}/diff${path ? `?path=${encodeURIComponent(path)}` : ""}`,
+    );
+    S.workspaceDiff = data;
+    $("#wcDiff").textContent = data.available
+      ? data.diff || "没有差异。"
+      : data.reason || data.error || "当前工作区没有可用的 diff。";
+  } catch (err) {
+    $("#wcDiff").textContent = `读取失败：${err.message}`;
+  }
+}
+
+function openWorkspaceConsole() {
+  if (!S.task) {
+    toast("先选择一个任务", "err");
+    return;
+  }
+  S.workspaceConsoleOpen = true;
+  $("#workspaceConsole").hidden = false;
+  document.body.classList.add("workspace-console-open");
+  renderWorkspaceConsole();
+  if (!S.workspace) loadWorkspace({ force: true });
+  setTimeout(() => $("#wcSearch").focus(), 40);
+}
+
+function closeWorkspaceConsole() {
+  S.workspaceConsoleOpen = false;
+  $("#workspaceConsole").hidden = true;
+  document.body.classList.remove("workspace-console-open");
+}
+
+async function searchWorkspaceFrom(inputId = "#workspaceSearch") {
+  if (!S.task) return;
+  const query = $(inputId)?.value.trim() || "";
+  if (query.length < 2) {
+    if (S.workspace) S.workspace.search = null;
+    renderWorkspaceSearch();
+    renderWorkspaceConsole();
+    return;
+  }
+  try {
+    const data = await api(`/api/tasks/${S.task.id}/search?q=${encodeURIComponent(query)}`);
+    if (!S.workspace) S.workspace = {};
+    S.workspace.search = data;
+    renderWorkspaceSearch();
+    renderWorkspaceConsole();
+  } catch (err) {
+    toast(`搜索失败：${err.message}`, "err");
+  }
+}
+
+async function loadWorkspace({ force = false } = {}) {
+  const taskId = S.task?.id;
+  if (!taskId || (S.workspaceLoading && !force)) return;
+  S.workspaceLoading = true;
+  try {
+    const data = await api(`/api/tasks/${taskId}/workspace`);
+    if (!S.task || S.task.id !== taskId) return;
+    S.workspace = { ...(S.workspace || {}), ...data };
+    renderWorkspace();
+  } catch (err) {
+    if (S.task?.id === taskId) toast(`工作区加载失败：${err.message}`, "err");
+  } finally {
+    S.workspaceLoading = false;
+  }
+}
+
+function scheduleWorkspaceRefresh() {
+  if (!S.task) return;
+  clearTimeout(S.workspaceRefreshTimer);
+  S.workspaceRefreshTimer = setTimeout(() => loadWorkspace(), 260);
+}
+
+async function searchWorkspaceFiles() {
+  if (!S.task) return;
+  const query = $("#workspaceSearch").value.trim();
+  if (query.length < 2) {
+    if (S.workspace) S.workspace.search = null;
+    renderWorkspaceSearch();
+    return;
+  }
+  try {
+    const data = await api(`/api/tasks/${S.task.id}/search?q=${encodeURIComponent(query)}`);
+    if (!S.workspace) S.workspace = {};
+    S.workspace.search = data;
+    renderWorkspaceSearch();
+  } catch (err) {
+    toast(`搜索失败：${err.message}`, "err");
+  }
+}
+
 async function previewWorkspaceFile(rel) {
   if (!rel || !S.task) return;
   try {
-    const { path, content } = await api(
+    const data = await api(
       `/api/tasks/${S.task.id}/file?path=${encodeURIComponent(rel)}`,
     );
-    switchTab("files");
-    $("#fileViewPath").textContent = path;
-    $("#fileViewCode").textContent = content;
-    $("#fileView").hidden = false;
+    if (!S.workspaceConsoleOpen) switchTab("workspace");
+    S.workspacePreviewPath = data.path;
+    S.workspacePreviewData = data;
+    S.workspaceDiffPath = data.path;
+    $("#workspaceFilePath").textContent = data.path;
+    $("#workspaceFileCode").textContent = data.binary
+      ? "[binary file]"
+      : data.content;
+    $("#workspaceFileEditor").value = data.binary ? "" : data.content;
+    $("#workspaceFileEditor").hidden = true;
+    $("#wcEditor").hidden = true;
+    $("#workspaceFilePreview").hidden = false;
+    $("#workspaceFileEdit").hidden = !!data.binary;
+    $("#workspaceFileSave").hidden = true;
+    $("#workspaceFileDelete").hidden = false;
+    $("#workspaceFileView").hidden = false;
+    $("#workspaceFileView").scrollIntoView({ block: "nearest" });
+    renderWorkspaceConsoleFile();
   } catch (err) {
     toast(err.message, "err");
+  }
+}
+
+function closeWorkspacePreview() {
+  S.workspacePreviewPath = "";
+  S.workspacePreviewData = null;
+  $("#workspaceFileView").hidden = true;
+  renderWorkspaceConsoleFile();
+}
+
+function editWorkspaceFile() {
+  if (!S.workspacePreviewData || S.workspacePreviewData.binary) return;
+  $("#workspaceFileCode").textContent = S.workspacePreviewData.content;
+  $("#workspaceFilePreview").hidden = true;
+  $("#workspaceFileEditor").hidden = false;
+  $("#workspaceFileEdit").hidden = true;
+  $("#workspaceFileSave").hidden = false;
+  $("#workspaceFileEditor").focus();
+  $("#wcCodeBlock").hidden = true;
+  $("#wcEditor").hidden = false;
+  $("#wcEditor").value = S.workspacePreviewData.content || "";
+  $("#wcEdit").hidden = true;
+  $("#wcSave").hidden = false;
+  $("#wcEditor").focus();
+}
+
+async function saveWorkspaceFile() {
+  if (!S.task || !S.workspacePreviewPath) return;
+  const content = !$("#wcEditor").hidden ? $("#wcEditor").value : $("#workspaceFileEditor").value;
+  try {
+    await api(`/api/tasks/${S.task.id}/fs`, {
+      method: "POST",
+      body: { op: "write", path: S.workspacePreviewPath, content },
+    });
+    toast("文件已保存", "ok");
+    await loadWorkspace({ force: true });
+    await previewWorkspaceFile(S.workspacePreviewPath);
+  } catch (err) {
+    toast(`保存失败：${err.message}`, "err");
+  }
+}
+
+async function deleteWorkspaceFile() {
+  if (!S.task || !S.workspacePreviewPath) return;
+  if (!window.confirm(`将「${S.workspacePreviewPath}」移入回收站？`)) return;
+  try {
+    await api(`/api/tasks/${S.task.id}/fs`, {
+      method: "POST",
+      body: { op: "delete", path: S.workspacePreviewPath },
+    });
+    toast("已移入回收站", "ok");
+    closeWorkspacePreview();
+    await loadWorkspace({ force: true });
+  } catch (err) {
+    toast(`删除失败：${err.message}`, "err");
+  }
+}
+
+async function createWorkspaceFile() {
+  if (!S.task) return;
+  const rel = window.prompt("输入工作区内的相对路径");
+  if (!rel?.trim()) return;
+  try {
+    await api(`/api/tasks/${S.task.id}/fs`, {
+      method: "POST",
+      body: { op: "write", path: rel.trim(), content: "" },
+    });
+    await loadWorkspace({ force: true });
+    await previewWorkspaceFile(rel.trim());
+    editWorkspaceFile();
+  } catch (err) {
+    toast(`新建失败：${err.message}`, "err");
   }
 }
 
@@ -1224,6 +1872,7 @@ function renderAll() {
   renderPlan();
   renderDebate();
   renderFiles();
+  renderWorkspace();
   renderStats();
   renderContext();
   renderFlow();
@@ -1238,12 +1887,20 @@ async function selectTask(id) {
     S.task = task;
     S.atBottom = true;
     S.openStep = "";
+    S.workspace = null;
+    S.workspacePreviewPath = "";
+    S.workspacePreviewData = null;
+    S.workspaceDiffPath = "";
+    S.workspaceDiff = null;
+    closeWorkspacePreview();
+    $("#workspaceSearch").value = "";
     // 换任务时关掉上一个任务的产物预览，避免内容错位
     $("#fileView").hidden = true;
     $("#fileViewPath").textContent = "—";
     $("#fileViewCode").textContent = "";
     closeDrawers();
     renderAll();
+    loadWorkspace();
   } catch (err) {
     toast(`加载任务失败：${err.message}`, "err");
   }
@@ -1259,6 +1916,7 @@ async function syncCurrentTask() {
     if (!S.task || S.task.id !== id) return;
     S.task = task;
     renderAll();
+    scheduleWorkspaceRefresh();
   } catch {
     /* SSE 重连后再试 */
   } finally {
@@ -1272,18 +1930,27 @@ async function createTask(goal) {
     toast("再具体一点，至少 2 个字", "err");
     return;
   }
+  if (S.worktree && !S.dir) {
+    toast("隔离工作树需要先选择一个 Git 项目目录", "err");
+    return;
+  }
   try {
     $("#heroStart").disabled = true;
     const body = { goal: text, flowMode: S.flowMode === "direct" ? "direct" : "debate" };
     if (S.dir) body.workspace = S.dir;
+    if (S.dir && S.worktree) body.isolation = "worktree";
     const { task } = await api("/api/tasks", { method: "POST", body });
     S.task = task;
+    S.workspace = null;
+    S.workspacePreviewData = null;
+    $("#workspaceSearch").value = "";
     if (!S.tasks.find((t) => t.id === task.id)) S.tasks.unshift({ ...task });
     $("#heroInput").value = "";
     $("#input").value = "";
     // 直接开工没有讨论可看，落到执行链路；先讨论则停在讨论页看提案
     switchTab(S.flowMode === "direct" ? "plan" : "debate");
     renderAll();
+    loadWorkspace();
     toast(S.flowMode === "direct" ? "团队已按「直接开工」开工" : "团队已开工，先出方案再实施", "ok");
   } catch (err) {
     toast(`创建失败：${err.message}`, "err");
@@ -1453,11 +2120,55 @@ function handleEvent(ev) {
         else cur.artifacts.push(ev.file);
         renderFiles();
         renderStats();
+        scheduleWorkspaceRefresh();
         const summary = S.tasks.find((t) => t.id === ev.taskId);
         if (summary) {
           summary.files = cur.artifacts.length;
           renderTasks();
         }
+      }
+      break;
+    }
+    case "artifact.removed": {
+      if (cur && cur.id === ev.taskId) {
+        const artifact = cur.artifacts.find((f) => f.path === ev.file.path);
+        if (artifact) Object.assign(artifact, ev.file);
+        renderFiles();
+        renderStats();
+        scheduleWorkspaceRefresh();
+      }
+      break;
+    }
+    case "file.changed": {
+      if (cur && cur.id === ev.taskId) {
+        if (!cur.fileChanges) cur.fileChanges = [];
+        const existing = cur.fileChanges.find((item) => item.path === ev.change.path);
+        if (existing) Object.assign(existing, ev.change);
+        else cur.fileChanges.push(ev.change);
+        if (S.workspace) {
+          if (!S.workspace.changes) S.workspace.changes = [];
+          const workspaceChange = S.workspace.changes.find((item) => item.path === ev.change.path);
+          if (workspaceChange) Object.assign(workspaceChange, ev.change);
+          else S.workspace.changes.push(ev.change);
+        }
+        scheduleWorkspaceRefresh();
+      }
+      break;
+    }
+    case "task.event": {
+      if (cur && cur.id === ev.taskId) {
+        if (!cur.events) cur.events = [];
+        cur.events.push(ev.event);
+        if (cur.events.length > 160) cur.events.splice(0, cur.events.length - 160);
+        if (S.workspace) {
+          if (!S.workspace.events) S.workspace.events = [];
+          S.workspace.events.push(ev.event);
+          if (S.workspace.events.length > 160) {
+            S.workspace.events.splice(0, S.workspace.events.length - 160);
+          }
+          renderWorkspace();
+        }
+        scheduleWorkspaceRefresh();
       }
       break;
     }
@@ -1500,8 +2211,10 @@ function handleEvent(ev) {
 
 async function refreshAgents() {
   try {
-    const { agents } = await api("/api/agents");
-    S.agents = normalizeAgentSeats(agents);
+    const data = await api("/api/agents");
+    S.agents = normalizeAgentSeats(data.agents);
+    S.toolCatalog = data.toolCatalog || S.toolCatalog;
+    S.roleTools = data.roleTools || S.roleTools;
     renderAgents();
     renderPlan();
   } catch {
@@ -1692,6 +2405,7 @@ async function loadDir(p) {
 
 function openDirModal() {
   $("#dirModal").showModal();
+  $("#dirWorktree").checked = !!S.worktree;
   loadDir(S.dir || "");
 }
 
@@ -1719,6 +2433,26 @@ const ROLE_TITLE = {
 };
 
 let editingId = null;
+
+function renderAgentToolChoices(selected, role) {
+  const wrap = $("#agentTools");
+  if (!wrap) return;
+  if (!S.toolCatalog.length) {
+    wrap.innerHTML = '<p class="hint">工具目录尚未加载。</p>';
+    return;
+  }
+  const chosen = new Set(Array.isArray(selected) ? selected : S.roleTools?.[role] || []);
+  wrap.innerHTML = S.toolCatalog
+    .map(
+      (tool) => `<label class="tool-option">
+        <input type="checkbox" name="tools" value="${escapeHtml(tool.id)}" ${
+          chosen.has(tool.id) ? "checked" : ""
+        } />
+        <span><b>${escapeHtml(tool.label)}</b><em>${escapeHtml(tool.id)}</em></span>
+      </label>`,
+    )
+    .join("");
+}
 
 /**
  * @param {object|null} agent 传对象即编辑模式
@@ -1749,6 +2483,7 @@ function openAgentModal(agent = null, preset = null) {
   $("#agentModalTitle").textContent = agent ? `编辑 · ${agent.name}` : "接入新的智能体";
   $("#agentSubmit").textContent = agent ? "保存修改" : "加入团队";
   $("#agentDelete").hidden = !agent;
+  renderAgentToolChoices(agent?.tools, f("role").value);
   syncAgentMode();
   $("#agentModal").showModal();
   if (!agent) setTimeout(() => f("name").focus(), 40);
@@ -1799,8 +2534,10 @@ function switchTab(tab) {
   $("#pane-plan").hidden = tab !== "plan";
   $("#pane-context").hidden = tab !== "context";
   $("#pane-debate").hidden = tab !== "debate";
+  $("#pane-workspace").hidden = tab !== "workspace";
   $("#pane-files").hidden = tab !== "files";
   $("#pane-stats").hidden = tab !== "stats";
+  if (tab === "workspace" && S.task && !S.workspace) loadWorkspace();
 }
 
 /* ---------------- 绑定 ---------------- */
@@ -1869,6 +2606,12 @@ function bind() {
   $("#addAgentBtn").addEventListener("click", () => openAgentModal(null));
 
   $("#modeSelect").addEventListener("change", syncAgentMode);
+  $("#agentForm").elements.role.addEventListener("change", (e) => {
+    renderAgentToolChoices(null, e.target.value);
+  });
+  $("#agentToolsDefault").addEventListener("click", () => {
+    renderAgentToolChoices(null, $("#agentForm").elements.role.value);
+  });
 
   // 关闭按钮必须是 type=button：否则会触发原生表单校验，
   // required 未填时 submit 事件根本不发生，method=dialog 也关不掉弹窗
@@ -1898,6 +2641,7 @@ function bind() {
       title: ROLE_TITLE[role] || "自定义智能体",
       mode,
       seat: fd.get("seat") === "on",
+      tools: fd.getAll("tools").map(String),
       cli: { command, args: argsStr ? argsStr.split(/\s+/) : [] },
     };
     try {
@@ -2012,6 +2756,73 @@ function bind() {
   $("#fileClose").addEventListener("click", () => {
     $("#fileView").hidden = true;
   });
+  $("#workspaceRefresh").addEventListener("click", () => loadWorkspace({ force: true }));
+  $("#workspaceSearchBtn").addEventListener("click", searchWorkspaceFiles);
+  $("#workspaceNewFile").addEventListener("click", createWorkspaceFile);
+  $("#workspaceSearch").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") searchWorkspaceFiles();
+    if (e.key === "Escape") {
+      e.target.value = "";
+      if (S.workspace) S.workspace.search = null;
+      renderWorkspaceSearch();
+    }
+  });
+  $("#workspaceTree").addEventListener("click", (e) => {
+    const file = e.target.closest("[data-workspace-file]");
+    if (!file) return;
+    previewWorkspaceFile(decodeURIComponent(file.dataset.workspaceFile));
+  });
+  $("#workspaceSearchResults").addEventListener("click", (e) => {
+    const file = e.target.closest("[data-workspace-file]");
+    if (!file) return;
+    previewWorkspaceFile(decodeURIComponent(file.dataset.workspaceFile));
+  });
+  $("#workspaceChanges").addEventListener("click", (e) => {
+    const file = e.target.closest("[data-workspace-file]");
+    if (!file) return;
+    previewWorkspaceFile(decodeURIComponent(file.dataset.workspaceFile));
+  });
+  $("#workspaceFileClose").addEventListener("click", closeWorkspacePreview);
+  $("#workspaceFileEdit").addEventListener("click", editWorkspaceFile);
+  $("#workspaceFileSave").addEventListener("click", saveWorkspaceFile);
+  $("#workspaceFileDelete").addEventListener("click", deleteWorkspaceFile);
+
+  /* 全屏工作区控制台 */
+  $("#workspaceExpand").addEventListener("click", openWorkspaceConsole);
+  $("#wcClose").addEventListener("click", closeWorkspaceConsole);
+  $("#wcRefresh").addEventListener("click", () => loadWorkspace({ force: true }));
+  $("#wcSearchBtn").addEventListener("click", () => searchWorkspaceFrom("#wcSearch"));
+  $("#wcSearch").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") searchWorkspaceFrom("#wcSearch");
+    if (e.key === "Escape") {
+      e.target.value = "";
+      if (S.workspace) S.workspace.search = null;
+      renderWorkspaceSearch();
+      renderWorkspaceConsole();
+    }
+  });
+  $("#wcViewTabs").addEventListener("click", (e) => {
+    const button = e.target.closest("[data-wc-view]");
+    if (button) setWorkspaceConsoleView(button.dataset.wcView);
+  });
+  $("#wcTree").addEventListener("click", (e) => {
+    const file = e.target.closest("[data-workspace-file]");
+    if (file) previewWorkspaceFile(decodeURIComponent(file.dataset.workspaceFile));
+  });
+  $("#wcSearchResults").addEventListener("click", (e) => {
+    const file = e.target.closest("[data-workspace-file]");
+    if (file) previewWorkspaceFile(decodeURIComponent(file.dataset.workspaceFile));
+  });
+  $("#wcChanges").addEventListener("click", (e) => {
+    const file = e.target.closest("[data-workspace-file]");
+    if (!file) return;
+    S.workspaceDiffPath = decodeURIComponent(file.dataset.workspaceFile);
+    previewWorkspaceFile(S.workspaceDiffPath);
+  });
+  $("#wcEdit").addEventListener("click", editWorkspaceFile);
+  $("#wcSave").addEventListener("click", saveWorkspaceFile);
+  $("#wcDelete").addEventListener("click", deleteWorkspaceFile);
+  $("#wcDiffRefresh").addEventListener("click", loadWorkspaceConsoleDiff);
 
   $("#copyHook").addEventListener("click", async () => {
     const url = `${location.origin}/api/hooks/${S.settings.hookToken || ""}`;
@@ -2038,6 +2849,9 @@ function bind() {
 
   /* 工作目录 */
   $("#dirPick").addEventListener("click", openDirModal);
+  $("#dirWorktree").addEventListener("change", (e) => {
+    S.worktree = !!e.target.checked;
+  });
   $("#dirUp").addEventListener("click", () => {
     if (dirParent) loadDir(dirParent);
   });
@@ -2056,6 +2870,8 @@ function bind() {
   });
   $("#dirReset").addEventListener("click", () => {
     setDir("");
+    S.worktree = false;
+    $("#dirWorktree").checked = false;
     $("#dirModal").close();
     toast("改为自动新建工作区", "");
   });
@@ -2086,7 +2902,10 @@ function bind() {
 
   /* 快捷键 */
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeDrawers();
+    if (e.key === "Escape") {
+      if (S.workspaceConsoleOpen) closeWorkspaceConsole();
+      closeDrawers();
+    }
     if (e.key === "/" && document.activeElement?.tagName !== "TEXTAREA" && document.activeElement?.tagName !== "INPUT") {
       e.preventDefault();
       $("#input").focus();
@@ -2124,6 +2943,8 @@ async function boot() {
   try {
     const state = await api("/api/state");
     S.agents = normalizeAgentSeats(state.agents);
+    S.toolCatalog = state.toolCatalog || [];
+    S.roleTools = state.roleTools || {};
     S.tasks = state.tasks;
     S.settings = state.settings || {};
     if (state.activeTask) S.task = state.activeTask;
@@ -2131,11 +2952,12 @@ async function boot() {
     renderFlowModeControls();
     renderAll();
     renderStats();
+    if (S.task) loadWorkspace();
     connect();
     // 默认落在执行链路；支持 #debate / #settings 这类深链直接打开对应面板
     const hashTab = location.hash.replace("#", "");
     if (hashTab === "settings") openFlowSettings();
-    else switchTab(["context", "debate", "plan", "files", "stats"].includes(hashTab) ? hashTab : S.tab);
+    else switchTab(["context", "debate", "plan", "workspace", "files", "stats"].includes(hashTab) ? hashTab : S.tab);
   } catch (err) {
     $("#connState").textContent = "服务未启动";
     toast(`无法连接后端：${err.message}`, "err");

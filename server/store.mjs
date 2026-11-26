@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { estimateTokens } from './tokens.mjs';
 
 export const ROOT = path.resolve(import.meta.dirname, '..');
@@ -11,6 +12,8 @@ export const WORKSPACE_DIR = path.join(DATA_DIR, 'workspaces');
 const DB_FILE = path.join(DATA_DIR, 'db.json');
 
 const MAX_MESSAGES = 400;
+const MAX_TASK_EVENTS = 800;
+const MAX_FILE_CHANGES = 500;
 
 export const ROLE_ORDER = ['planner', 'architect', 'coder', 'tester', 'reviewer'];
 export const ROLE_LABEL = {
@@ -20,6 +23,40 @@ export const ROLE_LABEL = {
   tester: '测试',
   reviewer: '评审',
 };
+
+export const TOOL_CATALOG = [
+  { id: 'workspace.read', label: '读取工作区' },
+  { id: 'workspace.search', label: '搜索工作区' },
+  { id: 'workspace.write', label: '创建或修改文件' },
+  { id: 'workspace.move', label: '移动或重命名' },
+  { id: 'workspace.delete', label: '移入回收站' },
+  { id: 'shell', label: '执行 Shell' },
+];
+
+export const ROLE_TOOLS = {
+  planner: ['workspace.read', 'workspace.search'],
+  architect: ['workspace.read', 'workspace.search'],
+  coder: [
+    'workspace.read',
+    'workspace.search',
+    'workspace.write',
+    'workspace.move',
+    'workspace.delete',
+    'shell',
+  ],
+  tester: ['workspace.read', 'workspace.search', 'workspace.write', 'shell'],
+  reviewer: ['workspace.read', 'workspace.search', 'shell'],
+};
+
+export function toolsForRole(role) {
+  return [...(ROLE_TOOLS[role] || ROLE_TOOLS.coder)];
+}
+
+export function normalizeTools(value, role) {
+  const allowed = new Set(TOOL_CATALOG.map((tool) => tool.id));
+  const input = Array.isArray(value) ? value : toolsForRole(role);
+  return [...new Set(input.filter((tool) => allowed.has(String(tool))))];
+}
 
 /** 默认团队：覆盖「规划 → 架构 → 实现 → 测试 → 评审」完整链路 */
 function defaultAgents() {
@@ -31,6 +68,7 @@ function defaultAgents() {
     color,
     tagline,
     skills,
+    tools: toolsForRole(role),
     mode: 'sim',
     // 内置演示席位：服务启动后会用本机真实 CLI 顶替（见 server/team.mjs）
     builtin: true,
@@ -80,6 +118,101 @@ function normalizeSeats(agents) {
   }
 }
 
+function runGit(root, args, timeout = 15000) {
+  const result = spawnSync('git', ['-C', root, ...args], {
+    encoding: 'utf8',
+    timeout,
+    windowsHide: true,
+  });
+  return {
+    ok: result.status === 0,
+    stdout: String(result.stdout || '').trim(),
+    stderr: String(
+      result.stderr ||
+        result.error?.message ||
+        (result.signal ? `git 被信号 ${result.signal} 终止` : ''),
+    ).trim(),
+  };
+}
+
+function createIsolatedWorkspace(source, taskId) {
+  const check = runGit(source, ['rev-parse', '--is-inside-work-tree']);
+  if (!check.ok || check.stdout !== 'true') {
+    throw new Error('所选目录不是 Git 工作区，无法创建隔离工作树');
+  }
+  const root = path.join(WORKSPACE_DIR, 'worktrees', taskId);
+  fs.mkdirSync(path.dirname(root), { recursive: true });
+  const added = runGit(source, ['worktree', 'add', '--detach', root, 'HEAD']);
+  if (added.ok) {
+    const head = runGit(root, ['rev-parse', '--short', 'HEAD']);
+    return {
+      source,
+      path: root,
+      head: head.ok ? head.stdout : '',
+      mode: 'worktree',
+      createdAt: Date.now(),
+      status: 'active',
+    };
+  }
+
+  // 某些 Windows 文件系统无法正确保存 .git/worktrees 的 ACL。
+  // 共享对象克隆仍能提供独立工作目录，且不会改动源仓库。
+  try {
+    fs.rmSync(root, { recursive: true, force: true });
+  } catch {
+    /* A failed worktree add may not have created the destination. */
+  }
+  const cloned = runGit(source, [
+    'clone',
+    '--shared',
+    '--no-checkout',
+    '--',
+    source,
+    root,
+  ], 120000);
+  if (!cloned.ok) {
+    try {
+      fs.rmSync(root, { recursive: true, force: true });
+    } catch {
+      /* A timed-out clone may still hold files briefly on Windows. */
+    }
+    throw new Error(
+      `创建 Git 隔离工作区失败：${added.stderr || 'worktree add 失败'}；回退 clone 也失败：${cloned.stderr || 'git clone 返回非零状态'}`,
+    );
+  }
+  const checkedOut = runGit(root, ['checkout', '--detach', 'HEAD'], 120000);
+  if (!checkedOut.ok) {
+    try {
+      fs.rmSync(root, { recursive: true, force: true });
+    } catch {
+      /* The failed clone may still hold files briefly on Windows. */
+    }
+    throw new Error(`Git 隔离工作区已创建，但检出 HEAD 失败：${checkedOut.stderr}`);
+  }
+  const head = runGit(root, ['rev-parse', '--short', 'HEAD']);
+  return {
+    source,
+    path: root,
+    head: head.ok ? head.stdout : '',
+    mode: 'clone',
+    fallbackReason: added.stderr.slice(0, 300),
+    createdAt: Date.now(),
+    status: 'active',
+  };
+}
+
+function removeWorktree(task) {
+  if (!task?.worktree?.source || !task.worktree.path) return;
+  if (task.worktree.mode !== 'clone') {
+    runGit(task.worktree.source, ['worktree', 'remove', '--force', task.worktree.path]);
+  }
+  try {
+    fs.rmSync(task.worktree.path, { recursive: true, force: true });
+  } catch {
+    /* Git may already have removed the directory. */
+  }
+}
+
 class Store {
   constructor() {
     this.db = emptyDb();
@@ -101,11 +234,14 @@ class Store {
         };
         // 运行状态不跨进程保留
         normalizeSeats(this.db.agents);
+        let recovered = false;
         for (const a of this.db.agents) {
           a.status = 'idle';
           a.activity = '';
+          const tools = normalizeTools(a.tools, a.role);
+          if (JSON.stringify(tools) !== JSON.stringify(a.tools || [])) recovered = true;
+          a.tools = tools;
         }
-        let recovered = false;
         for (const t of this.db.tasks) {
           if (t.status === 'running' || t.status === 'stopping') {
             t.status = 'stopped';
@@ -137,6 +273,12 @@ class Store {
             recovered = true;
           }
           for (const m of t.messages || []) if (!m.done) m.done = true;
+          if (!Array.isArray(t.events)) t.events = [];
+          if (!Array.isArray(t.fileChanges)) t.fileChanges = [];
+          if (t.events.length > MAX_TASK_EVENTS) t.events.splice(0, t.events.length - MAX_TASK_EVENTS);
+          if (t.fileChanges.length > MAX_FILE_CHANGES) {
+            t.fileChanges.splice(0, t.fileChanges.length - MAX_FILE_CHANGES);
+          }
         }
         if (recovered) this.flush();
       } else {
@@ -219,6 +361,7 @@ class Store {
       color: patch.color || '#818cf8',
       tagline: patch.tagline || '',
       skills: patch.skills || [],
+      tools: normalizeTools(patch.tools, role),
       mode: patch.mode === 'cli' ? 'cli' : 'sim',
       builtin: false,
       health: patch.health || null,
@@ -253,10 +396,14 @@ class Store {
     const prevRole = agent.role;
     const prevSeat = agent.seat;
     const prevCli = { ...(agent.cli || {}) };
+    const hasExplicitTools = Array.isArray(patch.tools);
     Object.assign(agent, patch, { id: agent.id });
     // 先把旧 cli 存下来再合并，否则 Object.assign 已经把 agent.cli 覆盖成新对象了
     if (patch.cli) agent.cli = { ...prevCli, ...patch.cli };
     const role = agent.role;
+    if (hasExplicitTools) agent.tools = normalizeTools(patch.tools, role);
+    else if (patch.role && role !== prevRole) agent.tools = toolsForRole(role);
+    else agent.tools = normalizeTools(agent.tools, role);
     if (patch.seat === true) {
       this.demoteRolePeers(role, agent.id);
       agent.seat = true;
@@ -345,10 +492,11 @@ class Store {
     return this.db.tasks.find((t) => t.id === id);
   }
 
-  createTask({ goal, mode = 'auto', workspace = '', debate = null }) {
+  createTask({ goal, mode = 'auto', workspace = '', debate = null, isolation = 'direct' }) {
     const id = randomUUID();
     let root = path.join(WORKSPACE_DIR, id);
     let external = false;
+    let worktree = null;
     if (workspace) {
       const abs = path.resolve(String(workspace).trim());
       let st = null;
@@ -358,8 +506,13 @@ class Store {
         throw new Error(`目录不存在：${abs}`);
       }
       if (!st.isDirectory()) throw new Error(`不是目录：${abs}`);
-      root = abs;
-      external = true;
+      if (isolation === 'worktree') {
+        worktree = createIsolatedWorkspace(abs, id);
+        root = worktree.path;
+      } else {
+        root = abs;
+        external = true;
+      }
     }
     const task = {
       id,
@@ -380,8 +533,12 @@ class Store {
       debate: { status: 'pending', proposals: [], critiques: [], decision: null },
       stats: { tokens: 0, tokensIn: 0, tokensOut: 0, agentRuns: 0, files: 0, ms: 0 },
       workspace: root,
+      sourceWorkspace: worktree?.source || root,
+      worktree,
       // 用已有目录开工时，不替用户新建/改动它的目录结构
       external,
+      events: [],
+      fileChanges: [],
     };
     if (!external) fs.mkdirSync(root, { recursive: true });
     this.db.tasks.unshift(task);
@@ -397,6 +554,8 @@ class Store {
       goal: task.goal,
       mode: task.mode,
       flowMode: task.flowMode || null,
+      sourceWorkspace: task.sourceWorkspace || task.workspace,
+      worktree: task.worktree ? { ...task.worktree } : null,
       status: task.status,
       createdAt: task.createdAt,
       endedAt: task.endedAt,
@@ -408,6 +567,8 @@ class Store {
       doneSteps: task.plan.filter((s) => s.status === 'done').length,
       messages: task.messages.length,
       files: task.artifacts.length,
+      changes: (task.fileChanges || []).length,
+      events: (task.events || []).length,
     };
   }
 
@@ -453,6 +614,7 @@ class Store {
     const task = this.getTask(id);
     if (!task) return false;
     this.db.tasks = this.db.tasks.filter((t) => t.id !== id);
+    removeWorktree(task);
     // 外部目录是用户自己的项目，删任务不能连目录一起删
     const own = path.resolve(task.workspace).startsWith(path.resolve(WORKSPACE_DIR) + path.sep);
     if (!task.external && own) {
@@ -688,11 +850,92 @@ class Store {
     return decision;
   }
 
+  /* ---------- workspace events / changes ---------- */
+  addTaskEvent(taskId, event = {}) {
+    const task = this.getTask(taskId);
+    if (!task) return null;
+    if (!Array.isArray(task.events)) task.events = [];
+    const saved = {
+      id: randomUUID(),
+      at: Date.now(),
+      runId: task.runId || null,
+      agentId: '',
+      stepId: '',
+      type: 'event',
+      ...event,
+    };
+    task.events.push(saved);
+    if (task.events.length > MAX_TASK_EVENTS) {
+      task.events.splice(0, task.events.length - MAX_TASK_EVENTS);
+    }
+    this.broadcast({
+      type: 'task.event',
+      taskId,
+      runId: saved.runId || null,
+      event: { ...saved },
+    });
+    this.save();
+    return saved;
+  }
+
+  addFileChange(taskId, change = {}) {
+    const task = this.getTask(taskId);
+    if (!task || !change.path) return null;
+    if (!Array.isArray(task.fileChanges)) task.fileChanges = [];
+    const existing = task.fileChanges.find((item) => item.path === change.path);
+    const now = Date.now();
+    const saved = {
+      id: randomUUID(),
+      path: change.path,
+      status: change.status || 'M',
+      previousPath: change.previousPath || '',
+      beforeVersion: change.beforeVersion || '',
+      afterVersion: change.afterVersion || '',
+      bytes: Number(change.bytes) || 0,
+      lang: change.lang || '',
+      agentId: change.agentId || '',
+      stepId: change.stepId || '',
+      runId: change.runId || task.runId || null,
+      source: change.source || 'workspace',
+      trashPath: change.trashPath || '',
+      at: now,
+    };
+    if (existing) {
+      Object.assign(existing, saved, {
+        id: existing.id,
+        createdAt: existing.createdAt || existing.at || now,
+      });
+    } else {
+      task.fileChanges.push(saved);
+    }
+    if (task.fileChanges.length > MAX_FILE_CHANGES) {
+      task.fileChanges.splice(0, task.fileChanges.length - MAX_FILE_CHANGES);
+    }
+    this.broadcast({
+      type: 'file.changed',
+      taskId,
+      runId: saved.runId || null,
+      change: { ...saved },
+    });
+    this.addTaskEvent(taskId, {
+      type: 'file.changed',
+      runId: saved.runId || null,
+      agentId: saved.agentId,
+      stepId: saved.stepId,
+      data: { ...saved },
+    });
+    this.save();
+    return saved;
+  }
+
   /* ---------- artifacts ---------- */
   addArtifact(taskId, file) {
     const task = this.getTask(taskId);
     if (!task) return;
     const existing = task.artifacts.find((f) => f.path === file.path);
+    const beforeVersion = existing?.version || file.beforeVersion || '';
+    const afterVersion = file.version || '';
+    const status = file.status || (existing ? 'M' : 'A');
     let saved;
     if (existing) {
       Object.assign(existing, {
@@ -703,6 +946,8 @@ class Store {
         agentId: file.agentId || existing.agentId,
         stepId: file.stepId || existing.stepId || '',
         updatedAt: Date.now(),
+        deletedAt: null,
+        status: '',
       });
       saved = existing;
     } else {
@@ -715,12 +960,55 @@ class Store {
         agentId: file.agentId || '',
         stepId: file.stepId || '',
         createdAt: Date.now(),
+        status: '',
       };
       task.artifacts.push(saved);
     }
     task.stats.files = task.artifacts.length;
     this.broadcast({ type: 'artifact.added', taskId, runId: task.runId || null, file: { ...saved } });
+    if (!existing || beforeVersion !== afterVersion || file.status) {
+      this.addFileChange(taskId, {
+        path: file.path,
+        status,
+        beforeVersion,
+        afterVersion,
+        bytes: file.bytes,
+        lang: file.lang,
+        agentId: file.agentId,
+        stepId: file.stepId,
+        source: file.source || 'artifact',
+      });
+    }
     this.save();
+  }
+
+  markArtifactDeleted(taskId, relPath, meta = {}) {
+    const task = this.getTask(taskId);
+    if (!task) return false;
+    let found = false;
+    for (const artifact of task.artifacts || []) {
+      if (artifact.path !== relPath) continue;
+      artifact.deletedAt = Date.now();
+      artifact.status = 'D';
+      artifact.updatedAt = Date.now();
+      found = true;
+      this.broadcast({
+        type: 'artifact.removed',
+        taskId,
+        runId: task.runId || null,
+        file: { ...artifact },
+      });
+    }
+    this.addFileChange(taskId, {
+      path: relPath,
+      status: 'D',
+      agentId: meta.agentId || '',
+      stepId: meta.stepId || '',
+      trashPath: meta.trashPath || '',
+      source: 'workspace',
+    });
+    this.save();
+    return found;
   }
 }
 
