@@ -10,6 +10,7 @@ const S = {
   providers: [],
   toolCatalog: [],
   roleTools: {},
+  executionPolicies: [],
   tasks: [],
   task: null,
   settings: {},
@@ -31,6 +32,8 @@ const S = {
   workspaceConsoleView: "file",
   workspaceDiffPath: "",
   workspaceDiff: null,
+  agentPolicyPreviewTimer: null,
+  agentPolicyPreviewSeq: 0,
 };
 
 /* ---------------- 工具 ---------------- */
@@ -245,6 +248,18 @@ function normalizeAgentSeats(agents) {
   });
 }
 
+function cliPolicyTag(agent) {
+  if (agent?.mode !== "cli") return "";
+  const policy = agent.cliPolicy || {};
+  const strict = policy.policy === "strict" || agent.executionPolicy === "strict";
+  const status = policy.status || (strict ? "unsupported" : "inherit");
+  const label = status === "enforced" ? "STRICT" : status === "unsupported" ? "BLOCKED" : "INHERIT";
+  const title =
+    policy.reason ||
+    (strict ? "严格策略未通过预检" : "沿用 CLI 自身权限参数");
+  return `<i class="tag policy" data-policy="${escapeHtml(status)}" title="${escapeHtml(title)}">${label}</i>`;
+}
+
 function agentRowHtml(a, reserve = false) {
   const role = reserve ? "工具" : ROLE_META[a.role]?.short || "工具";
   const command = (a.cli?.command || "").split(/[\\/]/).pop();
@@ -269,6 +284,7 @@ function agentRowHtml(a, reserve = false) {
       <span class="agent-name">${escapeHtml(a.name)}
         <i class="tag role" data-role="${reserve ? "tool" : a.role}">${role}</i>
         ${healthTag}
+        ${cliPolicyTag(a)}
       </span>
       <span class="agent-role">${escapeHtml(detail)}${Array.isArray(a.tools) ? ` · ${a.tools.length} TOOLS` : ""}</span>
     </span>
@@ -1019,6 +1035,9 @@ const WORKSPACE_EVENT_LABEL = {
   "tool.call.start": "工具调用",
   "tool.call.end": "工具完成",
   "tool.policy.denied": "策略拒绝",
+  "cli.policy.start": "CLI 策略检查",
+  "cli.policy.end": "CLI 策略生效",
+  "cli.policy.denied": "CLI 策略拦截",
   "message.published": "消息路由",
   "plan.replanned": "计划重规划",
   "file.changed": "文件变更",
@@ -1071,7 +1090,9 @@ function workspaceChangeHtml(change) {
 
 function workspaceEventTone(event) {
   if (event.type === "run.error") return "error";
+  if (event.type === "cli.policy.denied") return "error";
   if (event.type.startsWith("run.")) return "run";
+  if (event.type.startsWith("cli.policy.")) return "tool";
   if (event.type.startsWith("tool.")) return "tool";
   return "file";
 }
@@ -1087,6 +1108,13 @@ function workspaceEventSummary(event) {
   }
   if (event.type === "tool.policy.denied") {
     return `${data.tool || "tool"} · ${data.principal?.name || data.agentId || "unknown"} · 已拒绝`;
+  }
+  if (event.type.startsWith("cli.policy.")) {
+    const sandbox = data.sandbox && data.sandbox !== "cli-default" ? ` · ${data.sandbox}` : "";
+    const status = data.status ? ` · ${data.status}` : "";
+    return `${data.adapter || data.command || "CLI"}${sandbox}${status}${
+      data.reason ? ` · ${data.reason}` : ""
+    }`;
   }
   if (event.type === "message.published") {
     const from = data.from?.name || "—";
@@ -1278,8 +1306,20 @@ function workspaceConsolePolicyHtml() {
       const tools = Array.isArray(agent.tools)
         ? agent.tools
         : S.roleTools?.[agent.role] || [];
+      const policy = agent.cliPolicy || {};
+      const strict = policy.policy === "strict" || agent.executionPolicy === "strict";
+      const policyStatus = policy.status || (strict ? "unsupported" : "inherit");
+      const policyLabel =
+        policyStatus === "enforced"
+          ? "STRICT"
+          : policyStatus === "unsupported"
+            ? "BLOCKED"
+            : "INHERIT";
       return `<div class="wc-policy-card">
-        <b>${escapeHtml(agent.name)} · ${escapeHtml(ROLE_META[agent.role]?.short || agent.role)}</b>
+        <div class="wc-policy-title">
+          <b>${escapeHtml(agent.name)} · ${escapeHtml(ROLE_META[agent.role]?.short || agent.role)}</b>
+          <i data-policy="${escapeHtml(policyStatus)}">${policyLabel}</i>
+        </div>
         <div class="wc-tool-list">${
           tools.length
             ? tools
@@ -1290,6 +1330,12 @@ function workspaceConsolePolicyHtml() {
                 .join("")
             : '<span class="off">NO TOOLS</span>'
         }</div>
+        <p>${escapeHtml(
+          policy.reason ||
+            (strict
+              ? "严格策略尚未通过预检。"
+              : "沿用 CLI 自身参数，平台不强制真实子进程边界。"),
+        )}</p>
       </div>`;
     })
     .join("");
@@ -1420,7 +1466,10 @@ function workspaceConsoleMessagesHtml() {
 }
 
 function toolAuditEntries() {
-  const events = (S.task?.events || []).filter((event) => String(event.type || "").startsWith("tool."));
+  const events = (S.task?.events || []).filter((event) => {
+    const type = String(event.type || "");
+    return type.startsWith("tool.") || type.startsWith("cli.policy.");
+  });
   const calls = new Map();
   for (const event of events) {
     const key = event.data?.callId || event.id;
@@ -1428,7 +1477,10 @@ function toolAuditEntries() {
     const entry = calls.get(key);
     if (event.type === "tool.call.start") entry.start = event;
     else if (event.type === "tool.call.end") entry.end = event;
-    else if (event.type === "tool.policy.denied") entry.denied = event;
+    else if (event.type === "tool.policy.denied" || event.type === "cli.policy.denied") {
+      entry.denied = event;
+    }
+    if (event.type === "cli.policy.end") entry.policyEnd = event;
     entry.at = Math.max(entry.at || 0, event.at || 0);
   }
   return [...calls.values()].sort((a, b) => b.at - a.at).slice(0, 120);
@@ -1438,8 +1490,12 @@ function workspaceConsoleAuditHtml() {
   const entries = toolAuditEntries();
   if (!entries.length) return '<p class="wc-empty-line">还没有工具调用审计。</p>';
   return entries
-    .map(({ start, end, denied, at }) => {
+    .map(({ start, end, denied, policyEnd, at }) => {
       const data = end?.data || denied?.data || start?.data || {};
+      const policy =
+        (data.policy && typeof data.policy === "object" ? data.policy : null) ||
+        policyEnd?.data ||
+        (start?.data?.policy && typeof start.data.policy === "object" ? start.data.policy : null);
       const status = data.status || (end ? "ok" : denied ? "denied" : "running");
       const actor = data.principal?.name || data.agentId || "Owner UI";
       const args = data.arguments
@@ -1459,10 +1515,21 @@ function workspaceConsoleAuditHtml() {
           <span>${escapeHtml(actor)}</span>
           <span>${escapeHtml(data.source || "runtime")}</span>
           ${data.durationMs !== undefined ? `<span>${fmtMs(data.durationMs)}</span>` : ""}
+          ${
+            policy?.policy
+              ? `<span>${escapeHtml(
+                  policy.status === "enforced"
+                    ? `STRICT · ${policy.sandbox}`
+                    : policy.status === "unsupported"
+                      ? "STRICT · BLOCKED"
+                      : "INHERIT",
+                )}</span>`
+              : ""
+          }
           <span>${fmtTime(at)}</span>
         </div>
         ${args ? `<code>${escapeHtml(args)}</code>` : ""}
-        ${data.error ? `<p>${escapeHtml(data.error)}</p>` : ""}
+        ${data.error || policy?.reason ? `<p>${escapeHtml(data.error || policy.reason)}</p>` : ""}
       </article>`;
     })
     .join("");
@@ -2455,6 +2522,7 @@ async function refreshAgents() {
     S.providers = data.providers || S.providers;
     S.toolCatalog = data.toolCatalog || S.toolCatalog;
     S.roleTools = data.roleTools || S.roleTools;
+    S.executionPolicies = data.executionPolicies || S.executionPolicies;
     renderAgents();
     renderPlan();
     renderProviders();
@@ -2834,6 +2902,45 @@ function renderAgentToolChoices(selected, role) {
     .join("");
 }
 
+function renderAgentPolicyPreview() {
+  const form = $("#agentForm");
+  const node = $("#agentPolicyPreview");
+  if (!form || !node) return;
+  const seq = ++S.agentPolicyPreviewSeq;
+  clearTimeout(S.agentPolicyPreviewTimer);
+  S.agentPolicyPreviewTimer = setTimeout(async () => {
+    const tools = new FormData(form).getAll("tools").map(String);
+    const policy = String(form.elements.namedItem("executionPolicy")?.value || "inherit");
+    const command = String(form.elements.namedItem("command")?.value || "").trim();
+    const query = new URLSearchParams({
+      policy,
+      command,
+      tools: tools.join(","),
+    });
+    node.dataset.status = "checking";
+    node.textContent = "正在检查 CLI 强制能力…";
+    try {
+      const result = await api(`/api/cli-policy?${query.toString()}`);
+      if (seq !== S.agentPolicyPreviewSeq) return;
+      const preview = result.policy || {};
+      if (preview.status === "enforced") {
+        node.dataset.status = "enforced";
+        node.textContent = `${preview.adapter} · ${preview.sandbox} · ${preview.boundary}`;
+      } else if (preview.status === "unsupported") {
+        node.dataset.status = "blocked";
+        node.textContent = `启动会被拒绝：${preview.reason}`;
+      } else {
+        node.dataset.status = "inherit";
+        node.textContent = "沿用 CLI 自身参数，平台不强制真实子进程边界。";
+      }
+    } catch (err) {
+      if (seq !== S.agentPolicyPreviewSeq) return;
+      node.dataset.status = "blocked";
+      node.textContent = `策略预检失败：${err.message}`;
+    }
+  }, 180);
+}
+
 /**
  * @param {object|null} agent 传对象即编辑模式
  * @param {object|null} preset 新建时预填（用于未安装 CLI 的「手动接入」）
@@ -2851,6 +2958,7 @@ function openAgentModal(agent = null, preset = null) {
     f("mode").value = agent.mode === "cli" ? "cli" : "sim";
     f("command").value = agent.cli?.command || "";
     f("args").value = (agent.cli?.args || []).join(" ");
+    f("executionPolicy").value = agent.executionPolicy === "strict" ? "strict" : "inherit";
     f("providerId").value = agent.providerId || "local-default";
     f("fallbackProviderIds").value = (agent.fallbackProviderIds || []).join(", ");
     f("seat").checked = agent.seat !== false;
@@ -2859,6 +2967,7 @@ function openAgentModal(agent = null, preset = null) {
     f("mode").value = "cli";
     f("command").value = preset.command || "";
     f("args").value = preset.args || "run {{prompt}}";
+    f("executionPolicy").value = "inherit";
     f("providerId").value = "local-default";
     f("fallbackProviderIds").value = "";
     f("seat").checked = false;
@@ -2869,6 +2978,7 @@ function openAgentModal(agent = null, preset = null) {
   $("#agentSubmit").textContent = agent ? "保存修改" : "加入团队";
   $("#agentDelete").hidden = !agent;
   renderAgentToolChoices(agent?.tools, f("role").value);
+  renderAgentPolicyPreview();
   syncAgentMode();
   $("#agentModal").showModal();
   if (!agent) setTimeout(() => f("name").focus(), 40);
@@ -2993,10 +3103,15 @@ function bind() {
   $("#modeSelect").addEventListener("change", syncAgentMode);
   $("#agentForm").elements.role.addEventListener("change", (e) => {
     renderAgentToolChoices(null, e.target.value);
+    renderAgentPolicyPreview();
   });
   $("#agentToolsDefault").addEventListener("click", () => {
     renderAgentToolChoices(null, $("#agentForm").elements.role.value);
+    renderAgentPolicyPreview();
   });
+  $("#agentForm").elements.executionPolicy.addEventListener("change", renderAgentPolicyPreview);
+  $("#agentForm").elements.command.addEventListener("input", renderAgentPolicyPreview);
+  $("#agentTools").addEventListener("change", renderAgentPolicyPreview);
 
   // 关闭按钮必须是 type=button：否则会触发原生表单校验，
   // required 未填时 submit 事件根本不发生，method=dialog 也关不掉弹窗
@@ -3025,6 +3140,7 @@ function bind() {
       color: String(fd.get("color") || "#ff5538"),
       title: ROLE_TITLE[role] || "自定义智能体",
       mode,
+      executionPolicy: String(fd.get("executionPolicy") || "inherit"),
       providerId: String(fd.get("providerId") || "local-default"),
       fallbackProviderIds: String(fd.get("fallbackProviderIds") || "")
         .split(",")
@@ -3360,6 +3476,7 @@ async function boot() {
     S.providers = state.providers || [];
     S.toolCatalog = state.toolCatalog || [];
     S.roleTools = state.roleTools || {};
+    S.executionPolicies = state.executionPolicies || [];
     S.tasks = state.tasks;
     S.settings = state.settings || {};
     S.scheduler = state.scheduler || null;

@@ -16,6 +16,7 @@ import {
   redactProvider,
   resolveProvider,
 } from './providers.mjs';
+import { normalizeExecutionPolicy } from './cli-policy.mjs';
 
 export const ROOT = path.resolve(import.meta.dirname, '..');
 export const DATA_DIR = process.env.AGENTFORGE_DATA_DIR
@@ -218,6 +219,7 @@ function defaultAgents() {
     tagline,
     skills,
     tools: toolsForRole(role),
+    executionPolicy: 'inherit',
     mode: 'sim',
     providerId: DEFAULT_PROVIDER_ID,
     fallbackProviderIds: [],
@@ -452,6 +454,9 @@ class Store {
           const tools = normalizeTools(a.tools, a.role);
           if (JSON.stringify(tools) !== JSON.stringify(a.tools || [])) recovered = true;
           a.tools = tools;
+          const executionPolicy = normalizeExecutionPolicy(a.executionPolicy);
+          if (executionPolicy !== a.executionPolicy) recovered = true;
+          a.executionPolicy = executionPolicy;
         }
         for (const t of this.db.tasks) {
           if (t.status === 'running' || t.status === 'stopping' || t.status === 'queued') {
@@ -634,6 +639,7 @@ class Store {
       tagline: patch.tagline || '',
       skills: patch.skills || [],
       tools: normalizeTools(patch.tools, role),
+      executionPolicy: normalizeExecutionPolicy(patch.executionPolicy),
       mode: patch.mode === 'cli' ? 'cli' : 'sim',
       providerId: this.getProvider(String(patch.providerId || DEFAULT_PROVIDER_ID))
         ? String(patch.providerId || DEFAULT_PROVIDER_ID)
@@ -704,6 +710,7 @@ class Store {
     if (hasExplicitTools) agent.tools = normalizeTools(patch.tools, role);
     else if (patch.role && role !== prevRole) agent.tools = toolsForRole(role);
     else agent.tools = normalizeTools(agent.tools, role);
+    agent.executionPolicy = normalizeExecutionPolicy(agent.executionPolicy);
     if (patch.seat === true) {
       this.demoteRolePeers(role, agent.id);
       agent.seat = true;

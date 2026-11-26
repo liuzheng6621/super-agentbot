@@ -8,6 +8,7 @@ import { versionOf, spillText } from './fs.mjs';
 import { estimateTokens } from './tokens.mjs';
 import { toolGateway } from './tool-gateway.mjs';
 import { providerRoute, withProviderProfile } from './providers.mjs';
+import { policySummary, resolveCliPolicy } from './cli-policy.mjs';
 import {
   cancelQueuedTask,
   configureScheduler,
@@ -412,7 +413,7 @@ async function cliMessage(
     }
   };
 
-  // 每次尝试都要重新记账，因为失败重试和 Provider 回退都是真实发出的提示词。
+  // 重试和 Provider 回退分别记账，避免只统计最后一次尝试。
   let promptTokens = 0;
   let res = { code: -1, stdout: '', stderr: '没有可执行的 Provider', elapsed: 0 };
   let finalExecAgent = route[0] || agentForExecution(agent);
@@ -423,21 +424,39 @@ async function cliMessage(
     const execAgent = route[routeIndex];
     const provider = execAgent.provider || store.providerForAgent(agent);
     const providerName = provider?.name || provider?.id || '本机 CLI';
+    const cliPolicy = resolveCliPolicy(execAgent);
+    const cliPolicyData = policySummary(cliPolicy);
+    const callId = randomUUID();
     const toolCall = store.addTaskEvent(task.id, {
       type: 'tool.call.start',
       agentId: agent.id,
       stepId: agent.currentStepId || '',
       data: {
+        callId,
         tool: 'cli',
-        command: agent.cli?.command || '',
-        args: agent.cli?.args || [],
+        command: execAgent.cli?.command || '',
+        args: execAgent.cli?.args || [],
         cwd: task.workspace,
         timeout,
         providerId: provider?.id || '',
         providerName,
         routeIndex,
+        policy: cliPolicyData,
         principal: { kind: 'agent', id: agent.id, name: agent.name, role: agent.role },
         messageId: msg.id,
+      },
+    });
+    store.addTaskEvent(task.id, {
+      type: 'cli.policy.start',
+      agentId: agent.id,
+      stepId: agent.currentStepId || '',
+      data: {
+        callId,
+        command: cliPolicy.command,
+        providerId: provider?.id || '',
+        providerName,
+        routeIndex,
+        ...cliPolicyData,
       },
     });
 
@@ -447,26 +466,37 @@ async function cliMessage(
       routeAttempts = attempt;
       finalAttempts += 1;
       const attemptTokens = estimateTokens(prompt);
-      promptTokens += attemptTokens;
-      store.countPrompt(task.id, agent.id, attemptTokens);
-      try {
-        routeResult = await spawnCli(execAgent, prompt, {
-          cwd: task.workspace,
-          signal,
-          timeout,
-          completeWhen,
-          settleMs,
-          onChunk: (d) => {
-            clearHint();
-            if (hintShown) {
-              hintShown = false;
-              store.replaceMessage(task.id, msg.id, '');
-            }
-            store.appendMessage(task.id, msg.id, d);
-          },
-        });
-      } catch (err) {
-        routeResult = { code: -1, stdout: '', stderr: err.message, elapsed: 0 };
+      if (!cliPolicy.ok) {
+        routeResult = {
+          code: -6,
+          stdout: '',
+          stderr: cliPolicy.reason,
+          elapsed: 0,
+          policyDenied: true,
+          policy: cliPolicy,
+        };
+      } else {
+        promptTokens += attemptTokens;
+        store.countPrompt(task.id, agent.id, attemptTokens);
+        try {
+          routeResult = await spawnCli(execAgent, prompt, {
+            cwd: task.workspace,
+            signal,
+            timeout,
+            completeWhen,
+            settleMs,
+            onChunk: (d) => {
+              clearHint();
+              if (hintShown) {
+                hintShown = false;
+                store.replaceMessage(task.id, msg.id, '');
+              }
+              store.appendMessage(task.id, msg.id, d);
+            },
+          });
+        } catch (err) {
+          routeResult = { code: -1, stdout: '', stderr: err.message, elapsed: 0 };
+        }
       }
       const combined = `${routeResult.stdout || ''}\n${routeResult.stderr || ''}`;
       if (
@@ -497,14 +527,33 @@ async function cliMessage(
     res = routeResult || { code: -1, stdout: '', stderr: 'Provider 没有返回结果', elapsed: 0 };
     finalExecAgent = execAgent;
     finalRouteIndex = routeIndex;
+    const effectivePolicy = res.policy || cliPolicy;
+    const effectivePolicyData = policySummary(effectivePolicy);
+    const policyStatus = res.policyDenied ? 'denied' : effectivePolicyData.status;
+    store.addTaskEvent(task.id, {
+      type: res.policyDenied ? 'cli.policy.denied' : 'cli.policy.end',
+      agentId: agent.id,
+      stepId: agent.currentStepId || '',
+      data: {
+        ...effectivePolicyData,
+        callId,
+        providerId: provider?.id || '',
+        providerName,
+        routeIndex,
+        attempts: routeAttempts,
+        status: policyStatus,
+        code: res.code,
+        elapsed: res.elapsed,
+      },
+    });
     store.addTaskEvent(task.id, {
       type: 'tool.call.end',
       agentId: agent.id,
       stepId: agent.currentStepId || '',
       data: {
-        callId: toolCall?.id || '',
+        callId: toolCall?.data?.callId || callId,
         tool: 'cli',
-        command: agent.cli?.command || '',
+        command: execAgent.cli?.command || '',
         providerId: provider?.id || '',
         providerName,
         routeIndex,
@@ -512,12 +561,23 @@ async function cliMessage(
         code: res.code,
         elapsed: res.elapsed,
         timedOut: !!res.timedOut,
+        status: res.policyDenied ? 'denied' : res.code === 0 ? 'ok' : 'error',
+        denied: !!res.policyDenied,
+        policy: effectivePolicyData,
+        error: res.policyDenied ? effectivePolicy.reason : '',
         stdout: clip(res.stdout || '', 1600),
         stderr: clip(res.stderr || '', 1600),
       },
     });
 
-    if (res.code === 0 || signal?.aborted || routeIndex >= route.length - 1) break;
+    if (
+      res.code === 0 ||
+      res.policyDenied ||
+      signal?.aborted ||
+      routeIndex >= route.length - 1
+    ) {
+      break;
+    }
     const next = route[routeIndex + 1];
     const failure = classifyCliExit(res);
     const nextProvider = next.provider || store.providerForAgent(agent);
@@ -565,6 +625,8 @@ async function cliMessage(
     );
   }
   const failure = classifyCliExit(res);
+  const finalPolicy = res.policy || resolveCliPolicy(finalExecAgent);
+  const finalPolicyData = policySummary(finalPolicy);
   store.endMessage(task.id, msg.id, {
     tokens: estimateTokens(res.stdout),
     tokensIn: promptTokens,
@@ -582,6 +644,11 @@ async function cliMessage(
     })),
     providerFallback: finalRouteIndex > 0,
     attempts: finalAttempts,
+    executionPolicy: finalPolicyData.policy,
+    policyStatus: res.policyDenied ? 'denied' : finalPolicyData.status,
+    policySandbox: finalPolicyData.sandbox,
+    policyBoundary: finalPolicyData.boundary,
+    policyReason: finalPolicyData.reason,
   });
 
   // 收集 CLI 新增/修改的文件：先按 size + 纳秒 mtime 粗筛，命中项再算内容版本。

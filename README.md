@@ -28,6 +28,7 @@
 - **计划版本**：初版、返工和手动重规划都会生成不可变快照，已完成工序不会被重规划抹掉；自动重规划最多一次，避免无限重试。
 - **消息路由**：每条协作消息记录来源、目标、父消息、关联工序、产物引用和 `correlationId`。
 - **Tool Gateway 第一层**：平台 API 统一校验工具白名单、执行主体和工作区边界，并记录 `tool.call.start` / `tool.call.end` / `tool.policy.denied`。
+- **CLI 执行策略网关**：`strict` 模式把工具白名单映射到 Codex / DSH / Claude 的原生沙箱或工具白名单；无法强制的组合在启动前拒绝，并记录 `cli.policy.*`。
 - **六视图工作区控制台**：文件、执行轨迹、计划版本、协作消息、工具审计、Diff 在同一工作区中查看。
 - **文件夹开工**：可从本机目录选择器选择已有项目，或使用 Git 隔离工作树并行开工。
 
@@ -55,6 +56,7 @@
 - 🧭 **计划版本与有限重规划** — 计划以不可变快照保存；失败后自动重规划最多一次，手动重规划会保留已完成工序，方便在复杂项目中继续推进。
 - 🔗 **带路由的协作消息** — 消息不再只是聊天记录，还带来源、目标、父子关系、关联工序和产物引用，方便定位“谁把什么交给了谁”。
 - 🧰 **Agent 工具白名单与 Tool Gateway** — 每个成员声明可用工具，角色有默认策略，也能按成员覆盖；平台 API 会按 `agentId` 校验权限并写入工具审计。
+- 🛡 **真实 CLI 强制策略** — `strict` 会从工具集合推导只读 / 可写边界，覆盖 CLI 参数里的危险沙箱开关；Codex、DSH 映射原生沙箱，Claude 仅允许无 shell 的只读工具白名单，其他组合明确拒绝。
 - 🌳 **Git 隔离工作区** — 每个任务可在独立 detached worktree 中执行；Windows 文件系统无法写 worktree 元数据时自动回退 shared clone，源仓库不受影响。
 
 **执行**
@@ -76,7 +78,7 @@
 **工程**
 
 - 📦 **零依赖、零构建** — 纯 Node.js + 原生 ESM，`node server/index.mjs` 就起来，前端不打包、不装包管理器。
-- ✅ **67 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、质量门返工与入口探测、体检判定、上下文预算、工作区文件闭环、Git 隔离、工具策略、计划版本、消息路由、Tool Gateway 审计、Provider Profile、CLI 参数模板、Provider 自动回退、全局调度队列、Agent 租约、真实工时统计、输出完整性判定与退出码分类。
+- ✅ **78 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、质量门返工与入口探测、体检判定、上下文预算、工作区文件闭环、Git 隔离、工具策略、CLI 强制沙箱映射、计划版本、消息路由、Tool Gateway 审计、Provider Profile、CLI 参数模板、Provider 自动回退、全局调度队列、Agent 租约、真实工时统计、输出完整性判定与退出码分类。
 
 ## 快速开始
 
@@ -190,7 +192,9 @@ CLI 是不可控的第三方进程，所以调用不是「起进程 → 收字�
 
 AgentForge **不是基于 Magpie 框架实现**。Magpie 目前只是部分 CLI 适配器中的默认兼容网关：`server/adapters.mjs` 仍为 Codex、Aider、Gemini、Qwen 等命令保留 `http://127.0.0.1:3425`、模型名或环境变量的默认值。
 
-现在 Provider Profile 已把 Base URL、模型、密钥环境变量引用、CLI 参数模板和并发上限带到配置层，Agent 可以绑定主 Provider 与有序备用 Provider；执行时会解析成临时子进程环境，失败后在同一工序内自动切换，不把明文密钥写回持久化数据。尚未完成的是对真实 CLI 子进程的强制工具拦截。完整设计见 [docs/agent-platform-roadmap.md](docs/agent-platform-roadmap.md)。
+现在 Provider Profile 已把 Base URL、模型、密钥环境变量引用、CLI 参数模板和并发上限带到配置层，Agent 可以绑定主 Provider 与有序备用 Provider；执行时会解析成临时子进程环境，失败后在同一工序内自动切换，不把明文密钥写回持久化数据。
+
+真实 CLI 的工具边界由 Agent 的 `executionPolicy` 控制：`inherit` 保持兼容，`strict` 会按工具白名单选择 CLI 原生沙箱。当前能可靠表达的组合是 Codex / DSH 的只读或工作区可写沙箱，以及 Claude 无 shell 的只读工具白名单；无法证明的边界会返回 `-6` 并写入 `cli.policy.denied`，不会启动子进程。完整设计见 [docs/agent-platform-roadmap.md](docs/agent-platform-roadmap.md)。
 
 ## 上下文预算
 
@@ -214,7 +218,7 @@ AgentForge **不是基于 Magpie 框架实现**。Magpie 目前只是部分 CLI 
 | **文件** | 浏览工作树、搜索内容、预览文本/二进制状态、编辑保存、新建、移入回收站 |
 | **执行泳道** | 按 Agent 分组显示工序、依赖数、运行状态和尝试次数；事件流记录工具调用、文件变更和运行结果 |
 | **Diff** | 对比 Git `HEAD`，并补齐未跟踪新文件的 unified diff；敏感、二进制和超限文件有保护 |
-| **上下文 / 策略** | 展示注入的消息与文件预算、最近协作、已知文件，以及每个 Agent 的真实工具白名单 |
+| **上下文 / 策略** | 展示注入的消息与文件预算、最近协作、已知文件、工具白名单，以及 `INHERIT / STRICT / BLOCKED` 执行策略状态 |
 
 平台文件操作覆盖查、增、改、移、删，并统一经过 Tool Gateway 第一层：
 
@@ -225,7 +229,9 @@ AgentForge **不是基于 Magpie 框架实现**。Magpie 目前只是部分 CLI 
 - 删除进入 `.agentforge/trash`，不是不可恢复的硬删除。
 - Agent 调用会校验工具白名单，并记录 `tool.call.start` / `tool.call.end` / `tool.policy.denied`；Owner 写操作同样留痕。
 - Owner UI 的只读请求不写入工具审计，避免“刷新工作区 → 产生审计事件 → 再次刷新”的反馈循环。
-- 真实 CLI 仍是外部子进程，可以绕过平台 API 直接使用自身 shell/文件能力；强制 CLI 沙箱或代理网关仍在路线图中。
+- `executionPolicy=strict` 时，真实 CLI 必须在启动前通过策略预检；Codex / DSH 使用原生沙箱，Claude 使用只读工具白名单，其他命令或无法精确表达的组合返回 `-6`，不会放行。
+- 每次 CLI 调用会记录 `cli.policy.start` / `cli.policy.end` / `cli.policy.denied`，消息元数据包含实际策略、沙箱、边界和拒绝原因。
+- `executionPolicy=inherit` 仍保留兼容行为：CLI 可以绕过平台 API 使用自身工具，界面会明确标记 `INHERIT`，不把平台 API 校验冒充子进程隔离。
 - 平台 `shell` 端点当前明确返回 `501`，不会把未执行的命令伪装成成功。
 
 Git 隔离支持两种模式：
@@ -273,7 +279,8 @@ Git 隔离支持两种模式：
 | `GET` | `/api/scheduler` | 全局队列、运行任务、Provider 配额和 Agent 租约 |
 | `GET` `POST` | `/api/providers` | Provider Profile 列表 / 新增 |
 | `PATCH` `DELETE` | `/api/providers/:id` | 修改 / 删除 Profile（`local-default` 不可删除） |
-| `GET` | `/api/tools` | 工具目录与输入 Schema |
+| `GET` | `/api/tools` | 工具目录、输入 Schema、执行策略与 CLI 适配能力 |
+| `GET` | `/api/cli-policy?policy=&command=&tools=` | 预览某组工具和命令能否被严格强制 |
 | `PATCH` | `/api/settings` | 工作流参数（白名单字段 + 范围夹紧） |
 | `POST` | `/api/tasks` | 创建 `{ goal, workspace?, isolation?: "direct"\|"worktree", flowMode?: "debate"\|"direct", autoRun? }` |
 | `GET` | `/api/tasks/:id` | 任务详情（消息、工序、产物、计划版本、工具审计） |
@@ -339,6 +346,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 │   ├── orchestrator.mjs  流水线编排、质量门、上下文组装、产物落盘
 │   ├── scheduler.mjs     全局任务队列、Provider 配额与 Agent 租约
 │   ├── providers.mjs     Provider Profile、密钥引用解析与执行环境
+│   ├── cli-policy.mjs    工具能力推导、CLI 沙箱映射与严格策略预检
 │   ├── store.mjs         状态、席位、持久化、事件总线
 │   ├── collaboration.mjs 计划版本、消息信封与路由差异
 │   ├── tool-gateway.mjs  工具白名单、主体校验与调用审计
@@ -360,7 +368,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 │   ├── screenshot.png
 │   ├── design-io-image-context.md
 │   └── agent-platform-roadmap.md
-├── tests/                10 个测试文件、67 个测试
+├── tests/                11 个测试文件、78 个测试
 ├── 安装到桌面.bat
 ├── 卸载桌面快捷方式.bat
 └── data/                 运行时数据（gitignore）
@@ -372,7 +380,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 npm test
 ```
 
-67 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、评审结论解析、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `missing` 判定、真实 CLI 任务同样执行质量门、评审员兜底不落到实现者、目录快照复用、上游瞬时故障（ECONNRESET / 429 / socket hang up）只重试一次且不掩盖真实失败、上下文预算（段序稳定性、中文 token 估算、原子写版本、spill 可还原）、工作区文件闭环与路径/敏感文件边界、Agent 工具策略、计划版本与已完成工序保留、消息路由、Tool Gateway 权限与审计、Provider Profile 持久化与迁移、CLI 参数模板渲染、Provider 路由与真实子进程回退、全局任务并发、Provider 配额、Agent 租约与排队取消、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计（只累加结束过的工序，不拿墙钟冒充）、输出完整性判定（半截提案 / 缺段质询 / 空步骤都会判不合格）、提案宽松解析（`A=7`、`B：8分`、`方案 C 7/10`）、退出码分类（超时 / 已停止 / 命令缺失 / `0xC0000142`）与参数拼装。
+78 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、评审结论解析、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `missing` 判定、真实 CLI 任务同样执行质量门、评审员兜底不落到实现者、目录快照复用、上游瞬时故障（ECONNRESET / 429 / socket hang up）只重试一次且不掩盖真实失败、上下文预算（段序稳定性、中文 token 估算、原子写版本、spill 可还原）、工作区文件闭环与路径/敏感文件边界、Agent 工具策略、CLI 强制沙箱映射与拒绝事件、计划版本与已完成工序保留、消息路由、Tool Gateway 权限与审计、Provider Profile 持久化与迁移、CLI 参数模板渲染、Provider 路由与真实子进程回退、全局任务并发、Provider 配额、Agent 租约与排队取消、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计（只累加结束过的工序，不拿墙钟冒充）、输出完整性判定（半截提案 / 缺段质询 / 空步骤都会判不合格）、提案宽松解析（`A=7`、`B：8分`、`方案 C 7/10`）、退出码分类（超时 / 已停止 / 命令缺失 / 策略拒绝 / `0xC0000142`）与参数拼装。
 
 ## 已知边界
 
@@ -380,8 +388,8 @@ npm test
 - **`kimi` 只适合单行任务**：`-p` 与 `--auto` 互斥，只能走 argv，多行 prompt 会被 `cmd.exe` 截断。
 - **`trae-cli` 的行为取决于模型**：工具齐全（bash / 编辑 / 顺序思考），但某些模型只肯调顺序思考而不落盘——这是模型行为，不是配置问题。
 - **模拟模式**：一个可用 CLI 都没有时才会启用，产出仍是可运行的代码（`tests/*.test.js` 能直接 `node` 执行），但成员会明确标注 `SIM 演示`。
-- **Tool Gateway 仍是平台 API 层**：平台 API 已能校验工具白名单、记录调用和审计，但真实 CLI 仍是外部子进程，可以绕过平台直接使用自身工具；CLI 沙箱 / 代理网关仍未实现。
-- **Magpie 只是默认网关**：项目不依赖 Magpie 框架；Provider Profile、密钥引用、CLI 参数模板和自动回退已落地，但真实 CLI 子进程的强制工具拦截仍未完成。
+- **CLI 严格策略是原生能力映射，不是内核级代理**：`strict` 只放行 Codex / DSH / Claude 能明确表达的组合，并覆盖参数里的危险开关；`inherit` 仍允许 CLI 使用自身工具。真正的网络代理、文件租约和跨进程系统调用拦截仍待后续。
+- **Magpie 只是默认网关**：项目不依赖 Magpie 框架；Provider Profile、密钥引用、CLI 参数模板、自动回退和 CLI 严格策略已落地。
 - **调度粒度仍是任务级**：全局任务并发、Provider 配额和显式 Agent 租约已生效；Provider 配额按绑定该 Provider 的活跃任务计数，不按每次 CLI 调用计数。工作区/磁盘配额和任务优先级仍在路线图中。
 
 ## Roadmap
@@ -392,7 +400,8 @@ npm test
 - [x] 工作区文件闭环、全屏控制台、执行泳道与 Diff
 - [x] Agent 工具白名单与 Git worktree/clone 隔离
 - [x] 计划版本、有限重规划、带路由消息与 Tool Gateway 第一层
-- [ ] CLI 沙箱 / 代理网关（拦截真实 CLI 内部工具调用）
+- [x] CLI 严格策略网关（Codex / DSH 原生沙箱、Claude 只读白名单、无法强制时拒绝）
+- [ ] 内核级 CLI 代理网关（统一网络、文件租约与系统调用审计）
 - [ ] 文件租约、跨 Agent 写冲突检测与事务级回滚
 - [x] Provider Profile（自定义网关、密钥环境引用、Agent 绑定与并发配额）
 - [x] 全局 Scheduler（任务并发、Provider 配额、Agent 租约）

@@ -528,6 +528,14 @@
                 <span>参数模板<em>用 {{prompt}} 占位提示词</em></span>
                 <input name="args" placeholder="exec {{prompt}}" />
               </label>
+              <label class="field">
+                <span>执行策略<em>严格模式无法强制时会在启动前拒绝</em></span>
+                <select name="executionPolicy" id="agentExecutionPolicy">
+                  <option value="inherit">沿用 CLI 参数</option>
+                  <option value="strict">严格强制</option>
+                </select>
+              </label>
+              <p class="policy-preview" id="agentPolicyPreview" data-status="inherit"></p>
               <p class="hint">命令会在任务工作区目录中执行，写入的文件会自动收录为产物。</p>
             </div>
           </div>

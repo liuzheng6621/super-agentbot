@@ -1,6 +1,6 @@
 # AgentForge 平台能力评估与演进路线
 
-> 评估日期：2026-11-26
+> 评估日期：2026-11-27
 
 本文基于当前仓库实现，区分“已经落地”“已有边界”和“下一阶段建议”，避免把提示词约束、平台 API 和真实 Tool Gateway 混为一谈。
 
@@ -28,16 +28,19 @@
 
 ### 当前边界
 
-平台 API 已统一经第一层 Tool Gateway；但它还不是对真实 CLI 的完整强制网关：
+平台 API 已统一经第一层 Tool Gateway，真实 CLI 另有第二层执行策略预检：
 
-- 真实 CLI 作为外部子进程运行，仍可自行调用本机 shell 和文件工具，平台无法在内核层拦截。
+- `executionPolicy=strict` 时，平台按 Agent 工具白名单推导 `read-only` / `workspace-write`，覆盖 CLI 参数中的危险沙箱开关；Codex / DSH 映射原生沙箱，Claude 仅允许无 shell 的只读工具白名单。
+- `strict` 下无法证明边界的命令或能力组合返回 `-6`，不启动子进程；`inherit` 仍保留兼容行为，CLI 可以自行使用本机工具。
+- 每次真实 CLI 调用记录 `cli.policy.start` / `cli.policy.end` / `cli.policy.denied`，消息元数据保留实际策略、沙箱、边界和拒绝原因。
+- 原生沙箱仍不是内核级代理：平台尚未统一拦截 CLI 的网络请求、文件租约和系统调用。
 - 前端人工操作不携带 `agentId`，因此不受 Agent 工具白名单限制，这是有意的管理员通道。
 - `shell` 已进入工具目录和 Agent 策略，但平台还没有统一 shell 执行端点、审批队列和审计沙箱。
 - 文件移动已有事件记录，但还没有跨多个 Agent 的写冲突检测、文件租约或事务级回滚。
 
 ### 改进建议
 
-1. **建立 Tool Gateway**
+1. **建立 Tool Gateway（第一层已完成）**
    - 所有 Agent 工具调用统一走 `toolId + agentId + taskId + arguments`。
    - 网关执行策略校验、工作区边界校验、审批、超时、审计和结果归一化。
    - CLI 只拿到网关地址和短期任务令牌，不再直接暴露宿主文件系统。
@@ -51,7 +54,7 @@
    - 为 `shell` 增加命令白名单/黑名单、工作目录、超时、输出上限和进程树回收。
    - 高风险命令进入人工审批，结果写入任务事件流。
 
-验收标准：任何 Agent 的工具调用都能回答“谁、在哪个任务和目录、调用了什么、参数是什么、结果如何、是否被策略拒绝”。
+验收标准：任何 Agent 的工具调用都能回答“谁、在哪个任务和目录、调用了什么、参数是什么、结果如何、是否被策略拒绝”，并且 `strict` CLI 调用能说明实际使用的沙箱与强制边界。
 
 ## 2. 与 Magpie 的关系
 
@@ -63,9 +66,9 @@ AgentForge 不是基于 Magpie 框架实现。Magpie 目前只是部分 CLI 适�
 - 典型默认地址是 `http://127.0.0.1:3425`，模型默认值是 `trae-cn/glm-5.3-flash`。
 - `AGENTFORGE_MODEL` 仍是全局模型名兜底；Provider Profile 已可覆盖模型、Base URL、密钥环境变量引用和并发上限。
 
-Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile 解析为临时子进程环境，明文密钥不写回 `db.json`；CLI 参数模板、主/备 Provider 自动路由和失败回退也已接入。尚未完成的是对真实 CLI 子进程的强制工具拦截。
+Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile 解析为临时子进程环境，明文密钥不写回 `db.json`；CLI 参数模板、主/备 Provider 自动路由和失败回退也已接入。真实 CLI 子进程的强制工具拦截已由 `server/cli-policy.mjs` 接入第一版原生策略映射，内核级代理仍待补。
 
-因此，当前泛用性瓶颈已从“CLI 适配参数是硬编码的”转移到“真实 CLI 子进程仍可能绕过平台网关”。
+因此，当前泛用性瓶颈已从“CLI 适配参数是硬编码的”转移到“不同 CLI 的原生沙箱能力不一致，平台需要持续维护能力矩阵并明确拒绝无法强制的组合”。
 
 ### 改进建议：Provider Profile
 
@@ -187,7 +190,7 @@ Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile �
 
 验收标准：多个任务可以并行推进，但不会超过配置的 Provider、Agent 和工作区资源上限；每个等待和重试都有可解释原因。
 
-## 本轮已落地（2026-11-26）
+## 本轮已落地（2026-11-27）
 
 | 能力 | 状态 | 已实现内容 |
 | --- | --- | --- |
@@ -197,16 +200,17 @@ Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile �
 | 工作区控制台 | 已完成 | 计划版本、协作消息、工具审计与原有文件、执行泳道、Diff 统一展示 |
 | Provider Profile | 已完成 | Agent 绑定主/备 Profile；Base URL、模型、密钥环境变量引用、CLI 参数模板和并发上限可配置；真实 CLI 失败后按顺序回退 |
 | 全局 Scheduler | 第一层已完成 | 任务并发上限、Provider 配额、排队位置、等待原因、Agent 租约和取消排队 |
+| CLI 执行策略 | 第一层已完成 | `inherit / strict`；工具白名单推导沙箱；Codex / DSH / Claude 能力矩阵；不可强制时拒绝；策略事件与消息元数据 |
 | Shell 沙箱 | 待实施 | `shell` 端点明确返回 501，不把未执行的命令伪装成成功 |
 
-本轮的强制边界是平台 API：Agent 通过 API 调用工具时会被白名单校验并留痕；Owner UI 的只读请求不写入工具审计，避免“刷新工作区 → 产生审计事件 → 再次刷新”的反馈循环。真实 CLI 仍可能直接调用本机工具，因此下一阶段必须补 CLI 沙箱或代理网关，不能把平台 API 校验当成对子进程的强制隔离。
+当前有两层边界：平台 API 会校验 Agent 工具白名单并留痕；真实 CLI 在 `strict` 下会先经过执行策略预检，能映射到原生沙箱时才启动。`inherit` 仍可能直接调用本机工具，因此下一阶段需要补内核级代理、网络策略和文件租约，不能把平台 API 校验当成完整子进程隔离。
 
 ## 实施顺序
 
 | 阶段 | 重点 | 交付物 |
 | --- | --- | --- |
 | P0（已完成） | 工作区 API、全屏控制台、工具白名单、Git worktree/clone 回退、Diff 与事件流 | 可用的单机协作台 |
-| P1（第一层已完成） | Tool Gateway、计划版本、消息路由、Provider Profile、CLI 参数模板与自动回退 | 平台 API 可校验、可审计、可重规划 |
+| P1（第一层已完成） | Tool Gateway、计划版本、消息路由、Provider Profile、CLI 参数模板与自动回退、CLI 执行策略 | 平台 API 可校验、CLI 可强制或明确拒绝、可审计、可重规划 |
 | P2（第一层已完成） | 全局 Scheduler、任务并发、Provider 配额、Agent 租约；专项 Agent Profile 待补 | 稳定的多任务并发 |
 | P3 | DAG 图、时间回放、评审与合并工作台 | 面向复杂项目的可视化协作 |
 

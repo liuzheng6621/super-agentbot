@@ -20,6 +20,7 @@ import { redactProvider } from './providers.mjs';
 import { adoptInstalledClis, rebalanceTeam } from './adopt.mjs';
 import { ensureRealTeam, refreshTeam, judgeHealth } from './team.mjs';
 import { toolGateway } from './tool-gateway.mjs';
+import { executionPolicyCatalog, resolveCliPolicy } from './cli-policy.mjs';
 import {
   WorkspaceError,
   workspaceInfo,
@@ -80,6 +81,14 @@ function readBody(req, limit = 2 * 1024 * 1024) {
   });
 }
 
+function agentView(agent) {
+  if (!agent) return agent;
+  return {
+    ...agent,
+    cliPolicy: resolveCliPolicy(agent),
+  };
+}
+
 function taskDetail(task) {
   const summary = store.taskSummary(task);
   // 老任务当时没记工时，按工序时间补算，别拿墙钟（含排队与重试等待）冒充
@@ -107,7 +116,10 @@ function taskDetail(task) {
     fileChanges: task.fileChanges || [],
     events: (task.events || []).slice(-160),
     toolCalls: (task.events || [])
-      .filter((event) => String(event.type || '').startsWith('tool.'))
+      .filter((event) => {
+        const type = String(event.type || '');
+        return type.startsWith('tool.') || type.startsWith('cli.policy.');
+      })
       .slice(-120),
     context: buildContextPack(task),
   };
@@ -196,20 +208,36 @@ const server = http.createServer(async (req, res) => {
         store.tasks.find((t) => isQueued(t.id)) ||
         store.tasks[0];
       return json(res, 200, {
-        agents: store.agents,
+        agents: store.agents.map(agentView),
         providers: store.providers.map(redactProvider),
         tasks,
         settings: { ...store.db.settings },
         scheduler: schedulerSnapshot(),
         toolCatalog: TOOL_CATALOG,
         roleTools: ROLE_TOOLS,
+        executionPolicies: executionPolicyCatalog(),
         activeTask: active ? taskDetail(active) : null,
       });
     }
 
     /* ---- 智能体 ---- */
     if (pathname === '/api/tools' && method === 'GET') {
-      return json(res, 200, { tools: toolGateway.descriptors() });
+      return json(res, 200, {
+        tools: toolGateway.descriptors(),
+        executionPolicies: executionPolicyCatalog(),
+      });
+    }
+    if (pathname === '/api/cli-policy' && method === 'GET') {
+      const tools = String(searchParams.get('tools') || '')
+        .split(',')
+        .map((tool) => tool.trim())
+        .filter(Boolean);
+      const policy = resolveCliPolicy({
+        executionPolicy: searchParams.get('policy') || 'inherit',
+        tools,
+        cli: { command: searchParams.get('command') || '' },
+      });
+      return json(res, 200, { policy });
     }
     if (pathname === '/api/scheduler' && method === 'GET') {
       return json(res, 200, { scheduler: schedulerSnapshot() });
@@ -245,16 +273,17 @@ const server = http.createServer(async (req, res) => {
     }
     if (pathname === '/api/agents' && method === 'GET') {
       return json(res, 200, {
-        agents: store.agents,
+        agents: store.agents.map(agentView),
         providers: store.providers.map(redactProvider),
         toolCatalog: TOOL_CATALOG,
         roleTools: ROLE_TOOLS,
+        executionPolicies: executionPolicyCatalog(),
       });
     }
     if (pathname === '/api/agents' && method === 'POST') {
       const body = await readBody(req);
       if (!body.name) return json(res, 400, { error: '缺少 name' });
-      return json(res, 201, { agent: store.addAgent(body) });
+      return json(res, 201, { agent: agentView(store.addAgent(body)) });
     }
     if (pathname === '/api/probe' && method === 'GET') {
       clearResolveCache();
@@ -319,7 +348,10 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, await adoptInstalledClis({ dryRun: body?.dryRun === true }));
     }
     if (pathname === '/api/agents/rebalance' && method === 'POST') {
-      return json(res, 200, { assignments: rebalanceTeam(), agents: store.agents });
+      return json(res, 200, {
+        assignments: rebalanceTeam(),
+        agents: store.agents.map(agentView),
+      });
     }
     // 把内置演示席位换成真实 CLI：ensure 只补齐内置席位，refresh 强制重体检并重组
     if (pathname === '/api/team/ensure' && method === 'POST') {
@@ -351,13 +383,14 @@ const server = http.createServer(async (req, res) => {
           code: res2.code,
           ms: res2.elapsed,
           health,
+          policy: res2.policy || resolveCliPolicy(route[0]),
           providerId: route[0]?.provider?.id || agent.providerId || '',
           output: (res2.stdout || res2.stderr || '').trim().slice(0, 500),
         });
       }
       if (method === 'PATCH') {
         const body = await readBody(req);
-        return json(res, 200, { agent: store.updateAgent(agentId, body) });
+        return json(res, 200, { agent: agentView(store.updateAgent(agentId, body)) });
       }
       if (method === 'DELETE') {
         const ok = store.removeAgent(agentId);
@@ -456,7 +489,10 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, {
           tools: toolGateway.descriptors(),
           events: (task.events || [])
-            .filter((event) => String(event.type || '').startsWith('tool.'))
+            .filter((event) => {
+              const type = String(event.type || '');
+              return type.startsWith('tool.') || type.startsWith('cli.policy.');
+            })
             .slice(-240),
         });
       }

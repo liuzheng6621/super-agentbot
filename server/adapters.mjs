@@ -1,6 +1,7 @@
 import { spawn, spawnSync, execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { prepareCliExecution } from './cli-policy.mjs';
 
 /* ------------------------------------------------------------------ */
 /* 模拟适配器：把文本按块吐出，制造真实流式观感                         */
@@ -166,6 +167,7 @@ export function classifyCliExit(codeOrResult) {
     return { kind: 'timeout', label: '执行超时', retryable: false };
   }
   if (code === -4) return { kind: 'stopped', label: '已停止', retryable: false };
+  if (code === -6) return { kind: 'policy', label: '执行策略拒绝', retryable: false };
   if (code === -2) return { kind: 'missing', label: '未配置 CLI 命令', retryable: false };
   if (code === -1) return { kind: 'spawn', label: '进程启动失败', retryable: true };
   if (code === 3221225794) {
@@ -229,9 +231,22 @@ export function spawnCli(
       agent.cli.command,
       agent.cli.args?.length ? agent.cli.args : ['-p', '{{prompt}}'],
     );
-    const passByStdin = !declaredArgs.some((a) => String(a).includes('{{prompt}}'));
+    const prepared = prepareCliExecution(agent, { args: declaredArgs });
+    if (!prepared.ok) {
+      resolve({
+        code: -6,
+        stdout: '',
+        stderr: prepared.policy.reason,
+        elapsed: Date.now() - started,
+        policyDenied: true,
+        policy: prepared.policy,
+      });
+      return;
+    }
+    const execAgent = prepared.agent;
+    const passByStdin = !execAgent.cli.args.some((a) => String(a).includes('{{prompt}}'));
 
-    const runCwd = cwd || agent.cli.cwd || process.cwd();
+    const runCwd = cwd || execAgent.cli.cwd || process.cwd();
     let cwdOk = true;
     try {
       cwdOk = fs.statSync(runCwd).isDirectory();
@@ -239,7 +254,13 @@ export function spawnCli(
       cwdOk = false;
     }
     if (!cwdOk) {
-      resolve({ code: -5, stdout: '', stderr: `工作目录不存在：${runCwd}`, elapsed: 0 });
+      resolve({
+        code: -5,
+        stdout: '',
+        stderr: `工作目录不存在：${runCwd}`,
+        elapsed: 0,
+        policy: prepared.policy,
+      });
       return;
     }
     const env = runtimePathEnv({
@@ -250,13 +271,19 @@ export function spawnCli(
       PYTHONUTF8: '1',
       PYTHONIOENCODING: 'utf-8',
       // 单个 CLI 的自定义环境变量（如 gemini 的 GEMINI_API_KEY / GOOGLE_GEMINI_BASE_URL）
-      ...(agent.cli.env || {}),
+      ...(execAgent.cli.env || {}),
       // Provider Profile 只把引用解析成子进程环境，不把明文密钥写回 store。
-      ...(agent.provider?.env || {}),
+      ...(execAgent.provider?.env || {}),
     });
-    const resolved = resolveCommand(agent.cli.command);
+    const resolved = resolveCommand(execAgent.cli.command);
     if (!resolved) {
-      resolve({ code: -2, stdout: '', stderr: `找不到 CLI 命令：${agent.cli.command}`, elapsed: 0 });
+      resolve({
+        code: -2,
+        stdout: '',
+        stderr: `找不到 CLI 命令：${execAgent.cli.command}`,
+        elapsed: 0,
+        policy: prepared.policy,
+      });
       return;
     }
     // 真 .exe 直连：Node 用宽字符命令行传参，中文不会被代码页吃掉，也没有引号转义问题
@@ -265,7 +292,7 @@ export function spawnCli(
     let child;
     try {
       if (direct) {
-        child = spawn(resolved, buildArgs(agent, prompt), {
+        child = spawn(resolved, buildArgs(execAgent, prompt), {
           cwd: runCwd,
           shell: false,
           windowsHide: true,
@@ -276,7 +303,7 @@ export function spawnCli(
       } else {
         // .cmd / .bat 只能过 cmd.exe，先把代码页切到 UTF-8，否则中文参数会乱码
         const prefix = process.platform === 'win32' ? 'chcp 65001>nul & ' : '';
-        child = spawn(prefix + buildCommand(agent, prompt), {
+        child = spawn(prefix + buildCommand(execAgent, prompt), {
           cwd: runCwd,
           shell: true,
           windowsHide: true,
@@ -316,6 +343,7 @@ export function spawnCli(
         stderr: stderr + (err ? String(err) : ''),
         elapsed: Date.now() - started,
         partial: stdout.trim().length > 0,
+        policy: prepared.policy,
         ...extra,
       });
     };
