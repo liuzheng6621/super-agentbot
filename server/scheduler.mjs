@@ -1,5 +1,5 @@
 import { store } from './store.mjs';
-import { DEFAULT_PROVIDER_ID, resolveProvider } from './providers.mjs';
+import { DEFAULT_PROVIDER_ID, providerRoute } from './providers.mjs';
 
 /**
  * Task-level scheduler.
@@ -28,12 +28,12 @@ function taskProviderIds(task, options = {}) {
   const fromPlan = (task?.plan || [])
     .map((step) => store.getAgent(step.agentId))
     .filter(Boolean)
-    .map((agent) => agent.providerId || DEFAULT_PROVIDER_ID);
+    .map((agent) => providerRoute(agent, store.providers)[0]?.id || agent.providerId || DEFAULT_PROVIDER_ID);
   if (fromPlan.length) return unique(fromPlan);
 
   const seats = store.agents
     .filter((agent) => agent.seat !== false)
-    .map((agent) => agent.providerId || DEFAULT_PROVIDER_ID);
+    .map((agent) => providerRoute(agent, store.providers)[0]?.id || agent.providerId || DEFAULT_PROVIDER_ID);
   return unique(seats.length ? seats : [DEFAULT_PROVIDER_ID]);
 }
 

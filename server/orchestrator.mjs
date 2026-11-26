@@ -7,7 +7,7 @@ import { runDag, throwIfAborted } from './dag.mjs';
 import { versionOf, spillText } from './fs.mjs';
 import { estimateTokens } from './tokens.mjs';
 import { toolGateway } from './tool-gateway.mjs';
-import { withProviderProfile } from './providers.mjs';
+import { providerRoute, withProviderProfile } from './providers.mjs';
 import {
   cancelQueuedTask,
   configureScheduler,
@@ -36,6 +36,13 @@ const STEP_KIND = {
 /** Persisted agents only carry providerId; resolve secrets into a child copy. */
 export function agentForExecution(agent) {
   return withProviderProfile(agent, store.providerForAgent(agent));
+}
+
+/** Return the ordered execution copies for an agent's primary and fallback providers. */
+export function agentRouteForExecution(agent) {
+  const route = providerRoute(agent, store.providers);
+  if (!route.length) return [agentForExecution(agent)];
+  return route.map((provider) => withProviderProfile(agent, provider));
 }
 
 /**
@@ -373,7 +380,7 @@ async function cliMessage(
     artifactRefs = [],
   } = {},
 ) {
-  const execAgent = agentForExecution(agent);
+  const route = agentRouteForExecution(agent);
   const msg = store.addMessage(task.id, {
     agentId: agent.id,
     name: agent.name,
@@ -391,20 +398,6 @@ async function cliMessage(
     artifactRefs,
   });
   beginAgent(agent, `${agent.cli?.command || 'CLI'} 运行中`);
-  const toolCall = store.addTaskEvent(task.id, {
-    type: 'tool.call.start',
-    agentId: agent.id,
-    stepId: agent.currentStepId || '',
-    data: {
-      tool: 'cli',
-      command: agent.cli?.command || '',
-      args: agent.cli?.args || [],
-      cwd: task.workspace,
-      timeout,
-      principal: { kind: 'agent', id: agent.id, name: agent.name, role: agent.role },
-      messageId: msg.id,
-    },
-  });
 
   const before = fileIndex.get(task.id) || new Map(snapshotFiles(task).map((f) => [f.path, f]));
   let hintShown = false;
@@ -419,50 +412,138 @@ async function cliMessage(
     }
   };
 
-  // 提示词是真金白银发出去的 token，先记账再执行
-  const promptTokens = estimateTokens(prompt);
-  store.countPrompt(task.id, agent.id, promptTokens);
+  // 每次尝试都要重新记账，因为失败重试和 Provider 回退都是真实发出的提示词。
+  let promptTokens = 0;
+  let res = { code: -1, stdout: '', stderr: '没有可执行的 Provider', elapsed: 0 };
+  let finalExecAgent = route[0] || agentForExecution(agent);
+  let finalAttempts = 0;
+  let finalRouteIndex = 0;
 
-  const runOnce = () =>
-    spawnCli(execAgent, prompt, {
-      cwd: task.workspace,
-      signal,
-      timeout,
-      completeWhen,
-      settleMs,
-      onChunk: (d) => {
-        clearHint();
-        if (hintShown) {
-          hintShown = false;
-          store.replaceMessage(task.id, msg.id, '');
-        }
-        store.appendMessage(task.id, msg.id, d);
+  for (let routeIndex = 0; routeIndex < route.length; routeIndex += 1) {
+    const execAgent = route[routeIndex];
+    const provider = execAgent.provider || store.providerForAgent(agent);
+    const providerName = provider?.name || provider?.id || '本机 CLI';
+    const toolCall = store.addTaskEvent(task.id, {
+      type: 'tool.call.start',
+      agentId: agent.id,
+      stepId: agent.currentStepId || '',
+      data: {
+        tool: 'cli',
+        command: agent.cli?.command || '',
+        args: agent.cli?.args || [],
+        cwd: task.workspace,
+        timeout,
+        providerId: provider?.id || '',
+        providerName,
+        routeIndex,
+        principal: { kind: 'agent', id: agent.id, name: agent.name, role: agent.role },
+        messageId: msg.id,
       },
     });
 
-  // 上游网关抖一下（ECONNRESET / 429 / 握手超时）不该让整条流水线塌掉：
-  // 只有明确的瞬时错误才重试一次，真实失败（退出码非 0 且无瞬时特征）照旧上报。
-  let res;
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
-    try {
-      res = await runOnce();
-    } catch (err) {
-      res = { code: -1, stdout: '', stderr: err.message, elapsed: 0 };
+    let routeResult = null;
+    let routeAttempts = 0;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      routeAttempts = attempt;
+      finalAttempts += 1;
+      const attemptTokens = estimateTokens(prompt);
+      promptTokens += attemptTokens;
+      store.countPrompt(task.id, agent.id, attemptTokens);
+      try {
+        routeResult = await spawnCli(execAgent, prompt, {
+          cwd: task.workspace,
+          signal,
+          timeout,
+          completeWhen,
+          settleMs,
+          onChunk: (d) => {
+            clearHint();
+            if (hintShown) {
+              hintShown = false;
+              store.replaceMessage(task.id, msg.id, '');
+            }
+            store.appendMessage(task.id, msg.id, d);
+          },
+        });
+      } catch (err) {
+        routeResult = { code: -1, stdout: '', stderr: err.message, elapsed: 0 };
+      }
+      const combined = `${routeResult.stdout || ''}\n${routeResult.stderr || ''}`;
+      if (
+        routeResult.code === 0 ||
+        attempt === 2 ||
+        signal?.aborted ||
+        !shouldRetryCliResult(routeResult)
+      ) {
+        break;
+      }
+      const failure = classifyCliExit(routeResult);
+      store.appendMessage(
+        task.id,
+        msg.id,
+        `\n\n> ⚠️ ${providerName}：${
+          failure.kind === 'windows-init'
+            ? failure.label
+            : `上游连接抖动（${combined.match(TRANSIENT_CLI_ERROR)?.[0] || failure.label}）`
+        }，2 秒后重试一次。\n\n`,
+      );
+      try {
+        await sleep(2000, signal);
+      } catch {
+        break;
+      }
     }
-    const combined = `${res.stdout || ''}
-${res.stderr || ''}`;
-    if (res.code === 0 || attempt === 2 || signal?.aborted || !shouldRetryCliResult(res)) break;
+
+    res = routeResult || { code: -1, stdout: '', stderr: 'Provider 没有返回结果', elapsed: 0 };
+    finalExecAgent = execAgent;
+    finalRouteIndex = routeIndex;
+    store.addTaskEvent(task.id, {
+      type: 'tool.call.end',
+      agentId: agent.id,
+      stepId: agent.currentStepId || '',
+      data: {
+        callId: toolCall?.id || '',
+        tool: 'cli',
+        command: agent.cli?.command || '',
+        providerId: provider?.id || '',
+        providerName,
+        routeIndex,
+        attempts: routeAttempts,
+        code: res.code,
+        elapsed: res.elapsed,
+        timedOut: !!res.timedOut,
+        stdout: clip(res.stdout || '', 1600),
+        stderr: clip(res.stderr || '', 1600),
+      },
+    });
+
+    if (res.code === 0 || signal?.aborted || routeIndex >= route.length - 1) break;
+    const next = route[routeIndex + 1];
     const failure = classifyCliExit(res);
+    const nextProvider = next.provider || store.providerForAgent(agent);
+    store.addTaskEvent(task.id, {
+      type: 'provider.fallback',
+      agentId: agent.id,
+      stepId: agent.currentStepId || '',
+      data: {
+        fromProviderId: provider?.id || '',
+        fromProviderName: providerName,
+        toProviderId: nextProvider?.id || '',
+        toProviderName: nextProvider?.name || nextProvider?.id || '本机 CLI',
+        reason: failure.label,
+        code: res.code,
+        routeIndex,
+      },
+    });
+    // 失败尝试的临时输出不应和下一家 Provider 的正文拼在一起。
+    store.replaceMessage(task.id, msg.id, '');
     store.appendMessage(
       task.id,
       msg.id,
-      `
-
-> ⚠️ ${failure.kind === 'windows-init' ? failure.label : `上游连接抖动（${combined.match(TRANSIENT_CLI_ERROR)?.[0] || failure.label}）`}，2 秒后重试一次。
-
-`,
+      `> ⚠️ Provider「${providerName}」失败（${failure.label}），已切换到「${
+        nextProvider?.name || nextProvider?.id || '本机 CLI'
+      }」。\n\n`,
     );
-    await new Promise((resolve) => setTimeout(resolve, 2000));
   }
   clearHint();
 
@@ -493,26 +574,18 @@ ${res.stderr || ''}`;
     timedOut: !!res.timedOut,
     partial: !!res.partial,
     settledEarly: !!res.settledEarly,
+    providerId: finalExecAgent.provider?.id || '',
+    providerName: finalExecAgent.provider?.name || '',
+    providerRoute: route.map((item) => ({
+      id: item.provider?.id || '',
+      name: item.provider?.name || '',
+    })),
+    providerFallback: finalRouteIndex > 0,
+    attempts: finalAttempts,
   });
 
   // 收集 CLI 新增/修改的文件：先按 size + 纳秒 mtime 粗筛，命中项再算内容版本。
   // 内容没变就不重复记 artifact——CLI 把同一个文件重写一遍不该算一次产出。
-  store.addTaskEvent(task.id, {
-    type: 'tool.call.end',
-    agentId: agent.id,
-    stepId: agent.currentStepId || '',
-    data: {
-      callId: toolCall?.id || '',
-      tool: 'cli',
-      command: agent.cli?.command || '',
-      code: res.code,
-      elapsed: res.elapsed,
-      timedOut: !!res.timedOut,
-      stdout: clip(res.stdout || '', 1600),
-      stderr: clip(res.stderr || '', 1600),
-    },
-  });
-
   const after = snapshotFiles(task);
   for (const f of after) {
     const prev = before.get(f.path);

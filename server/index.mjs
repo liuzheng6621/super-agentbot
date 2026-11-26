@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { store, ROOT, DATA_DIR, WORKSPACE_DIR, TOOL_CATALOG, ROLE_TOOLS } from './store.mjs';
 import {
-  agentForExecution,
+  agentRouteForExecution,
   isQueued,
   isScheduled,
   scheduleTask,
@@ -337,7 +337,8 @@ const server = http.createServer(async (req, res) => {
       if (!agent) return json(res, 404, { error: '智能体不存在' });
       if (agentMatch[2] && method === 'POST') {
         if (!agent.cli?.command) return json(res, 400, { ok: false, message: '未配置 CLI 命令' });
-        const res2 = await spawnCli(agentForExecution(agent), '只回答两个字：在线', {
+        const route = agentRouteForExecution(agent);
+        const res2 = await spawnCli(route[0], '只回答两个字：在线', {
           timeout: agent.cli.healthTimeout || 60000,
           cwd: ROOT,
         });
@@ -350,6 +351,7 @@ const server = http.createServer(async (req, res) => {
           code: res2.code,
           ms: res2.elapsed,
           health,
+          providerId: route[0]?.provider?.id || agent.providerId || '',
           output: (res2.stdout || res2.stderr || '').trim().slice(0, 500),
         });
       }

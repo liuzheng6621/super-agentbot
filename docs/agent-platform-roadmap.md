@@ -63,9 +63,9 @@ AgentForge 不是基于 Magpie 框架实现。Magpie 目前只是部分 CLI 适�
 - 典型默认地址是 `http://127.0.0.1:3425`，模型默认值是 `trae-cn/glm-5.3-flash`。
 - `AGENTFORGE_MODEL` 仍是全局模型名兜底；Provider Profile 已可覆盖模型、Base URL、密钥环境变量引用和并发上限。
 
-第一层 Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile 解析为临时子进程环境，明文密钥不写回 `db.json`。尚未完成的是 CLI 参数模板、Provider 自动路由与回退，以及对真实 CLI 子进程的强制工具拦截。
+Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile 解析为临时子进程环境，明文密钥不写回 `db.json`；CLI 参数模板、主/备 Provider 自动路由和失败回退也已接入。尚未完成的是对真实 CLI 子进程的强制工具拦截。
 
-因此，当前泛用性瓶颈不在编排器，而在“CLI 适配参数是硬编码的”。
+因此，当前泛用性瓶颈已从“CLI 适配参数是硬编码的”转移到“真实 CLI 子进程仍可能绕过平台网关”。
 
 ### 改进建议：Provider Profile
 
@@ -98,10 +98,10 @@ AgentForge 不是基于 Magpie 框架实现。Magpie 目前只是部分 CLI 适�
 
 实现顺序：
 
-1. 把 CLI 参数中的固定网关、模型和凭据改为模板变量。
-2. Provider Profile 持久化，并支持创建、测试、复制和停用。
-3. Agent 可选择 Provider Profile 与模型，健康检查按 Profile 执行。
-4. 增加路由与回退：同一角色可配置主 Provider、备用 Provider 和预算上限。
+1. 把 CLI 参数中的固定网关、模型和凭据改为模板变量。已完成 `cliBindings`。
+2. Provider Profile 持久化，并支持创建、测试、复制和停用。已完成创建、测试和停用，复制待补。
+3. Agent 可选择 Provider Profile 与模型，健康检查按 Profile 执行。已完成。
+4. 增加路由与回退：同一角色可配置主 Provider、备用 Provider 和预算上限。已完成主/备路由和失败回退，费用预算待补。
 5. 凭据只保存引用或系统密钥，不把明文 API Key 写进 `db.json`。
 
 验收标准：不修改源码即可新增一个 OpenAI/Anthropic 兼容网关，并让不同 Agent 使用不同 Provider、模型和凭据。
@@ -160,7 +160,7 @@ AgentForge 不是基于 Magpie 框架实现。Magpie 目前只是部分 CLI 适�
 - 进程内已有任务级 Scheduler，可限制同时运行的任务数，并展示排队位置和等待原因。
 - Provider 配额按绑定该 Provider 的活跃任务计数，不按每次 CLI 调用计数；同一个 Provider 仍可能被单任务内的多个工序并发使用。
 - Agent 租约只覆盖显式声明的 Agent；同一任务内可重入，不同任务之间互斥。
-- 工作区配额、磁盘配额、任务优先级和跨 Provider 回退尚未实现。
+- 工作区配额、磁盘配额、任务优先级和 Provider 级费用预算尚未实现；主/备 Provider 回退已实现。
 - 没有显式的专项 Agent 模板（前端、后端、测试、安全等）与能力路由。
 
 ### 改进建议
@@ -195,7 +195,7 @@ AgentForge 不是基于 Magpie 框架实现。Magpie 目前只是部分 CLI 适�
 | 协作消息路由 | 已完成 | 消息记录来源、目标、父消息、关联工序、产物引用和 correlationId |
 | Tool Gateway 第一层 | 已完成 | 统一工具描述、Owner/Agent/System 主体、工具白名单、工作区执行和审计事件 |
 | 工作区控制台 | 已完成 | 计划版本、协作消息、工具审计与原有文件、执行泳道、Diff 统一展示 |
-| Provider Profile | 第一层已完成 | Agent 绑定 Profile；Base URL、模型、密钥环境变量引用和并发上限可配置；CLI 参数模板与自动路由待补 |
+| Provider Profile | 已完成 | Agent 绑定主/备 Profile；Base URL、模型、密钥环境变量引用、CLI 参数模板和并发上限可配置；真实 CLI 失败后按顺序回退 |
 | 全局 Scheduler | 第一层已完成 | 任务并发上限、Provider 配额、排队位置、等待原因、Agent 租约和取消排队 |
 | Shell 沙箱 | 待实施 | `shell` 端点明确返回 501，不把未执行的命令伪装成成功 |
 
@@ -206,7 +206,7 @@ AgentForge 不是基于 Magpie 框架实现。Magpie 目前只是部分 CLI 适�
 | 阶段 | 重点 | 交付物 |
 | --- | --- | --- |
 | P0（已完成） | 工作区 API、全屏控制台、工具白名单、Git worktree/clone 回退、Diff 与事件流 | 可用的单机协作台 |
-| P1（第一层已完成） | Tool Gateway、计划版本、消息路由、Provider Profile 与密钥引用 | 平台 API 可校验、可审计、可重规划 |
+| P1（第一层已完成） | Tool Gateway、计划版本、消息路由、Provider Profile、CLI 参数模板与自动回退 | 平台 API 可校验、可审计、可重规划 |
 | P2（第一层已完成） | 全局 Scheduler、任务并发、Provider 配额、Agent 租约；专项 Agent Profile 待补 | 稳定的多任务并发 |
 | P3 | DAG 图、时间回放、评审与合并工作台 | 面向复杂项目的可视化协作 |
 

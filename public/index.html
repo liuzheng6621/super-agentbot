@@ -517,6 +517,10 @@
                 <select name="providerId" id="agentProvider"></select>
               </label>
               <label class="field">
+                <span>备用 Provider<em>按顺序填写 ID，逗号分隔</em></span>
+                <input name="fallbackProviderIds" id="agentFallbackProviders" placeholder="provider-backup, provider-local" />
+              </label>
+              <label class="field">
                 <span>命令</span>
                 <input name="command" placeholder="codex / dsh / workbuddy / claude" />
               </label>
@@ -666,6 +670,14 @@
                   <input name="apiKeyRef" placeholder="例如 OPENAI_API_KEY" />
                 </label>
               </div>
+              <label class="field">
+                <span>能力标签<em>逗号分隔，供后续路由筛选</em></span>
+                <input name="capabilities" placeholder="chat, tools" />
+              </label>
+              <label class="field">
+                <span>CLI 参数模板<em>JSON，键为命令名</em></span>
+                <textarea name="cliBindings" rows="6" spellcheck="false" placeholder='{"codex":{"args":["exec","-c","model={{model}}","{{prompt}}"],"env":{"OPENAI_BASE_URL":"{{baseUrl}}","OPENAI_API_KEY":"{{apiKey}}"}}}'></textarea>
+              </label>
               <label class="flow-row">
                 <span class="fr-main">启用 Profile<b>停用后，绑定它的任务会在队列中等待</b></span>
                 <input type="checkbox" name="enabled" class="switch" checked />

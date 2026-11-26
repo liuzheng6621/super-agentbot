@@ -220,6 +220,7 @@ function defaultAgents() {
     tools: toolsForRole(role),
     mode: 'sim',
     providerId: DEFAULT_PROVIDER_ID,
+    fallbackProviderIds: [],
     // 内置演示席位：服务启动后会用本机真实 CLI 顶替（见 server/team.mjs）
     builtin: true,
     seat: true,
@@ -269,6 +270,18 @@ function normalizeSeats(agents) {
     if (agent.seat && !seated.has(agent.role)) seated.add(agent.role);
     else agent.seat = false;
   }
+}
+
+function normalizeProviderIds(value, providers, primaryId = '') {
+  if (!Array.isArray(value)) return [];
+  const known = new Set((providers || []).map((provider) => provider.id));
+  return [
+    ...new Set(
+      value
+        .map((id) => String(id || '').trim())
+        .filter((id) => id && id !== primaryId && known.has(id)),
+    ),
+  ];
 }
 
 function runGit(root, args, timeout = 15000) {
@@ -380,22 +393,42 @@ class Store {
       fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
       if (fs.existsSync(DB_FILE)) {
         const raw = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+        const defaults = defaultProviders();
+        const capabilitiesMigrated = raw.settings?.providerCapabilitiesMigrated === true;
         const providers = (Array.isArray(raw.providers) && raw.providers.length
           ? raw.providers
-          : defaultProviders()
-        ).map((provider) => normalizeProvider(provider));
+          : defaults
+        ).map((provider) => {
+          const normalized = normalizeProvider(
+            provider,
+            provider?.id === DEFAULT_PROVIDER_ID ? defaults[0] : {},
+          );
+          if (
+            !capabilitiesMigrated &&
+            normalized.id === DEFAULT_PROVIDER_ID &&
+            normalized.builtin &&
+            normalized.capabilities.length === 0
+          ) {
+            normalized.capabilities = [...defaults[0].capabilities];
+          }
+          return normalized;
+        });
         if (!providers.some((provider) => provider.id === DEFAULT_PROVIDER_ID)) {
-          providers.unshift(...defaultProviders());
+          providers.unshift(...defaults);
         }
         this.db = {
           agents: Array.isArray(raw.agents) && raw.agents.length ? raw.agents : defaultAgents(),
           providers,
           tasks: Array.isArray(raw.tasks) ? raw.tasks : [],
-          settings: { ...emptyDb().settings, ...(raw.settings || {}) },
+          settings: {
+            ...emptyDb().settings,
+            ...(raw.settings || {}),
+            providerCapabilitiesMigrated: true,
+          },
         };
         // 运行状态不跨进程保留
         normalizeSeats(this.db.agents);
-        let recovered = false;
+        let recovered = !capabilitiesMigrated;
         for (const a of this.db.agents) {
           const providerId = String(a.providerId || DEFAULT_PROVIDER_ID);
           if (!this.db.providers.some((provider) => provider.id === providerId)) {
@@ -405,6 +438,15 @@ class Store {
             a.providerId = providerId;
             recovered = true;
           }
+          const fallbackProviderIds = normalizeProviderIds(
+            a.fallbackProviderIds,
+            this.db.providers,
+            a.providerId,
+          );
+          if (JSON.stringify(fallbackProviderIds) !== JSON.stringify(a.fallbackProviderIds || [])) {
+            recovered = true;
+          }
+          a.fallbackProviderIds = fallbackProviderIds;
           a.status = 'idle';
           a.activity = '';
           const tools = normalizeTools(a.tools, a.role);
@@ -551,6 +593,9 @@ class Store {
     this.db.providers.splice(index, 1);
     for (const agent of this.db.agents) {
       if (agent.providerId === id) agent.providerId = DEFAULT_PROVIDER_ID;
+      agent.fallbackProviderIds = (agent.fallbackProviderIds || []).filter(
+        (providerId) => providerId !== id && providerId !== agent.providerId,
+      );
     }
     this.save();
     this.broadcast({ type: 'providers.changed', providers: this.db.providers.map(redactProvider) });
@@ -593,6 +638,13 @@ class Store {
       providerId: this.getProvider(String(patch.providerId || DEFAULT_PROVIDER_ID))
         ? String(patch.providerId || DEFAULT_PROVIDER_ID)
         : DEFAULT_PROVIDER_ID,
+      fallbackProviderIds: normalizeProviderIds(
+        patch.fallbackProviderIds,
+        this.db.providers,
+        this.getProvider(String(patch.providerId || DEFAULT_PROVIDER_ID))
+          ? String(patch.providerId || DEFAULT_PROVIDER_ID)
+          : DEFAULT_PROVIDER_ID,
+      ),
       builtin: false,
       health: patch.health || null,
       // 同一角色默认只有一个主执行席位，额外接入的 CLI 进入工具池。
@@ -632,6 +684,19 @@ class Store {
       agent.providerId = this.getProvider(String(patch.providerId))
         ? String(patch.providerId)
         : DEFAULT_PROVIDER_ID;
+    }
+    if (patch.fallbackProviderIds !== undefined) {
+      agent.fallbackProviderIds = normalizeProviderIds(
+        patch.fallbackProviderIds,
+        this.db.providers,
+        agent.providerId,
+      );
+    } else {
+      agent.fallbackProviderIds = normalizeProviderIds(
+        agent.fallbackProviderIds,
+        this.db.providers,
+        agent.providerId,
+      );
     }
     // 先把旧 cli 存下来再合并，否则 Object.assign 已经把 agent.cli 覆盖成新对象了
     if (patch.cli) agent.cli = { ...prevCli, ...patch.cli };

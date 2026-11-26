@@ -2688,7 +2688,7 @@ function renderProviders() {
           (provider) => `<div class="provider-row">
             <div class="provider-row-main">
               <b>${escapeHtml(provider.name)}</b>
-              <span>${escapeHtml(provider.id)} · ${escapeHtml(provider.kind)} · 并发 ${provider.maxConcurrency}${provider.model ? ` · ${escapeHtml(provider.model)}` : ""}</span>
+              <span>${escapeHtml(provider.id)} · ${escapeHtml(provider.kind)} · 并发 ${provider.maxConcurrency}${provider.model ? ` · ${escapeHtml(provider.model)}` : ""}${Object.keys(provider.cliBindings || {}).length ? ` · ${Object.keys(provider.cliBindings).length} 个 CLI 模板` : ""}${(provider.capabilities || []).length ? ` · ${escapeHtml(provider.capabilities.join("/"))}` : ""}</span>
             </div>
             <span class="provider-row-state">${provider.enabled === false ? "OFF" : "ON"}</span>
             <button type="button" class="link-btn" data-provider-edit="${escapeHtml(provider.id)}">编辑</button>
@@ -2715,6 +2715,10 @@ function fillProviderForm(provider = null) {
   f("baseUrl").value = provider?.baseUrl || "";
   f("model").value = provider?.model || "";
   f("apiKeyRef").value = provider?.apiKeyRef || "";
+  f("capabilities").value = (provider?.capabilities || []).join(", ");
+  f("cliBindings").value = provider && Object.keys(provider.cliBindings || {}).length
+    ? JSON.stringify(provider.cliBindings, null, 2)
+    : "";
   f("maxConcurrency").value = provider?.maxConcurrency || 2;
   f("enabled").checked = provider?.enabled !== false;
   $("#providerFormHint").textContent = provider ? `正在编辑 ${provider.name}` : "新 Profile";
@@ -2729,6 +2733,19 @@ function openProviderModal(provider = null) {
 async function saveProvider() {
   const form = $("#providerForm");
   const fd = new FormData(form);
+  let cliBindings = {};
+  const bindingsText = String(fd.get("cliBindings") || "").trim();
+  if (bindingsText) {
+    try {
+      cliBindings = JSON.parse(bindingsText);
+      if (!cliBindings || typeof cliBindings !== "object" || Array.isArray(cliBindings)) {
+        throw new Error("必须是 JSON 对象");
+      }
+    } catch (err) {
+      toast(`CLI 参数模板无效：${err.message}`, "err");
+      return;
+    }
+  }
   const payload = {
     id: String(fd.get("id") || "").trim(),
     name: String(fd.get("name") || "").trim(),
@@ -2736,6 +2753,11 @@ async function saveProvider() {
     baseUrl: String(fd.get("baseUrl") || "").trim(),
     model: String(fd.get("model") || "").trim(),
     apiKeyRef: String(fd.get("apiKeyRef") || "").trim(),
+    capabilities: String(fd.get("capabilities") || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean),
+    cliBindings,
     maxConcurrency: Number(fd.get("maxConcurrency")) || 2,
     enabled: fd.get("enabled") === "on",
   };
@@ -2830,6 +2852,7 @@ function openAgentModal(agent = null, preset = null) {
     f("command").value = agent.cli?.command || "";
     f("args").value = (agent.cli?.args || []).join(" ");
     f("providerId").value = agent.providerId || "local-default";
+    f("fallbackProviderIds").value = (agent.fallbackProviderIds || []).join(", ");
     f("seat").checked = agent.seat !== false;
   } else if (preset) {
     f("name").value = preset.name || "";
@@ -2837,6 +2860,7 @@ function openAgentModal(agent = null, preset = null) {
     f("command").value = preset.command || "";
     f("args").value = preset.args || "run {{prompt}}";
     f("providerId").value = "local-default";
+    f("fallbackProviderIds").value = "";
     f("seat").checked = false;
   }
 
@@ -3002,6 +3026,10 @@ function bind() {
       title: ROLE_TITLE[role] || "自定义智能体",
       mode,
       providerId: String(fd.get("providerId") || "local-default"),
+      fallbackProviderIds: String(fd.get("fallbackProviderIds") || "")
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean),
       seat: fd.get("seat") === "on",
       tools: fd.getAll("tools").map(String),
       cli: { command, args: argsStr ? argsStr.split(/\s+/) : [] },

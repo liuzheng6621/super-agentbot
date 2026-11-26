@@ -21,6 +21,7 @@ const {
   isCompleteDecisionText,
   shouldRetryCliResult,
   CLI_TIMEOUTS,
+  chat,
 } = await import('../server/orchestrator.mjs');
 const { classifyCliExit, normalizeCliArgs, spawnCli } = await import('../server/adapters.mjs');
 
@@ -273,6 +274,62 @@ test('执行回退按 CLI 命令去重，且 CLI 任务不会静默落到模拟�
   const onlyCli = stepAgentCandidates({ role: 'coder' }, broken);
   assert.ok(onlyCli.length > 0);
   assert.ok(onlyCli.every((a) => a.mode === 'cli' && a.cli.command));
+});
+
+test('真实 CLI 调用失败后按 Provider 路由切换到备用网关', async () => {
+  const primary = store.addProvider({
+    id: 'fallback-primary',
+    name: 'Fallback Primary',
+    kind: 'cli-native',
+    cliBindings: {
+      node: {
+        args: ['-e', "process.stderr.write('PRIMARY_FAILED'); process.exit(1)"],
+      },
+    },
+  });
+  const backup = store.addProvider({
+    id: 'fallback-backup',
+    name: 'Fallback Backup',
+    kind: 'cli-native',
+    cliBindings: {
+      node: {
+        args: ['-e', "process.stdout.write('BACKUP_OK')"],
+      },
+    },
+  });
+  const agent = store.addAgent({
+    name: 'RouteFallbackAgent',
+    role: 'coder',
+    mode: 'cli',
+    providerId: primary.id,
+    fallbackProviderIds: [backup.id],
+    cli: { command: process.execPath, args: ['-e', 'process.exit(2)'] },
+  });
+  const task = store.createTask({ goal: 'provider fallback integration' });
+
+  try {
+    const ok = await chat(task.id, '@RouteFallbackAgent ping');
+    assert.equal(ok, true);
+    const events = store.getTask(task.id).events;
+    assert.ok(
+      events.some(
+        (event) =>
+          event.type === 'provider.fallback' &&
+          event.data.fromProviderId === primary.id &&
+          event.data.toProviderId === backup.id,
+      ),
+    );
+    const message = store
+      .getTask(task.id)
+      .messages.find((item) => item.agentId === agent.id && item.kind === 'text');
+    assert.match(message.text, /BACKUP_OK/);
+    assert.equal(message.meta.providerFallback, true);
+    assert.equal(message.meta.providerId, backup.id);
+  } finally {
+    store.removeAgent(agent.id);
+    store.removeProvider(primary.id);
+    store.removeProvider(backup.id);
+  }
 });
 
 test.after(() => {

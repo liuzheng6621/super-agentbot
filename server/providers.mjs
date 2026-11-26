@@ -1,10 +1,14 @@
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 
 export const DEFAULT_PROVIDER_ID = 'local-default';
 export const PROVIDER_KINDS = ['cli-native', 'openai-compatible'];
 
 const SECRET_KEY = /(?:key|token|secret|password)/i;
 const PROVIDER_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
+const TEMPLATE_TOKEN = /\{\{\s*([a-zA-Z][\w:-]*)\s*\}\}/g;
+const TEMPLATE_ONLY = /^\s*(?:\{\{\s*[a-zA-Z][\w:-]*\s*\}\}\s*)+$/;
+const REDACTED_SECRET = '••••••';
 
 function text(value, max = 200) {
   return String(value ?? '').trim().slice(0, max);
@@ -28,6 +32,60 @@ function cleanEnv(value) {
   return out;
 }
 
+function preserveMaskedEnv(value, fallback = {}) {
+  const env = cleanEnv(value);
+  for (const [key, envValue] of Object.entries(env)) {
+    if (envValue === REDACTED_SECRET && fallback?.[key] !== undefined) {
+      env[key] = String(fallback[key]);
+    }
+  }
+  return env;
+}
+
+function maskEnv(env) {
+  const masked = {};
+  for (const [key, value] of Object.entries(env || {})) {
+    masked[key] =
+      SECRET_KEY.test(key) && !TEMPLATE_ONLY.test(String(value ?? ''))
+        ? REDACTED_SECRET
+        : value;
+  }
+  return masked;
+}
+
+export function cliCommandKey(command) {
+  const base = path
+    .basename(String(command || '').trim().replace(/^["']|["']$/g, ''))
+    .replace(/\.(exe|cmd|bat|ps1)$/i, '')
+    .toLowerCase();
+  return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(base) ? base : '';
+}
+
+function cleanCliBindings(value, fallback = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  const out = {};
+  for (const [rawKey, rawBinding] of Object.entries(value).slice(0, 24)) {
+    const key = cliCommandKey(rawKey);
+    if (!key) continue;
+    const binding =
+      rawBinding && typeof rawBinding === 'object' && !Array.isArray(rawBinding) ? rawBinding : {};
+    const args = Array.isArray(binding.args)
+      ? binding.args
+          .map((arg) => String(arg ?? '').slice(0, 4000))
+          .filter((arg) => arg.trim())
+          .slice(0, 64)
+      : [];
+    const env = preserveMaskedEnv(binding.env, fallback?.[key]?.env);
+    if (args.length || Object.keys(env).length) out[key] = { args, env };
+  }
+  return out;
+}
+
+function stringList(value, max = 16) {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((item) => text(item, 80)).filter(Boolean))].slice(0, max);
+}
+
 export function defaultProviders() {
   return [
     {
@@ -38,6 +96,8 @@ export function defaultProviders() {
       model: '',
       apiKeyRef: '',
       env: {},
+      capabilities: ['chat', 'tools'],
+      cliBindings: {},
       maxConcurrency: 2,
       enabled: true,
       builtin: true,
@@ -60,7 +120,9 @@ export function normalizeProvider(input = {}, fallback = {}) {
     baseUrl: text(source.baseUrl, 1000),
     model: text(source.model, 160),
     apiKeyRef: text(source.apiKeyRef, 80),
-    env: cleanEnv(source.env),
+    env: preserveMaskedEnv(source.env, fallback.env),
+    capabilities: stringList(source.capabilities),
+    cliBindings: cleanCliBindings(source.cliBindings, fallback.cliBindings),
     maxConcurrency: integer(source.maxConcurrency, 1, 16, 2),
     enabled: source.enabled !== false,
     builtin: source.builtin === true || fallback.builtin === true,
@@ -75,11 +137,15 @@ export function normalizeProvider(input = {}, fallback = {}) {
  */
 export function redactProvider(provider) {
   const item = normalizeProvider(provider);
-  const env = {};
-  for (const [key, value] of Object.entries(item.env)) {
-    env[key] = SECRET_KEY.test(key) ? '••••••' : value;
+  const env = maskEnv(item.env);
+  const cliBindings = {};
+  for (const [key, binding] of Object.entries(item.cliBindings || {})) {
+    cliBindings[key] = {
+      args: [...(binding.args || [])],
+      env: maskEnv(binding.env),
+    };
   }
-  return { ...item, env };
+  return { ...item, env, cliBindings };
 }
 
 export function resolveProvider(agent, providers = []) {
@@ -91,9 +157,66 @@ export function resolveProvider(agent, providers = []) {
   );
 }
 
-export function providerEnv(provider, baseEnv = process.env) {
+/**
+ * Resolve the ordered provider route for an agent. Disabled providers are
+ * skipped when an enabled alternative exists; if everything is disabled we
+ * return the configured route so the UI can still explain why it failed.
+ */
+export function providerRoute(agent, providers = []) {
+  const ids = [
+    text(agent?.providerId, 64) || DEFAULT_PROVIDER_ID,
+    ...(Array.isArray(agent?.fallbackProviderIds) ? agent.fallbackProviderIds.map(String) : []),
+  ];
+  const found = [];
+  for (const id of [...new Set(ids)]) {
+    const provider = providers.find((item) => item.id === id);
+    if (provider && !found.some((item) => item.id === provider.id)) found.push(provider);
+  }
+  if (!found.length) {
+    const primary = resolveProvider(agent, providers);
+    if (primary) found.push(primary);
+  }
+  const enabled = found.filter((provider) => provider.enabled !== false);
+  return enabled.length ? enabled : found;
+}
+
+export function providerCliBinding(provider, command) {
+  const key = cliCommandKey(command);
+  return key ? provider?.cliBindings?.[key] || null : null;
+}
+
+export function renderProviderTemplate(value, context = {}, { keepPrompt = true } = {}) {
+  return String(value ?? '').replace(TEMPLATE_TOKEN, (match, key) => {
+    if (key === 'prompt') return keepPrompt ? match : '';
+    if (key.startsWith('env:')) {
+      const envKey = key.slice(4);
+      return context.env && Object.hasOwn(context.env, envKey) ? String(context.env[envKey]) : match;
+    }
+    return Object.hasOwn(context, key) ? String(context[key] ?? '') : match;
+  });
+}
+
+function providerTemplateContext(provider, baseEnv = process.env) {
+  const keyRef = text(provider?.apiKeyRef, 80);
+  return {
+    model: text(provider?.model, 160),
+    baseUrl: text(provider?.baseUrl, 1000),
+    apiKey: keyRef && baseEnv?.[keyRef] ? String(baseEnv[keyRef]) : '',
+    providerId: text(provider?.id, 64),
+    providerName: text(provider?.name, 80),
+    env: { ...(baseEnv || {}), ...(provider?.env || {}) },
+  };
+}
+
+export function providerEnv(provider, baseEnv = process.env, command = '') {
   if (!provider) return {};
-  const env = { ...(provider.env || {}) };
+  const context = providerTemplateContext(provider, baseEnv);
+  const binding = providerCliBinding(provider, command);
+  const bindingEnv = {};
+  for (const [key, value] of Object.entries(binding?.env || {})) {
+    bindingEnv[key] = renderProviderTemplate(value, context, { keepPrompt: false });
+  }
+  const env = { ...(provider.env || {}), ...bindingEnv };
   const baseUrl = text(provider.baseUrl, 1000);
   const model = text(provider.model, 160);
   if (baseUrl) {
@@ -108,13 +231,14 @@ export function providerEnv(provider, baseEnv = process.env) {
     env.AGENTFORGE_MODEL = model;
   }
   const keyRef = text(provider.apiKeyRef, 80);
-  if (keyRef && baseEnv?.[keyRef]) {
-    env.OPENAI_API_KEY ||= String(baseEnv[keyRef]);
-    env.GEMINI_API_KEY ||= String(baseEnv[keyRef]);
-    env.ANTHROPIC_API_KEY ||= String(baseEnv[keyRef]);
-    env.AGENTFORGE_PROVIDER_API_KEY ||= String(baseEnv[keyRef]);
+  if (context.apiKey) {
+    env.OPENAI_API_KEY ||= context.apiKey;
+    env.GEMINI_API_KEY ||= context.apiKey;
+    env.ANTHROPIC_API_KEY ||= context.apiKey;
+    env.AGENTFORGE_PROVIDER_API_KEY ||= context.apiKey;
   }
   env.AGENTFORGE_PROVIDER_ID = provider.id;
+  if (provider.name) env.AGENTFORGE_PROVIDER_NAME = provider.name;
   return env;
 }
 
@@ -125,15 +249,22 @@ export function providerEnv(provider, baseEnv = process.env) {
 export function withProviderProfile(agent, provider, baseEnv = process.env) {
   if (!agent) return agent;
   if (!provider) return { ...agent, cli: { ...(agent.cli || {}) } };
+  const command = agent.cli?.command || '';
+  const binding = providerCliBinding(provider, command);
+  const context = providerTemplateContext(provider, baseEnv);
+  const args = binding?.args?.length
+    ? binding.args.map((arg) => renderProviderTemplate(arg, context))
+    : agent.cli?.args || [];
   return {
     ...agent,
     providerId: provider.id,
     provider: { ...provider },
     cli: {
       ...(agent.cli || {}),
+      args,
       env: {
         ...(agent.cli?.env || {}),
-        ...providerEnv(provider, baseEnv),
+        ...providerEnv(provider, baseEnv, command),
       },
     },
   };

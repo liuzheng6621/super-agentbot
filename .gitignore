@@ -20,3 +20,4 @@ dsh-probe.err
 shot-new.png
 shot-*.png
 artifacts/
+.playwright-cli/

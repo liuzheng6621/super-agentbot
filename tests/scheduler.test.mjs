@@ -8,7 +8,12 @@ const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-scheduler-'));
 process.env.AGENTFORGE_DATA_DIR = temp;
 
 const { store } = await import('../server/store.mjs');
-const { providerEnv, withProviderProfile } = await import('../server/providers.mjs');
+const {
+  providerEnv,
+  providerRoute,
+  redactProvider,
+  withProviderProfile,
+} = await import('../server/providers.mjs');
 const {
   cancelQueuedTask,
   configureScheduler,
@@ -40,12 +45,32 @@ test('provider profile persists, resolves environment and migrates agent binding
     model: 'test-model',
     apiKeyRef: 'AGENTFORGE_TEST_KEY',
     maxConcurrency: 1,
+    capabilities: ['chat', 'tools'],
+    env: {
+      PLAIN_SETTING: 'visible',
+      EXTRA_SECRET: 'plain-test-value',
+    },
+    cliBindings: {
+      codex: {
+        args: ['exec', '-c', 'model={{model}}', '{{prompt}}'],
+        env: {
+          OPENAI_API_KEY: '{{apiKey}}',
+          OPENAI_BASE_URL: '{{baseUrl}}',
+          EXTRA_SECRET: 'plain-test-value',
+          RESOLVED_FROM_ENV: '{{env:AGENTFORGE_TEST_KEY}}',
+        },
+      },
+    },
   });
   assert.equal(provider.id, 'local-test');
   assert.equal(store.getProvider('local-test').maxConcurrency, 1);
+  assert.deepEqual(store.getProvider('local-test').capabilities, ['chat', 'tools']);
 
   const agent = store.findAgentByRole('coder');
-  store.updateAgent(agent.id, { providerId: 'local-test' });
+  store.updateAgent(agent.id, {
+    providerId: 'local-test',
+    cli: { command: 'codex', args: ['-p', '{{prompt}}'] },
+  });
   assert.equal(store.getAgent(agent.id).providerId, 'local-test');
   assert.equal(store.providerForAgent(store.getAgent(agent.id)).name, 'Local Test');
   const resolved = withProviderProfile(store.getAgent(agent.id), store.getProvider('local-test'), {
@@ -58,6 +83,28 @@ test('provider profile persists, resolves environment and migrates agent binding
   assert.equal(resolved.cli.env.GEMINI_API_KEY, 'not-a-real-secret');
   assert.equal(resolved.cli.env.ANTHROPIC_API_KEY, 'not-a-real-secret');
   assert.equal(resolved.cli.env.AGENTFORGE_MODEL, 'test-model');
+  assert.equal(resolved.cli.env.RESOLVED_FROM_ENV, 'not-a-real-secret');
+  assert.deepEqual(resolved.cli.args, ['exec', '-c', 'model=test-model', '{{prompt}}']);
+  const redacted = redactProvider(store.getProvider('local-test'));
+  assert.equal(redacted.cliBindings.codex.env.OPENAI_API_KEY, '{{apiKey}}');
+  assert.equal(redacted.cliBindings.codex.env.EXTRA_SECRET, '••••••');
+  assert.equal(redacted.env.EXTRA_SECRET, '••••••');
+  assert.equal(redacted.env.PLAIN_SETTING, 'visible');
+  store.updateProvider('local-test', {
+    cliBindings: {
+      codex: {
+        args: ['exec', '-c', 'model={{model}}', '{{prompt}}'],
+        env: {
+          ...redacted.cliBindings.codex.env,
+          EXTRA_SECRET: redacted.cliBindings.codex.env.EXTRA_SECRET,
+        },
+      },
+    },
+  });
+  assert.equal(
+    store.getProvider('local-test').cliBindings.codex.env.EXTRA_SECRET,
+    'plain-test-value',
+  );
   assert.equal(
     providerEnv(store.getProvider('local-test'), { AGENTFORGE_TEST_KEY: 'not-a-real-secret' })
       .OPENAI_API_KEY,
@@ -67,6 +114,35 @@ test('provider profile persists, resolves environment and migrates agent binding
   store.removeProvider('local-test');
   assert.equal(store.getAgent(agent.id).providerId, 'local-default');
   assert.equal(store.getProvider('local-test'), undefined);
+});
+
+test('provider route follows fallback order and skips disabled primary', () => {
+  const backup = store.addProvider({
+    id: 'route-backup',
+    name: 'Route Backup',
+    kind: 'openai-compatible',
+  });
+  const disabled = store.addProvider({
+    id: 'route-disabled',
+    name: 'Route Disabled',
+    kind: 'openai-compatible',
+    enabled: false,
+  });
+  const agent = store.findAgentByRole('coder');
+  store.updateAgent(agent.id, {
+    providerId: disabled.id,
+    fallbackProviderIds: [backup.id, 'missing-provider'],
+  });
+
+  assert.deepEqual(
+    providerRoute(store.getAgent(agent.id), store.providers).map((provider) => provider.id),
+    ['route-backup'],
+  );
+
+  store.removeProvider(backup.id);
+  store.removeProvider(disabled.id);
+  assert.equal(store.getAgent(agent.id).providerId, 'local-default');
+  assert.deepEqual(store.getAgent(agent.id).fallbackProviderIds, []);
 });
 
 test('scheduler enforces global task concurrency and reports queue position', async () => {

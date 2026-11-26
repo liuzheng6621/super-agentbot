@@ -2448,7 +2448,8 @@ kbd {
 }
 
 .field input,
-.field select {
+.field select,
+.field textarea {
   font-family: var(--f-body);
   font-size: 13px;
   color: var(--fg);
@@ -2459,8 +2460,17 @@ kbd {
   border-radius: 0;
 }
 
+.field textarea {
+  min-height: 96px;
+  resize: vertical;
+  font-family: var(--f-mono);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .field input:focus,
-.field select:focus {
+.field select:focus,
+.field textarea:focus {
   background: var(--card);
   box-shadow: 2px 2px 0 var(--orange);
 }
