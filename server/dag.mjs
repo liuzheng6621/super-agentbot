@@ -54,7 +54,15 @@ export function validateDag(steps, completed = []) {
 
 export async function runDag(
   steps,
-  { run, onUpdate, signal, maxConcurrency = 2, completed = [] } = {},
+  {
+    run,
+    onUpdate,
+    signal,
+    maxConcurrency = 2,
+    completed = [],
+    runId = '',
+    resourceKey = (node) => node?.agentId || '',
+  } = {},
 ) {
   if (typeof run !== 'function') throw new Error('runDag 缺少 run 回调');
   validateDag(steps, completed);
@@ -63,22 +71,40 @@ export async function runDag(
   const status = new Map(steps.map((s) => [s.id, 'pending']));
   const results = new Map();
   const active = new Set();
+  const activeResources = new Map();
+  const contexts = new Map();
   const limit = Math.max(1, Number(maxConcurrency) || 1);
+  let executionSequence = 0;
   let failed = false;
+
+  const keyFor = (node) => {
+    const key = typeof resourceKey === 'function' ? resourceKey(node) : resourceKey;
+    return String(key || '');
+  };
 
   const update = (node, next, patch = {}) => {
     status.set(node.id, next);
-    onUpdate?.(node.id, { status: next, ...patch });
+    onUpdate?.(node.id, { status: next, ...patch }, contexts.get(node.id) || null);
   };
 
   const depStatus = (id) => (external.has(id) ? 'done' : status.get(id));
 
   const launch = (node) => {
+    executionSequence += 1;
+    const resource = keyFor(node);
+    const context = {
+      stepId: node.id,
+      agentId: String(node.agentId || ''),
+      executionId: `${runId || 'run'}:${node.id}:${executionSequence}`,
+      runId: String(runId || ''),
+    };
+    contexts.set(node.id, context);
+    if (resource) activeResources.set(resource, (activeResources.get(resource) || 0) + 1);
     update(node, 'running', { startedAt: Date.now() });
     const promise = Promise.resolve()
       .then(() => {
         throwIfAborted(signal);
-        return run(node, { signal });
+        return run(node, { ...context, signal });
       })
       .then((result) => {
         if (signal?.aborted) throw abortError();
@@ -106,7 +132,14 @@ export async function runDag(
           endedAt: Date.now(),
         });
       })
-      .finally(() => active.delete(promise));
+      .finally(() => {
+        active.delete(promise);
+        if (resource) {
+          const count = Math.max(0, (activeResources.get(resource) || 1) - 1);
+          if (count) activeResources.set(resource, count);
+          else activeResources.delete(resource);
+        }
+      });
     active.add(promise);
   };
 
@@ -138,6 +171,8 @@ export async function runDag(
       );
       for (const node of ready) {
         if (active.size >= limit) break;
+        const resource = keyFor(node);
+        if (resource && activeResources.get(resource)) continue;
         launch(node);
       }
 

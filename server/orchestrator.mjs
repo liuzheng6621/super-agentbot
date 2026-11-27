@@ -805,7 +805,7 @@ async function cliMessage(
     to,
     parentMessageId,
     causeBy,
-    stepId: stepId || agent.currentStepId || '',
+    stepId,
     artifactRefs,
   });
   beginAgent(agent, `${agent.cli?.command || 'CLI'} 运行中`);
@@ -843,7 +843,7 @@ async function cliMessage(
     const toolCall = store.addTaskEvent(task.id, {
       type: 'tool.call.start',
       agentId: agent.id,
-      stepId: agent.currentStepId || '',
+      stepId,
       data: {
         callId,
         tool: 'cli',
@@ -862,7 +862,7 @@ async function cliMessage(
     store.addTaskEvent(task.id, {
       type: 'cli.policy.start',
       agentId: agent.id,
-      stepId: agent.currentStepId || '',
+      stepId,
       data: {
         callId,
         command: cliPolicy.command,
@@ -963,7 +963,7 @@ async function cliMessage(
     store.addTaskEvent(task.id, {
       type: res.policyDenied ? 'cli.policy.denied' : 'cli.policy.end',
       agentId: agent.id,
-      stepId: agent.currentStepId || '',
+      stepId,
       data: {
         ...effectivePolicyData,
         callId,
@@ -979,7 +979,7 @@ async function cliMessage(
     store.addTaskEvent(task.id, {
       type: 'tool.call.end',
       agentId: agent.id,
-      stepId: agent.currentStepId || '',
+      stepId,
       data: {
         callId: toolCall?.data?.callId || callId,
         tool: 'cli',
@@ -1014,7 +1014,7 @@ async function cliMessage(
     store.addTaskEvent(task.id, {
       type: 'provider.fallback',
       agentId: agent.id,
-      stepId: agent.currentStepId || '',
+      stepId,
       data: {
         fromProviderId: provider?.id || '',
         fromProviderName: providerName,
@@ -1099,7 +1099,7 @@ async function cliMessage(
       version: versionOf(path.join(task.workspace, f.path)) || '',
       lang: path.extname(f.path).slice(1),
       agentId: agent.id,
-      stepId: agent.currentStepId || '',
+      stepId,
       beforeVersion: prev?.version || '',
       source: 'cli',
     });
@@ -1111,7 +1111,7 @@ async function cliMessage(
       if (afterPaths.has(relPath)) continue;
       store.markArtifactDeleted(task.id, relPath, {
         agentId: agent.id,
-        stepId: agent.currentStepId || '',
+        stepId,
       });
     }
   }
@@ -1859,7 +1859,6 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
 async function runStep(task, agent, { step, kind, prompt, signal, speed, simOutputs }) {
   if (!agent) throw new Error('没有可用的智能体');
   if (agent.mode === 'cli') {
-    agent.currentStepId = step?.id || '';
     const res = await cliMessage(task, agent, prompt, {
       kind,
       signal,
@@ -2114,13 +2113,15 @@ export function qualityGateAllowsDelivery(quality) {
   return quality?.status === 'passed';
 }
 
-async function executeSteps(task, steps, { outputs, speed, signal }) {
+async function executeSteps(task, steps, { outputs, speed, signal, runId = '' }) {
   return runDag(steps, {
     completed: [...outputs.keys()],
     maxConcurrency: Math.max(1, Number(store.db.settings.maxConcurrency) || 2),
+    runId,
+    resourceKey: (step) => step.agentId || '',
     signal,
     onUpdate: (stepId, patch) => store.updateStep(task.id, stepId, patch),
-    run: async (step) => {
+    run: async (step, execution) => {
       const latest = store.getTask(task.id);
       const preferred = store.getAgent(step.agentId) || pickAgent(step.role);
       const candidates = stepAgentCandidates(step, preferred);
@@ -2148,8 +2149,6 @@ async function executeSteps(task, steps, { outputs, speed, signal }) {
               ? `${preferred?.name || '原成员'} 失败，切换 ${agent.name} 重试`
               : step.note || '',
         });
-        agent.currentStepId = step.id;
-
         const reviewRecord =
           step.role === 'reviewer' ? recordReviewIndependence(current, step, agent) : null;
         const extra = {
@@ -2182,6 +2181,7 @@ async function executeSteps(task, steps, { outputs, speed, signal }) {
           simOutputs,
           // 首选成员允许按设置重试；切换成员后只给它一次机会，避免整条流水线被拖死。
           maxAttempts: index === 0 ? undefined : 1,
+          execution,
         });
         if (out.ok && step.role === 'reviewer') {
           const verdict = parseReviewVerdictDetails(out.text);
