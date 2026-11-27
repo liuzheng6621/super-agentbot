@@ -21,7 +21,9 @@ const {
   workspaceDiff,
   workspacePoolInfo,
   workspaceSnapshot,
+  workspaceUsage,
   writeWorkspaceEntry,
+  pruneWorkspaceTrash,
 } = await import('../server/workspace.mjs');
 
 function git(root, args) {
@@ -100,6 +102,47 @@ test('workspace tree, read, write, search and change tracking form a closed loop
   assert.equal(change.status, 'M');
   assert.notEqual(change.beforeVersion, change.afterVersion);
   assert.equal(readWorkspaceFile(current, 'src/app.js').content, 'export const answer = 42;\n');
+});
+
+test('workspace quota rejects oversized writes and can prune only expired trash', () => {
+  const task = store.createTask({ goal: '验证工作区配额与回收' });
+  const previous = {
+    workspaceQuotaBytes: store.db.settings.workspaceQuotaBytes,
+    workspaceTrashRetentionDays: store.db.settings.workspaceTrashRetentionDays,
+  };
+  try {
+    store.updateSettings({
+      workspaceQuotaBytes: 64,
+      workspaceTrashRetentionDays: 1,
+    });
+    assert.equal(store.db.settings.workspaceQuotaBytes, 64);
+    assert.equal(store.db.settings.workspaceTrashRetentionDays, 1);
+
+    writeWorkspaceEntry(task, 'kept.txt', 'x'.repeat(40));
+    assert.throws(
+      () => writeWorkspaceEntry(task, 'too-large.txt', 'y'.repeat(40)),
+      (err) => err.status === 413 && err.code === 'workspace-quota-exceeded',
+    );
+    assert.equal(fs.existsSync(path.join(task.workspace, 'too-large.txt')), false);
+
+    const current = store.getTask(task.id);
+    const usage = workspaceUsage(current);
+    assert.equal(usage.limitBytes, 64);
+    assert.ok(usage.usedBytes >= 40);
+    assert.equal(usage.overQuota, false);
+
+    const trash = path.join(task.workspace, '.agentforge', 'trash', 'old', 'gone.txt');
+    fs.mkdirSync(path.dirname(trash), { recursive: true });
+    fs.writeFileSync(trash, 'old');
+    const old = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    fs.utimesSync(trash, old, old);
+    const pruned = pruneWorkspaceTrash(current);
+    assert.equal(pruned.removed, 1);
+    assert.equal(fs.existsSync(trash), false);
+    assert.equal(fs.existsSync(path.join(task.workspace, 'kept.txt')), true);
+  } finally {
+    store.updateSettings(previous);
+  }
 });
 
 test('lazy workspace directory reads one level while the legacy snapshot stays recursive', () => {
@@ -218,6 +261,88 @@ test('HTTP workspace route exposes lazy directories and keeps the legacy full tr
     try {
       fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       fs.rmSync(project, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch {
+      /* Windows may briefly hold the child process directory. */
+    }
+  }
+});
+
+test('HTTP settings expose workspace quota and task detail reports managed usage', async () => {
+  const dataDir = fs.mkdtempSync(path.join(temp, 'quota-http-'));
+  const port = await availablePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const child = spawn(process.execPath, ['server/index.mjs'], {
+    cwd: path.resolve('.'),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: '127.0.0.1',
+      AGENTFORGE_DATA_DIR: dataDir,
+      AGENTFORGE_SKIP_TEAM_BOOTSTRAP: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+
+  try {
+    await waitForHealth(baseUrl, child);
+    const settingsResponse = await fetch(`${baseUrl}/api/settings`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceQuotaBytes: 32 }),
+    });
+    assert.equal(settingsResponse.status, 200);
+    const settings = await settingsResponse.json();
+    assert.equal(settings.settings.workspaceQuotaBytes, 32);
+
+    const created = await fetch(`${baseUrl}/api/tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ goal: 'HTTP workspace quota probe', autoRun: false }),
+    });
+    assert.equal(created.status, 201);
+    const { task } = await created.json();
+    assert.equal(task.workspaceUsage.limitBytes, 32);
+
+    const written = await fetch(`${baseUrl}/api/tasks/${task.id}/fs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op: 'write', path: 'ok.txt', content: '12345678' }),
+    });
+    assert.equal(written.status, 200);
+    const rejected = await fetch(`${baseUrl}/api/tasks/${task.id}/fs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op: 'write', path: 'too-large.txt', content: 'x'.repeat(40) }),
+    });
+    assert.equal(rejected.status, 413);
+    const rejectedBody = await rejected.json();
+    assert.equal(rejectedBody.code, 'workspace-quota-exceeded');
+
+    const detail = await fetch(`${baseUrl}/api/tasks/${task.id}`);
+    assert.equal(detail.status, 200);
+    const detailBody = await detail.json();
+    assert.equal(detailBody.task.workspaceUsage.usedBytes, 8);
+    assert.equal(detailBody.task.workspaceUsage.limitBytes, 32);
+  } catch (err) {
+    throw new Error(`${err.message}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  } finally {
+    if (child.exitCode === null) child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+      setTimeout(resolve, 2000).unref();
+    });
+    try {
+      fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     } catch {
       /* Windows may briefly hold the child process directory. */
     }

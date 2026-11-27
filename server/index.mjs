@@ -45,6 +45,8 @@ import {
   WorkspaceError,
   workspacePoolInfo,
   workspaceInfo,
+  workspaceUsage,
+  pruneWorkspaceTrash,
 } from './workspace.mjs';
 import { crossTaskOverview, taskGraph, taskReplay } from './overview.mjs';
 import { OtlpExporter, otlpSpanFromEvent, resolveOtlpConfig } from './otlp.mjs';
@@ -376,6 +378,7 @@ function taskDetail(task) {
     sourceWorkspace: task.sourceWorkspace || task.workspace,
     worktree: task.worktree || null,
     workspaceInfo: workspaceInfo(task),
+    workspaceUsage: workspaceUsage(task),
     workspacePool: workspacePoolInfo(
       task,
       poolAgent ? store.getAgent(poolAgent.agentId) : null,
@@ -1329,7 +1332,9 @@ const server = http.createServer(async (req, res) => {
       if (!task) return json(res, 404, { error: '任务不存在' });
       const action = taskMatch[2];
 
-      if (!action && method === 'GET') return json(res, 200, { task: taskDetail(task) });
+      if (!action && method === 'GET') {
+        return json(res, 200, { task: taskDetail(store.getTask(task.id) || task) });
+      }
       if (!action && method === 'DELETE') {
         stopTask(task.id);
         commandRunner.cancelTask(task.id);
@@ -1618,7 +1623,10 @@ const server = http.createServer(async (req, res) => {
   } catch (err) {
     if (err?.message === '请求体过大') return json(res, 413, { error: '请求体过大' });
     if (err instanceof WorkspaceError) {
-      return json(res, err.status || 400, { error: err.message });
+      return json(res, err.status || 400, {
+        error: err.message,
+        ...(err.code ? { code: err.code } : {}),
+      });
     }
     console.error('[api]', err);
     return json(res, 500, { error: err.message });
@@ -1726,6 +1734,16 @@ server.listen(PORT, HOST, () => {
   );
   console.log('');
   startAutomationRunner();
+  // 配额默认不限；只有显式配置保留期后才清理回收站，且不会碰业务文件。
+  if (Number(store.db.settings.workspaceTrashRetentionDays) > 0) {
+    for (const task of store.tasks) {
+      try {
+        pruneWorkspaceTrash(task);
+      } catch (err) {
+        console.error(`[workspace.trash] ${task.id}: ${err.message}`);
+      }
+    }
+  }
   // 后台把内置演示席位换成体检通过的真实 CLI；体检较慢，不阻塞服务可用
   if (process.env.AGENTFORGE_SKIP_TEAM_BOOTSTRAP !== '1') {
     setTimeout(() => {

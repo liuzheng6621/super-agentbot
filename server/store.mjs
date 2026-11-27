@@ -557,6 +557,9 @@ function emptyDb() {
       maxRepairRounds: 1,
       maxAutoReplans: 1,
       maxStepAttempts: 2,
+      // 0 表示不限；平台只统计自己产出的文件，避免扫描用户整棵外部仓库。
+      workspaceQuotaBytes: 0,
+      workspaceTrashRetentionDays: 0,
       // 方案讨论：默认 5 位提案人（4 个执行席位 + 1 个工具池 CLI），决策后再实施。
       debateEnabled: true,
       debateParticipants: 5,
@@ -2158,6 +2161,20 @@ class Store {
       s.maxAutoReplans = clamp(patch.maxAutoReplans, 0, 1, s.maxAutoReplans);
     if (patch.maxStepAttempts !== undefined)
       s.maxStepAttempts = clamp(patch.maxStepAttempts, 1, 3, s.maxStepAttempts);
+    if (patch.workspaceQuotaBytes !== undefined)
+      s.workspaceQuotaBytes = clamp(
+        patch.workspaceQuotaBytes,
+        0,
+        1024 * 1024 * 1024,
+        s.workspaceQuotaBytes,
+      );
+    if (patch.workspaceTrashRetentionDays !== undefined)
+      s.workspaceTrashRetentionDays = clamp(
+        patch.workspaceTrashRetentionDays,
+        0,
+        365,
+        s.workspaceTrashRetentionDays,
+      );
     if (patch.timeouts !== undefined) {
       s.timeouts = {
         ...defaultTimeouts(),

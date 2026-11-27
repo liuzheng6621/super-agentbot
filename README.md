@@ -265,7 +265,7 @@ Git 隔离支持两种模式：
 
 同一进程内可以并行运行多个任务，每个任务使用独立工作区。全局 Scheduler 会限制同时运行的任务数，按 Provider 计算并发配额，并为显式声明的 Agent 获取租约；排队任务会显示队列位置和等待原因。Agent 可声明主 Provider 与备用 Provider，CLI 失败会在同一工序内回退并记录事件。
 
-工作区池默认关闭：Profile / Agent 显式设置 `workspacePolicy.crossTask=true` 后才可使用项目根下的 `Shared/` 或 `Agents/<agentId>/`；任务级 worktree 仍优先。跨任务池目录不会被任务删除回收，租约记录在工作区 `.agentforge/pool/leases.json`。磁盘配额、任务优先级和 Provider 级费用预算仍未实现。
+工作区池默认关闭：Profile / Agent 显式设置 `workspacePolicy.crossTask=true` 后才可使用项目根下的 `Shared/` 或 `Agents/<agentId>/`；任务级 worktree 仍优先。跨任务池目录不会被任务删除回收，租约记录在工作区 `.agentforge/pool/leases.json`。平台产物支持 `workspaceQuotaBytes` 配额（默认 `0 = 不限`）和 `workspaceTrashRetentionDays` 回收站保留期；超额写入返回 `413 / workspace-quota-exceeded`，任务详情与 `/api/state` 暴露用量。任务优先级和 Provider 级费用预算仍未实现。
 
 ## 界面
 
@@ -486,7 +486,7 @@ npm test
 - [x] trace / span 事件契约、任务详情与导出可见
 - [x] Automation（周期 / 每日、暂停恢复、立即运行、历史、重试）
 - [x] 服务重启恢复（中断任务、`run.recovered`、Automation 对账）
-- [ ] 磁盘配额与任务优先级
+- [ ] 任务优先级（磁盘配额已完成平台产物闭环）
 - [x] 跨任务工作区总览、DAG 图与时间回放
 - [x] 附件与读图（视觉能力声明、类型 / 体积 / 尺寸校验、内容寻址存储）
 - [x] 正规压缩（长任务的摘要式上下文压缩）

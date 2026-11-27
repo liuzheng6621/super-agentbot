@@ -35,15 +35,16 @@ const READ_RECEIPT_TTL_MS = 30 * 60 * 1000;
 const readReceipts = new Map();
 
 export class WorkspaceError extends Error {
-  constructor(message, status = 400) {
+  constructor(message, status = 400, code = '') {
     super(message);
     this.name = 'WorkspaceError';
     this.status = status;
+    this.code = code;
   }
 }
 
-function fail(message, status = 400) {
-  throw new WorkspaceError(message, status);
+function fail(message, status = 400, code = '') {
+  throw new WorkspaceError(message, status, code);
 }
 
 function rootOf(task) {
@@ -704,6 +705,130 @@ function recordOperation(task, type, data = {}) {
   });
 }
 
+function workspaceQuotaBytes() {
+  return Math.max(0, Math.round(Number(store.db.settings.workspaceQuotaBytes) || 0));
+}
+
+function workspaceTrashRetentionDays() {
+  return Math.max(0, Math.round(Number(store.db.settings.workspaceTrashRetentionDays) || 0));
+}
+
+function fileBytes(abs) {
+  try {
+    const stat = fs.statSync(abs);
+    return stat.isFile() ? stat.size : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function managedArtifactBytes(task) {
+  return (task?.artifacts || []).reduce((sum, artifact) => {
+    if (artifact.status === 'D') return sum;
+    return sum + Math.max(0, Number(artifact.bytes) || 0);
+  }, 0);
+}
+
+/**
+ * Quota accounting uses the platform artifact ledger, not a recursive scan of
+ * user-owned external projects. Files created outside the platform remain
+ * visible in the workspace tree but are not silently counted as managed bytes.
+ */
+export function workspaceUsage(task, { pendingBytes = 0 } = {}) {
+  const usedBytes = managedArtifactBytes(task);
+  const limitBytes = workspaceQuotaBytes();
+  const projectedBytes = usedBytes + Math.max(0, Number(pendingBytes) || 0);
+  return {
+    usedBytes,
+    pendingBytes: Math.max(0, Number(pendingBytes) || 0),
+    projectedBytes,
+    limitBytes,
+    remainingBytes: limitBytes > 0 ? Math.max(0, limitBytes - usedBytes) : null,
+    overQuota: limitBytes > 0 && projectedBytes > limitBytes,
+    enforcement: limitBytes > 0 ? 'platform-artifacts' : 'unlimited',
+  };
+}
+
+function assertWorkspaceQuota(task, rel, abs, pendingBytes) {
+  const usage = workspaceUsage(task, { pendingBytes });
+  if (!usage.overQuota) return usage;
+  const projected = usage.projectedBytes;
+  recordOperation(task, 'fs.quota.denied', {
+    path: rel,
+    usedBytes: usage.usedBytes,
+    pendingBytes: usage.pendingBytes,
+    projectedBytes: projected,
+    limitBytes: usage.limitBytes,
+    actualFileBytes: fileBytes(abs),
+  });
+  fail(
+    `工作区配额不足：${projected}/${usage.limitBytes} bytes，写入 ${rel} 被拒绝`,
+    413,
+    'workspace-quota-exceeded',
+  );
+}
+
+export function pruneWorkspaceTrash(task, { now = Date.now(), dryRun = false } = {}) {
+  const retentionDays = workspaceTrashRetentionDays();
+  if (retentionDays <= 0) {
+    return { retentionDays, scanned: 0, removed: 0, bytes: 0, dryRun: !!dryRun };
+  }
+  const root = rootOf(task);
+  const trashRoot = path.join(root, TRASH_DIR);
+  const cutoff = now - retentionDays * 24 * 60 * 60 * 1000;
+  let scanned = 0;
+  let removed = 0;
+  let bytes = 0;
+  const removeExpired = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        removeExpired(abs);
+        try {
+          if (!fs.readdirSync(abs).length) fs.rmdirSync(abs);
+        } catch {
+          /* Another cleanup may have removed it. */
+        }
+        continue;
+      }
+      scanned += 1;
+      let stat;
+      try {
+        stat = fs.statSync(abs);
+      } catch {
+        continue;
+      }
+      if (stat.mtimeMs > cutoff) continue;
+      bytes += stat.size;
+      removed += 1;
+      if (!dryRun) {
+        try {
+          fs.rmSync(abs, { force: true });
+        } catch {
+          removed -= 1;
+          bytes -= stat.size;
+        }
+      }
+    }
+  };
+  removeExpired(trashRoot);
+  if (removed > 0 && !dryRun) {
+    recordOperation(task, 'fs.trash.prune', {
+      retentionDays,
+      scanned,
+      removed,
+      bytes,
+    });
+  }
+  return { retentionDays, scanned, removed, bytes, dryRun: !!dryRun };
+}
+
 export function writeWorkspaceEntry(task, relPath, content, meta = {}, agent = null) {
   const pooled = agent ? pooledPath(task, relPath, agent) : null;
   const { rel, abs } = pooled || safePath(task, relPath);
@@ -718,6 +843,8 @@ export function writeWorkspaceEntry(task, relPath, content, meta = {}, agent = n
     existing = null;
   }
   if (existing?.isDirectory()) fail('目标是目录，不能写入文件', 400);
+  const previousBytes = existing ? fileBytes(abs) : 0;
+  assertWorkspaceQuota(task, rel, abs, Math.max(0, bytes - previousBytes));
   const beforeVersion = existing ? versionOf(abs) : '';
   verifyWriteVersion({ task, rel, abs, beforeVersion, meta, agent });
   writeFileAtomic(abs, text);
