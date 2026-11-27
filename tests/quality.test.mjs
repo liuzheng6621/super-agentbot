@@ -12,6 +12,8 @@ const {
   detectTestCommand,
   pickAgent,
   isSelfReview,
+  reviewIndependenceFor,
+  recordReviewIndependence,
   buildContextPack,
   runQualityGate,
   qualityGateAllowsDelivery,
@@ -86,12 +88,16 @@ test('测试入口探测按 npm / Makefile / pytest 优先级执行', () => {
   assert.equal(detectTestCommand(workspace({ 'README.md': '# 空' })), null, '什么都没有就必须返回 null');
 });
 
-test('评审员缺位时先退到测试员/架构师，绝不落到实现者身上', () => {
+test('评审员缺位时先退到测试员/架构师，只有 coder 时显式不可用', () => {
   const original = store.agents.map((a) => ({ id: a.id, seat: a.seat }));
   const seatOnly = (roles) => {
     for (const a of store.agents) a.seat = roles.includes(a.role);
   };
   try {
+    seatOnly(['planner', 'architect', 'coder', 'tester', 'reviewer']);
+    assert.equal(pickAgent('reviewer').role, 'reviewer');
+    assert.notEqual(pickAgent('reviewer').role, 'coder', '正常多角色场景必须由独立评审席位执行');
+
     seatOnly(['planner', 'architect', 'coder', 'tester']);
     assert.equal(pickAgent('reviewer').role, 'tester', '没有评审席位时退到测试员');
 
@@ -100,15 +106,46 @@ test('评审员缺位时先退到测试员/架构师，绝不落到实现者身�
 
     seatOnly(['coder']);
     const only = pickAgent('reviewer');
-    assert.equal(only.role, 'coder');
-    assert.equal(isSelfReview('reviewer', only), true, '只剩实现者时必须标成自审');
-    assert.equal(isSelfReview('coder', only), false);
+    assert.equal(only, null, '只剩实现者时不能把 coder 当作 reviewer');
   } finally {
     for (const o of original) {
       const a = store.getAgent(o.id);
       if (a) a.seat = o.seat;
     }
   }
+});
+
+test('自审按 reviewerId 与 implementerId 判定，并在记录中带出双方身份', () => {
+  const coder = store.findAgentByRole('coder');
+  const tester = store.findAgentByRole('tester');
+  const task = store.createTask({ goal: '评审独立性样本' });
+  store.setPlan(task.id, [{ id: 'implement', title: '实现', role: 'coder', agentId: coder.id }]);
+  store.updateStep(task.id, 'implement', { status: 'done' });
+
+  const independent = reviewIndependenceFor(store.getTask(task.id), tester);
+  assert.equal(independent.reviewerId, tester.id);
+  assert.equal(independent.implementerId, coder.id);
+  assert.equal(independent.selfReview, false, '不同成员是独立评审');
+
+  const selfReviewAgent = { ...coder, role: 'tester' };
+  assert.equal(isSelfReview('reviewer', selfReviewAgent, coder.id), true, '同一 ID 跨角色也必须标自审');
+  assert.equal(isSelfReview('reviewer', tester, coder.id), false);
+
+  const self = reviewIndependenceFor(store.getTask(task.id), selfReviewAgent);
+  assert.equal(self.selfReview, true);
+  assert.equal(self.reviewerId, coder.id);
+  assert.equal(self.implementerId, coder.id);
+
+  store.updateTask(task.id, { runId: 'run-self-review' });
+  const step = store.getTask(task.id).plan[0];
+  const recorded = recordReviewIndependence(store.getTask(task.id), step, selfReviewAgent);
+  assert.equal(recorded.quality.selfReview, true);
+  const saved = store.getTask(task.id);
+  assert.equal(saved.quality.selfReview, true, 'run 级质量记录必须打标');
+  assert.equal(saved.quality.reviewerId, coder.id);
+  assert.equal(saved.plan[0].selfReview, true, '工序记录必须打标');
+  assert.ok(saved.events.some((event) => event.type === 'review.independence' && event.data.selfReview));
+  assert.equal(store.taskSummary(saved).quality.selfReview, true, '/api/state 的任务摘要可见');
 });
 
 test('上下文包可以直接复用目录快照，不再重复扫描', () => {

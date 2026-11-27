@@ -276,6 +276,28 @@ test('执行回退按 CLI 命令去重，且 CLI 任务不会静默落到模拟�
   assert.ok(onlyCli.every((a) => a.mode === 'cli' && a.cli.command));
 });
 
+test('reviewer 候选只允许 reviewer / tester / architect，只有 coder 时为空', () => {
+  const original = store.agents.map((agent) => ({ id: agent.id, seat: agent.seat }));
+  const coder = store.findAgentByRole('coder');
+  try {
+    for (const agent of store.agents) agent.seat = agent.role === 'coder';
+    assert.deepEqual(stepAgentCandidates({ role: 'reviewer' }, coder), []);
+
+    for (const agent of store.agents) {
+      agent.seat = ['architect', 'coder', 'tester'].includes(agent.role);
+    }
+    const candidates = stepAgentCandidates({ role: 'reviewer' }, null);
+    assert.ok(candidates.length > 0);
+    assert.ok(candidates.every((agent) => ['reviewer', 'tester', 'architect'].includes(agent.role)));
+    assert.ok(candidates.every((agent) => agent.role !== 'coder'));
+  } finally {
+    for (const item of original) {
+      const agent = store.getAgent(item.id);
+      if (agent) agent.seat = item.seat;
+    }
+  }
+});
+
 test('真实 CLI 调用失败后按 Provider 路由切换到备用网关', async () => {
   const primary = store.addProvider({
     id: 'fallback-primary',

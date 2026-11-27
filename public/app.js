@@ -772,7 +772,7 @@ function renderPlan() {
     return;
   }
   const indexOf = new Map(t.plan.map((step, i) => [step.id, i + 1]));
-  const qualityText =
+  const qualityBaseText =
     t.quality?.status === "passed"
       ? "质量门通过"
       : t.quality?.status === "failed"
@@ -784,6 +784,7 @@ function renderPlan() {
           : t.quality?.status === "skipped"
             ? "评审代质量门"
             : "质量门待执行";
+  const qualityText = `${qualityBaseText}${t.quality?.selfReview ? " · 自审" : ""}`;
   if (overview) {
     overview.hidden = false;
     overview.innerHTML = `
@@ -816,6 +817,7 @@ function renderPlan() {
         parallel ? "并行" : "",
         step.attempt > 1 ? `尝试 ${step.attempt}/${step.maxAttempts || 2}` : "",
         step.round ? `R${step.round} 返工` : "",
+        step.selfReview ? "自审" : "",
       ].filter(Boolean);
       const icon = step.status === "done" ? "✓" : step.status === "blocked" ? "×" : pad2(i + 1);
       const files = (t.artifacts || []).filter((f) => f.stepId === step.id);
@@ -830,6 +832,7 @@ function renderPlan() {
             <div class="sd-line"><em>状态</em><span>${escapeHtml(step.note || STEP_STATUS_TEXT[step.status] || step.status)}</span></div>
             ${elapsed ? `<div class="sd-line"><em>耗时</em><span>${elapsed}</span></div>` : ""}
             ${step.verdict ? `<div class="sd-line"><em>评审</em><span>${step.verdict === "pass" ? "PASS" : step.verdict === "fail" ? "FAIL" : "结论不明确"}</span></div>` : ""}
+            ${step.selfReview ? '<div class="sd-line"><em>独立性</em><span>自审：评审者与实现者相同</span></div>' : ""}
             ${conclusion ? `<div class="sd-conclusion"><em>本步结论</em><p>${escapeHtml(conclusion.text.replace(/\s+/g, " ").slice(0, 260))}${conclusion.text.length > 260 ? "…" : ""}</p></div>` : ""}
             <div class="sd-files"><em>产出 ${files.length} 个文件</em>
               ${

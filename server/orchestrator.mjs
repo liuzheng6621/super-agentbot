@@ -67,11 +67,57 @@ const PICK_ORDER = {
   architect: ['architect', 'planner', 'coder', 'reviewer', 'tester'],
   coder: ['coder', 'tester', 'architect', 'planner', 'reviewer'],
   tester: ['tester', 'coder', 'architect', 'planner', 'reviewer'],
-  reviewer: ['reviewer', 'tester', 'architect', 'planner'],
+  reviewer: ['reviewer', 'tester', 'architect'],
 };
 
-export function isSelfReview(role, agent) {
-  return role === 'reviewer' && agent?.role === 'coder';
+export function isSelfReview(role, agent, implementer = null) {
+  if (role !== 'reviewer' || !agent?.id) return false;
+  const implementerId =
+    typeof implementer === 'string'
+      ? implementer
+      : String(implementer?.id || implementer?.agentId || '');
+  return implementerId ? agent.id === implementerId : agent.role === 'coder';
+}
+
+/** Resolve the actual implementer for this run and compare stable agent IDs. */
+export function reviewIndependenceFor(task, reviewer) {
+  const plan = Array.isArray(task?.plan) ? task.plan : [];
+  const implementations = plan.filter((step) => step.role === 'coder' && step.agentId);
+  const implementation =
+    [...implementations].reverse().find((step) => ['done', 'running'].includes(step.status)) ||
+    implementations.at(-1) ||
+    null;
+  const implementer = implementation ? store.getAgent(implementation.agentId) : null;
+  const reviewerId = String(reviewer?.id || '');
+  const implementerId = String(implementation?.agentId || implementer?.id || '');
+  return {
+    reviewerId,
+    reviewerName: reviewer?.name || '',
+    implementerId,
+    implementerName: implementer?.name || '',
+    implementationStepId: implementation?.id || '',
+    selfReview: isSelfReview('reviewer', reviewer, implementerId),
+  };
+}
+
+export function recordReviewIndependence(task, step, reviewer) {
+  const identity = reviewIndependenceFor(task, reviewer);
+  const taskId = task.id;
+  const current = store.getTask(taskId) || task;
+  const quality = {
+    ...(current.quality || {}),
+    ...identity,
+  };
+  if (step?.id) store.updateStep(taskId, step.id, identity);
+  store.updateTask(taskId, { quality });
+  store.addTaskEvent(taskId, {
+    type: 'review.independence',
+    runId: current.runId || null,
+    stepId: step?.id || '',
+    agentId: reviewer?.id || '',
+    data: identity,
+  });
+  return { identity, quality };
 }
 
 /** 真实工时：所有工序实际耗时之和，不含排队、重试等待与人工空闲。 */
@@ -89,7 +135,8 @@ export function pickAgent(role) {
     const found = store.findAgentByRole(name);
     if (found) return found;
   }
-  // 一个席位都没有时只能退到任意成员，调用方用 isSelfReview 如实标注
+  // 评审没有 tester / architect 兜底时必须显式失败，不能悄悄落回实现者。
+  if (role === 'reviewer') return null;
   const seats = store.agents.filter((a) => a.seat !== false);
   return seats.find((a) => a.role !== 'coder') || seats[0] || store.agents[0] || null;
 }
@@ -1627,6 +1674,12 @@ export function stepAgentCandidates(step, preferred = null) {
   const role = step?.role || preferred?.role || '';
   const ordered = [];
   const seenCommands = new Set();
+  const reviewerRoles = new Set(['reviewer', 'tester', 'architect']);
+  const eligible = (agent) => {
+    if (!agent) return false;
+    if (role !== 'reviewer') return true;
+    return agent.seat !== false && reviewerRoles.has(agent.role);
+  };
   const commandKey = (agent) => {
     const command = String(agent?.cli?.command || '').trim().replace(/^["']|["']$/g, '');
     if (!command) return '';
@@ -1636,7 +1689,7 @@ export function stepAgentCandidates(step, preferred = null) {
       .toLowerCase();
   };
   const push = (agent) => {
-    if (!agent || ordered.some((item) => item.id === agent.id)) return;
+    if (!eligible(agent) || ordered.some((item) => item.id === agent.id)) return;
     if (agent.mode === 'cli') {
       const key = commandKey(agent);
       if (key && seenCommands.has(key)) return;
@@ -1651,10 +1704,12 @@ export function stepAgentCandidates(step, preferred = null) {
       if (agent.role === name && agent.seat !== false) push(agent);
     }
   }
-  for (const agent of store.agents) {
-    if (agent.seat !== false) push(agent);
+  if (role !== 'reviewer') {
+    for (const agent of store.agents) {
+      if (agent.seat !== false) push(agent);
+    }
+    for (const agent of store.agents) push(agent);
   }
-  for (const agent of store.agents) push(agent);
 
   if (preferred?.mode === 'cli') {
     // 真实 CLI 任务不能在故障后偷偷落到内置模拟成员；
@@ -1873,10 +1928,13 @@ async function executeSteps(task, steps, { outputs, speed, signal }) {
         });
         agent.currentStepId = step.id;
 
+        const reviewRecord =
+          step.role === 'reviewer' ? recordReviewIndependence(current, step, agent) : null;
         const extra = {
           ...baseExtra,
-          // 评审员落到实现者身上时如实标出来，别让自审看起来像独立评审
-          selfReview: isSelfReview(step.role, agent),
+          // 自审按真实实现者 ID 判定，不能只看成员角色。
+          selfReview: reviewRecord?.identity.selfReview || false,
+          ...(reviewRecord ? { quality: reviewRecord.quality } : {}),
         };
         const context = buildContextPack(current, { files: knownFiles(current) });
         const depsText = dependencyText(current, step, outputs);
@@ -1902,6 +1960,7 @@ async function executeSteps(task, steps, { outputs, speed, signal }) {
         if (out.ok && step.role === 'reviewer') {
           const verdict = parseReviewVerdict(out.text);
           out.verdict = verdict === true ? 'pass' : verdict === false ? 'fail' : 'unknown';
+          out.selfReview = extra.selfReview;
           const gateStatus = extra.quality?.status || 'not-run';
           const gatePassed = qualityGateAllowsDelivery(extra.quality);
           out.passed = verdict === true && gatePassed;
@@ -1925,6 +1984,9 @@ async function executeSteps(task, steps, { outputs, speed, signal }) {
             text: out.text,
             passed: out.passed,
             verdict: out.verdict,
+            selfReview: out.selfReview,
+            reviewerId: extra.quality?.reviewerId || agent.id,
+            implementerId: extra.quality?.implementerId || '',
           });
           store.updateStep(task.id, step.id, {
             resultText: String(out.text || '').slice(0, 12000),
