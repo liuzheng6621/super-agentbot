@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node server/index.mjs",
     "dev": "node --watch server/index.mjs",
+    "check:syntax": "node scripts/check-syntax.mjs",
     "test": "node tests/run-tests.mjs",
     "test:unit": "node tests/run-tests.mjs unit",
     "desktop": "node desktop/launcher.mjs",
