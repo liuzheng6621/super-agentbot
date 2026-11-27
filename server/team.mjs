@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 import { store, ROLE_ORDER } from './store.mjs';
 import { probeClis, spawnCli } from './adapters.mjs';
 import { commandBaseName } from './command-key.mjs';

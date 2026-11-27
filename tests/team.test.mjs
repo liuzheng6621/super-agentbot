@@ -7,7 +7,7 @@ import path from 'node:path';
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-team-'));
 process.env.AGENTFORGE_DATA_DIR = temp;
 
-const { judgeHealth, pickRealTeam, isBuiltinSeat, baseName, collectCandidates } =
+const { judgeHealth, pickRealTeam, isBuiltinSeat, baseName, collectCandidates, checkCandidates } =
   await import('../server/team.mjs');
 const { commandBaseName, commandKey } = await import('../server/command-key.mjs');
 const { adoptInstalledClis, rebalanceTeam } = await import('../server/adopt.mjs');
@@ -143,6 +143,22 @@ test('候选按命令名去重，并复用已持久化的体检缓存', () => {
   assert.equal(list[0].key, 'opencode');
   assert.equal(list[0].health.ok, true);
   assert.equal(list[0].path, 'C:/x/opencode.cmd');
+});
+
+test('真实体检会在独立临时工作区执行候选命令', async () => {
+  const fixture = path.resolve('tests/fixtures/command-fixture.mjs');
+  const candidates = [
+    {
+      key: 'fixture',
+      label: 'Fixture',
+      path: process.execPath,
+      args: [fixture, 'ok'],
+      health: null,
+    },
+  ];
+  await checkCandidates(candidates);
+  assert.equal(candidates[0].health.ok, true);
+  assert.match(candidates[0].health.note, /在线|进程未自行退出/);
 });
 
 test('新接入的 CLI 不再是内置席位，且带体检字段', () => {
