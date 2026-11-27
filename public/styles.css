@@ -845,6 +845,18 @@ kbd {
   background: var(--leaf);
 }
 
+.identity-chip {
+  max-width: 132px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 5px;
+  border: 1px solid var(--edge);
+  background: var(--card);
+  color: var(--ink);
+  font-size: 9px;
+}
+
 .quit-btn {
   margin-left: auto;
   font-family: var(--f-pixel);

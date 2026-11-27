@@ -524,6 +524,20 @@ function renderTasks() {
   renderHeroStats();
 }
 
+function renderIdentity() {
+  const chip = $("#identityChip");
+  if (!chip) return;
+  const principal = S.security?.principal;
+  if (!principal) {
+    chip.hidden = true;
+    return;
+  }
+  const tenant = principal.tenantId === "*" ? "all tenants" : principal.tenantId || "default";
+  chip.textContent = `${principal.kind} · ${tenant}`;
+  chip.title = `${principal.name || principal.id || principal.kind} / ${tenant}`;
+  chip.hidden = false;
+}
+
 /* ---------------- 渲染：顶部 ---------------- */
 
 function renderTopbar() {
@@ -2827,6 +2841,7 @@ async function actOnApproval(id, action) {
 function renderAll() {
   renderAgents();
   renderTasks();
+  renderIdentity();
   renderTopbar();
   renderMessages();
   renderPlan();

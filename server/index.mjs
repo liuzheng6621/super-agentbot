@@ -50,6 +50,7 @@ import {
   corsHeaders,
   resolveSecurityConfig,
   securitySummary,
+  tenantFilterForPrincipal,
   validateListenSecurity,
 } from './security.mjs';
 import {
@@ -167,6 +168,35 @@ function stateSettings() {
     ...settings
   } = store.db.settings;
   return settings;
+}
+
+function principalTenant(principal) {
+  return tenantFilterForPrincipal(principal).tenantId;
+}
+
+function requestedTenant(principal, value) {
+  if (principal?.kind !== 'owner') return principalTenant(principal) || 'default';
+  return String(value || 'default').trim().slice(0, 80) || 'default';
+}
+
+function visibleTasks(principal) {
+  const tenantId = principalTenant(principal);
+  if (tenantId === null) return store.tasks;
+  return store.tasks.filter(
+    (task) => String(task.tenantId || 'default') === tenantId,
+  );
+}
+
+function visibleTask(principal, taskId) {
+  return visibleTasks(principal).find((task) => task.id === String(taskId || '')) || null;
+}
+
+function visibleAutomations(principal) {
+  return automationSnapshot({ tenantId: principalTenant(principal) });
+}
+
+function visibleApprovals(principal) {
+  return approvalsForPrincipal(principal);
 }
 
 function taskDetail(task) {
@@ -295,6 +325,7 @@ const server = http.createServer(async (req, res) => {
           remoteAddress: clientAddress(req),
           origin: req.headers.origin || '',
           reason: auth.reason,
+          tenantId: 'default',
           tokenSource: auth.source,
         });
         return json(res, 401, {
@@ -316,6 +347,7 @@ const server = http.createServer(async (req, res) => {
           reason: authorization.reason,
           actorId: principal.id,
           actorKind: principal.kind,
+          tenantId: principal.tenantId || 'default',
           tokenScope: authorization.scope,
           tokenSource: principal.source,
         });
@@ -350,12 +382,13 @@ const server = http.createServer(async (req, res) => {
 
     /* ---- 全量状态 ---- */
     if (pathname === '/api/state' && method === 'GET') {
-      const tasks = store.tasks.map((t) => store.taskSummary(t));
+      const scopedTasks = visibleTasks(principal);
+      const tasks = scopedTasks.map((t) => store.taskSummary(t));
       // 优先给正在跑的那条全量详情；都没在跑时退回最新一条（tasks[0] 是最新）
       const active =
-        store.tasks.find((t) => isRunning(t.id)) ||
-        store.tasks.find((t) => isQueued(t.id)) ||
-        store.tasks[0];
+        scopedTasks.find((t) => isRunning(t.id)) ||
+        scopedTasks.find((t) => isQueued(t.id)) ||
+        scopedTasks[0];
       return json(res, 200, {
         agents: store.agents.map(agentView),
         profiles: store.profiles.map((profile) =>
@@ -366,44 +399,70 @@ const server = http.createServer(async (req, res) => {
         settings: stateSettings(),
         mcpServers: store.mcpServers.map(redactMcpServer),
         commands: principal?.kind === 'agent' ? [] : commandRunner.snapshot(),
-        approvals: approvalsForPrincipal(principal),
+        approvals: visibleApprovals(principal),
         scheduler: schedulerSnapshot(),
-        automations: automationSnapshot(),
+        automations: visibleAutomations(principal),
         automationRunner: automationRunnerSnapshot(),
         security: {
           ...securitySummary({ host: HOST, config: SECURITY }),
-          audit: (store.db.settings.securityAudit || []).slice(-20).reverse(),
+          principal: {
+            id: principal?.id || 'owner',
+            kind: principal?.kind || 'owner',
+            tenantId: principal?.tenantId || '*',
+          },
+          audit: (store.db.settings.securityAudit || [])
+            .filter(
+              (entry) =>
+                principal?.kind === 'owner' ||
+                String(entry.tenantId || 'default') === String(principal?.tenantId || 'default'),
+            )
+            .slice(-20)
+            .reverse(),
         },
         toolCatalog: TOOL_CATALOG,
         roleTools: ROLE_TOOLS,
         executionPolicies: executionPolicyCatalog(),
         activeTask: active ? taskDetail(active) : null,
-        overview: crossTaskOverview(),
+        overview: crossTaskOverview({ tenantId: principalTenant(principal) }),
       });
     }
 
     if (pathname === '/api/overview' && method === 'GET') {
-      return json(res, 200, crossTaskOverview());
+      return json(res, 200, crossTaskOverview({ tenantId: principalTenant(principal) }));
     }
 
     if (pathname === '/api/security' && method === 'GET') {
       return json(res, 200, {
         security: securitySummary({ host: HOST, config: SECURITY }),
-        audit: (store.db.settings.securityAudit || []).slice(-100).reverse(),
+        audit: (store.db.settings.securityAudit || [])
+          .filter(
+            (entry) =>
+              principal?.kind === 'owner' ||
+              String(entry.tenantId || 'default') === String(principal?.tenantId || 'default'),
+          )
+          .slice(-100)
+          .reverse(),
       });
     }
 
     /* ---- Automation ---- */
     if (pathname === '/api/automations' && method === 'GET') {
       return json(res, 200, {
-        automations: automationSnapshot(),
+        automations: visibleAutomations(principal),
         runner: automationRunnerSnapshot(),
       });
     }
     if (pathname === '/api/automations' && method === 'POST') {
       const body = await readBody(req);
       try {
-        return json(res, 201, { automation: createAutomation(body) });
+        return json(res, 201, {
+          automation: createAutomation({
+            ...body,
+            tenantId: requestedTenant(principal, body.tenantId),
+            ownerId: principal?.id || 'owner',
+            taskLimit: principal?.kind === 'owner' ? 0 : principal?.taskLimit || 0,
+          }),
+        });
       } catch (err) {
         return json(res, 400, { error: err.message });
       }
@@ -412,7 +471,13 @@ const server = http.createServer(async (req, res) => {
     if (automationMatch) {
       const automationId = automationMatch[1];
       const automation = getAutomation(automationId);
-      if (!automation) return json(res, 404, { error: '自动化不存在' });
+      if (
+        !automation ||
+        (principal?.kind !== 'owner' &&
+          String(automation.tenantId || 'default') !== String(principal?.tenantId || 'default'))
+      ) {
+        return json(res, 404, { error: '自动化不存在' });
+      }
       if (automationMatch[2] && method === 'POST') {
         const body = await readBody(req).catch(() => ({}));
         const clientMessageId =
@@ -464,7 +529,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/commands' && method === 'GET') {
       return json(res, 200, {
         commands: principal?.kind === 'agent' ? [] : commandRunner.snapshot(),
-        approvals: approvalsForPrincipal(principal),
+        approvals: visibleApprovals(principal),
       });
     }
     if (pathname === '/api/commands' && method === 'PATCH') {
@@ -486,7 +551,7 @@ const server = http.createServer(async (req, res) => {
         });
       }
       const body = await readBody(req);
-      const task = store.getTask(String(body.taskId || ''));
+      const task = visibleTask(principal, body.taskId);
       if (!task) return json(res, 404, { error: '任务不存在' });
       const commandEntry = commandRunner.get(commandMatch[1]);
       if (commandEntry?.requireApproval) {
@@ -521,12 +586,14 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/approvals' && method === 'GET') {
       expireApprovals();
       return json(res, 200, {
-        approvals: approvalsForPrincipal(principal),
+        approvals: visibleApprovals(principal),
         commands: principal?.kind === 'agent' ? [] : commandRunner.snapshot(),
       });
     }
     if (pathname === '/api/approvals' && method === 'POST') {
       const body = await readBody(req);
+      const task = visibleTask(principal, body.taskId);
+      if (!task) return json(res, 404, { error: '任务不存在' });
       if (
         principal?.kind === 'agent' &&
         body.agentId !== undefined &&
@@ -555,7 +622,13 @@ const server = http.createServer(async (req, res) => {
     );
     if (approvalMatch) {
       const approval = getApproval(approvalMatch[1]);
-      if (!approval) return json(res, 404, { error: '审批不存在' });
+      if (
+        !approval ||
+        (principal?.kind !== 'owner' &&
+          String(approval.tenantId || 'default') !== String(principal?.tenantId || 'default'))
+      ) {
+        return json(res, 404, { error: '审批不存在' });
+      }
       if (
         principal?.kind === 'agent' &&
         String(approval.agentId) !== String(principal.id)
@@ -885,8 +958,9 @@ const server = http.createServer(async (req, res) => {
       if (clientMessageId.length > 200) {
         return json(res, 400, { error: 'clientMessageId 不能超过 200 个字符' });
       }
+      const taskTenant = requestedTenant(principal, body.tenantId);
       const existing = clientMessageId
-        ? store.findIdempotentTask(clientMessageId, 'task:create')
+        ? store.findTenantIdempotentTask(clientMessageId, taskTenant, 'task:create')
         : null;
       if (existing) {
         return json(res, 200, {
@@ -904,9 +978,15 @@ const server = http.createServer(async (req, res) => {
           debate: body.flowMode === 'direct' || body.flowMode === 'debate' ? body.flowMode : null,
           clientMessageId,
           clientMessageScope: clientMessageId ? 'task:create' : '',
+          tenantId: taskTenant,
+          ownerId: principal?.id || 'owner',
+          taskLimit: principal?.kind === 'owner' ? 0 : principal?.taskLimit || 0,
         });
       } catch (err) {
-        return json(res, 400, { error: err.message });
+        return json(res, Number(err?.status) || 400, {
+          error: err.message,
+          code: err.code || '',
+        });
       }
       const speed = Number(body.speed) || 1;
       if (body.autoRun !== false) {
@@ -917,7 +997,7 @@ const server = http.createServer(async (req, res) => {
 
     const taskMcpMatch = pathname.match(/^\/api\/tasks\/([\w-]+)\/mcp\/call$/);
     if (taskMcpMatch && method === 'POST') {
-      const task = store.getTask(taskMcpMatch[1]);
+      const task = visibleTask(principal, taskMcpMatch[1]);
       if (!task) return json(res, 404, { error: '任务不存在' });
       const body = await readBody(req);
       try {
@@ -948,7 +1028,7 @@ const server = http.createServer(async (req, res) => {
 
     const exportMatch = pathname.match(/^\/api\/tasks\/([\w-]+)\/export$/);
     if (exportMatch && method === 'GET') {
-      const task = store.getTask(exportMatch[1]);
+      const task = visibleTask(principal, exportMatch[1]);
       if (!task) return json(res, 404, { error: '任务不存在' });
       const transcript = taskTranscript(task, searchParams.get('format') || 'markdown');
       res.writeHead(200, {
@@ -964,7 +1044,7 @@ const server = http.createServer(async (req, res) => {
       /^\/api\/tasks\/([\w-]+)(?:\/(run|stop|chat|replan|files|file|workspace|search|events|changes|diff|fs|tools|graph|replay))?$/,
     );
     if (taskMatch) {
-      const task = store.getTask(taskMatch[1]);
+      const task = visibleTask(principal, taskMatch[1]);
       if (!task) return json(res, 404, { error: '任务不存在' });
       const action = taskMatch[2];
 
@@ -1190,13 +1270,16 @@ const server = http.createServer(async (req, res) => {
     if (hookMatch) {
       if (hookMatch[1] !== store.db.settings.hookToken) return json(res, 401, { error: 'token 无效' });
       if (method === 'GET') {
-        return json(res, 200, { ok: true, tasks: store.tasks.slice(0, 5).map((t) => store.taskSummary(t)) });
+        return json(res, 200, {
+          ok: true,
+          tasks: store.tasks.slice(0, 5).map((t) => store.taskSummary(t)),
+        });
       }
       if (method === 'POST') {
         const body = await readBody(req);
         const goal = String(body.goal || body.text || body.message || '').trim();
         if (!goal) return json(res, 400, { error: '需要 goal / text / message 字段' });
-        const task = store.createTask({ goal });
+        const task = store.createTask({ goal, tenantId: 'default', ownerId: 'hook' });
         scheduleTask(task.id, { source: 'hook' });
         return json(res, 202, {
           ok: true,

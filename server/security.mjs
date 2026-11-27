@@ -71,6 +71,16 @@ function principalForToken(token, input = {}, fallbackKind = 'operator') {
       id,
       name: String(input.name || id).slice(0, 120),
       scopes,
+      tenantId:
+        kind === 'owner'
+          ? '*'
+          : String(input.tenantId || input.tenant || 'default')
+              .trim()
+              .slice(0, 80) || 'default',
+      taskLimit: Math.max(
+        0,
+        Math.round(Number(input.taskLimit ?? input.maxTasks ?? 0) || 0),
+      ),
       source: 'token',
     },
   };
@@ -119,6 +129,8 @@ export function resolveSecurityConfig(env = process.env) {
         id: String(env.AGENTFORGE_OPERATOR_ID || 'operator'),
         name: String(env.AGENTFORGE_OPERATOR_NAME || 'Operator'),
         scopes: env.AGENTFORGE_OPERATOR_SCOPES,
+        tenantId: env.AGENTFORGE_OPERATOR_TENANT || 'default',
+        taskLimit: env.AGENTFORGE_OPERATOR_TASK_LIMIT,
       }),
     );
   }
@@ -180,6 +192,8 @@ export function authenticateApi(req, url, config) {
         id: 'owner',
         name: 'Local Owner',
         scopes: ['*'],
+        tenantId: '*',
+        taskLimit: 0,
         source: 'loopback',
       },
     };
@@ -202,6 +216,23 @@ export function authenticateApi(req, url, config) {
 export function hasScope(principal, scope) {
   const scopes = Array.isArray(principal?.scopes) ? principal.scopes : [];
   return scopes.includes('*') || scopes.includes(String(scope || ''));
+}
+
+/**
+ * Owner is the only cross-tenant principal. Operators and agents are always
+ * pinned to one tenant; legacy tokens without an explicit tenant stay in
+ * "default" so existing single-user deployments keep working.
+ */
+export function tenantFilterForPrincipal(principal = null) {
+  if (principal?.kind === 'owner') return { tenantId: null };
+  return {
+    tenantId: String(principal?.tenantId || 'default').trim().slice(0, 80) || 'default',
+  };
+}
+
+export function principalCanAccessTenant(principal, tenantId) {
+  const filter = tenantFilterForPrincipal(principal);
+  return filter.tenantId === null || String(tenantId || 'default') === filter.tenantId;
 }
 
 function requiredScope(method, pathname) {
@@ -296,6 +327,9 @@ export function securitySummary({ host, config }) {
     loopbackOnly: isLoopbackHost(host),
     insecureRemoteAllowed: !!config?.allowInsecureRemote,
     allowedOrigins: [...(config?.allowedOrigins || [])],
+    tenantIsolation: (config?.principals || []).some(
+      (entry) => entry.principal?.kind !== 'owner',
+    ),
   };
 }
 

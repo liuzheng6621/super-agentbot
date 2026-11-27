@@ -19,12 +19,27 @@ function saveApprovals() {
   store.broadcast({ type: 'approvals.changed', approvals: approvalsSnapshot() });
 }
 
-export function approvalsSnapshot() {
-  return approvalList().slice(-MAX_APPROVALS).reverse().map((item) => ({ ...item }));
+export function approvalsSnapshot(filter = {}) {
+  const tenantId =
+    filter?.tenantId === null || filter?.tenantId === undefined
+      ? null
+      : String(filter.tenantId);
+  return approvalList()
+    .filter(
+      (item) =>
+        tenantId === null || String(item.tenantId || 'default') === tenantId,
+    )
+    .slice(-MAX_APPROVALS)
+    .reverse()
+    .map((item) => ({ ...item }));
 }
 
 export function approvalsForPrincipal(principal = null) {
-  const list = approvalsSnapshot();
+  const tenantId =
+    principal?.kind === 'owner'
+      ? null
+      : String(principal?.tenantId || 'default').trim().slice(0, 80) || 'default';
+  const list = approvalsSnapshot({ tenantId });
   if (principal?.kind !== 'agent') return list;
   return list.filter((item) => String(item.agentId) === String(principal.id));
 }
@@ -90,6 +105,8 @@ export function createApprovalRequest({
   const entry = runner.get(request.commandId);
   const approval = {
     id: randomUUID(),
+    tenantId: String(task.tenantId || requestedBy?.tenantId || 'default').slice(0, 80),
+    ownerId: String(task.ownerId || requestedBy?.id || 'owner').slice(0, 80),
     status: 'pending',
     taskId: task.id,
     agentId: agent.id,

@@ -205,6 +205,57 @@ test('automation manual runs reuse a task for the same clientMessageId inside 24
   assert.notEqual(scoped.task.id, first.task.id);
 });
 
+test('automation idempotency and task quotas stay inside the automation tenant', () => {
+  clearAutomations();
+  const alpha = createAutomation({
+    name: 'Alpha scoped automation',
+    goal: 'alpha automation quota',
+    tenantId: 'alpha',
+    ownerId: 'alpha-operator',
+    taskLimit: 1,
+    enabled: false,
+  });
+  const beta = createAutomation({
+    name: 'Beta scoped automation',
+    goal: 'beta automation idempotency',
+    tenantId: 'beta',
+    ownerId: 'beta-operator',
+    taskLimit: 0,
+    enabled: false,
+  });
+  store.createTask({ goal: 'existing alpha task', tenantId: 'alpha' });
+
+  const quotaResult = runAutomationNow(alpha.id, {
+    createTask(input) {
+      return store.createTask(input);
+    },
+    scheduleTask() {
+      return { accepted: true };
+    },
+  });
+  assert.equal(quotaResult.ok, false);
+  assert.match(quotaResult.reason, /配额/);
+  assert.equal(store.tasks.filter((task) => task.tenantId === 'alpha').length, 1);
+
+  let betaTask = null;
+  const dependencies = {
+    clientMessageId: 'shared-automation-message',
+    createTask(input) {
+      betaTask = store.createTask(input);
+      return betaTask;
+    },
+    scheduleTask() {
+      return { accepted: true };
+    },
+  };
+  const first = runAutomationNow(beta.id, dependencies);
+  const replay = runAutomationNow(beta.id, dependencies);
+  assert.equal(first.ok, true);
+  assert.equal(replay.idempotentReplay, true);
+  assert.equal(replay.task.id, first.task.id);
+  assert.equal(betaTask.tenantId, 'beta');
+});
+
 test('idempotency expires after the 24 hour window', () => {
   const first = store.createTask({
     goal: 'expiring idempotency key',

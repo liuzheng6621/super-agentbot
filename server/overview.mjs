@@ -148,8 +148,17 @@ function taskProject(task) {
   return task.sourceWorkspace || task.workspace || '';
 }
 
-export function crossTaskOverview() {
-  const tasks = store.tasks.map((task) => {
+export function crossTaskOverview(filter = {}) {
+  const tenantId =
+    filter?.tenantId === null || filter?.tenantId === undefined
+      ? null
+      : String(filter.tenantId);
+  const tasks = store.tasks
+    .filter(
+      (task) =>
+        tenantId === null || String(task.tenantId || 'default') === tenantId,
+    )
+    .map((task) => {
     const graph = taskGraph(task);
     const runningStep =
       (task.plan || []).find((step) => ['running', 'retrying'].includes(step.status)) ||
@@ -177,7 +186,7 @@ export function crossTaskOverview() {
         })),
       terminal: TERMINAL_TASK_STATES.has(task.status),
     };
-  });
+    });
   return {
     tasks,
     summary: {

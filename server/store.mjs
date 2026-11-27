@@ -723,6 +723,14 @@ class Store {
           a.workspacePolicy = workspacePolicy;
         }
         for (const t of this.db.tasks) {
+          if (!t.tenantId) {
+            t.tenantId = 'default';
+            recovered = true;
+          }
+          if (!t.ownerId) {
+            t.ownerId = 'owner';
+            recovered = true;
+          }
           if (!Array.isArray(t.usageLedger)) t.usageLedger = [];
           t.contextState = {
             contextWindow: null,
@@ -1460,6 +1468,29 @@ class Store {
     );
   }
 
+  findTenantIdempotentTask(
+    clientMessageId,
+    tenantId = 'default',
+    scope = '',
+    now = Date.now(),
+    windowMs = 24 * 60 * 60 * 1000,
+  ) {
+    const key = String(clientMessageId || '').trim();
+    if (!key) return null;
+    const tenant = String(tenantId || 'default').trim().slice(0, 80) || 'default';
+    const normalizedScope = String(scope || '').trim().slice(0, 120);
+    const cutoff = now - Math.max(1, Number(windowMs) || 24 * 60 * 60 * 1000);
+    return (
+      this.db.tasks.find(
+        (task) =>
+          task.clientMessageId === key &&
+          String(task.tenantId || 'default') === tenant &&
+          String(task.clientMessageScope || '') === normalizedScope &&
+          Number(task.createdAt) >= cutoff,
+      ) || null
+    );
+  }
+
   createTask({
     goal,
     mode = 'auto',
@@ -1468,11 +1499,32 @@ class Store {
     isolation = 'direct',
     clientMessageId = '',
     clientMessageScope = '',
+    tenantId = 'default',
+    ownerId = 'owner',
+    taskLimit = 0,
   }) {
+    const taskTenant = String(tenantId || 'default').trim().slice(0, 80) || 'default';
+    const taskOwner = String(ownerId || 'owner').trim().slice(0, 80) || 'owner';
+    const activeCount = this.db.tasks.filter(
+      (task) => String(task.tenantId || 'default') === taskTenant,
+    ).length;
+    const limit = Math.max(0, Math.round(Number(taskLimit) || 0));
+    if (limit > 0 && activeCount >= limit) {
+      const error = new Error(
+        `租户「${taskTenant}」已达到任务配额（${activeCount}/${limit}）`,
+      );
+      error.status = 429;
+      error.code = 'tenant-task-quota-exceeded';
+      throw error;
+    }
     const idempotencyKey = String(clientMessageId || '').trim().slice(0, 200);
     const idempotencyScope = String(clientMessageScope || '').trim().slice(0, 120);
     if (idempotencyKey) {
-      const existing = this.findIdempotentTask(idempotencyKey, idempotencyScope);
+      const existing = this.findTenantIdempotentTask(
+        idempotencyKey,
+        taskTenant,
+        idempotencyScope,
+      );
       if (existing) return existing;
     }
     const id = randomUUID();
@@ -1498,6 +1550,8 @@ class Store {
     }
     const task = {
       id,
+      tenantId: taskTenant,
+      ownerId: taskOwner,
       title: goal.length > 26 ? goal.slice(0, 26) + '…' : goal,
       goal,
       mode,
@@ -1555,6 +1609,8 @@ class Store {
   taskSummary(task) {
     return {
       id: task.id,
+      tenantId: String(task.tenantId || 'default'),
+      ownerId: String(task.ownerId || 'owner'),
       title: task.title,
       goal: task.goal,
       mode: task.mode,
@@ -1644,6 +1700,7 @@ class Store {
       requestId: String(event.requestId || '').slice(0, 80),
       actorId: String(event.actorId || '').slice(0, 80),
       actorKind: String(event.actorKind || '').slice(0, 20),
+      tenantId: String(event.tenantId || 'default').slice(0, 80),
       tokenScope: String(event.tokenScope || '').slice(0, 80),
       remoteAddress: String(event.remoteAddress || '').slice(0, 120),
       origin: String(event.origin || '').slice(0, 500),

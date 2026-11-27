@@ -92,6 +92,14 @@ export function normalizeAutomation(input = {}, existing = null, now = Date.now(
 
   return {
     id: String(previous.id || input.id || randomUUID()).replace(/[^\w-]/g, '').slice(0, 64) || randomUUID(),
+    tenantId: String(input.tenantId ?? previous.tenantId ?? 'default').trim().slice(0, 80) || 'default',
+    ownerId: String(input.ownerId ?? previous.ownerId ?? 'owner').trim().slice(0, 80) || 'owner',
+    taskLimit: clampInt(
+      input.taskLimit ?? previous.taskLimit,
+      0,
+      Number.MAX_SAFE_INTEGER,
+      0,
+    ),
     name: cleanText(input.name ?? previous.name, 80) || '未命名自动化',
     goal: cleanText(input.goal ?? previous.goal, 4000),
     workspace: cleanText(input.workspace ?? previous.workspace, 1000),
@@ -168,8 +176,17 @@ export function automationSummary(automation) {
   };
 }
 
-export function automationSnapshot() {
-  return automationListInternal().map(automationSummary);
+export function automationSnapshot(filter = {}) {
+  const tenantId =
+    filter?.tenantId === null || filter?.tenantId === undefined
+      ? null
+      : String(filter.tenantId);
+  return automationListInternal()
+    .filter(
+      (automation) =>
+        tenantId === null || String(automation.tenantId || 'default') === tenantId,
+    )
+    .map(automationSummary);
 }
 
 export function createAutomation(input = {}) {
@@ -257,8 +274,14 @@ function scheduleAutomation(automation, trigger, now, dependencies = {}) {
   const schedule = dependencies.scheduleTask || scheduleTask;
   const clientMessageId = String(dependencies.clientMessageId || '').trim().slice(0, 200);
   const idempotencyScope = `automation:${automation.id}`;
+  const tenantScope = String(automation.tenantId || 'default').trim().slice(0, 80) || 'default';
   if (clientMessageId) {
-    const existing = store.findIdempotentTask(clientMessageId, idempotencyScope, now);
+    const existing = store.findTenantIdempotentTask(
+      clientMessageId,
+      tenantScope,
+      idempotencyScope,
+      now,
+    );
     if (existing) {
       return {
         ok: true,
@@ -284,6 +307,9 @@ function scheduleAutomation(automation, trigger, now, dependencies = {}) {
       debate: automation.flowMode,
       clientMessageId,
       clientMessageScope: idempotencyScope,
+      tenantId: automation.tenantId,
+      ownerId: automation.ownerId,
+      taskLimit: automation.taskLimit,
     });
   } catch (err) {
     return recordScheduleFailure(automation, trigger, now, null, err.message);
