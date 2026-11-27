@@ -2151,7 +2151,7 @@ export function detectTestCommand(task) {
 
   if (exists('package.json')) {
     try {
-      const pkg = JSON.parse(read('package.json'));
+      const pkg = JSON.parse(read('package.json').replace(/^\uFEFF/, ''));
       const script = pkg?.scripts?.test;
       if (typeof script === 'string' && script.trim() && !PLACEHOLDER_TEST.test(script)) {
         return {

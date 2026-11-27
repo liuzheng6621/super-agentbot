@@ -52,6 +52,13 @@ test('测试入口探测按 npm / Makefile / pytest 优先级执行', () => {
   assert.equal(npm.command, 'npm');
   assert.match(npm.source, /scripts\.test/);
 
+  const bomPackage = detectTestCommand(
+    workspace({
+      'package.json': `\uFEFF${JSON.stringify({ scripts: { test: 'node --test tests/' } })}`,
+    }),
+  );
+  assert.equal(bomPackage.command, 'npm', 'PowerShell UTF-8 BOM must not hide the test entry');
+
   const allConfigured = detectTestCommand(
     workspace({
       'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
