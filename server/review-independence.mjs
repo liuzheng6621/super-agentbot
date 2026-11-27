@@ -13,20 +13,30 @@ export function isSelfReview(role, agent, implementer = null) {
 export function reviewIndependenceFor(task, reviewer) {
   const plan = Array.isArray(task?.plan) ? task.plan : [];
   const implementations = plan.filter((step) => step.role === 'coder' && step.agentId);
-  const implementation =
-    [...implementations].reverse().find((step) => ['done', 'running'].includes(step.status)) ||
-    implementations.at(-1) ||
-    null;
-  const implementer = implementation ? store.getAgent(implementation.agentId) : null;
+  const completed = implementations.filter((step) => ['done', 'running'].includes(step.status));
+  const relevant = completed.length ? completed : implementations;
+  const implementerIds = [
+    ...new Set(relevant.map((step) => String(step.agentId || '')).filter(Boolean)),
+  ];
+  const implementerNames = implementerIds.map(
+    (id) => store.getAgent(id)?.name || '',
+  );
+  const implementationStepIds = [...new Set(relevant.map((step) => step.id))];
+  const implementation = relevant.at(-1) || null;
   const reviewerId = String(reviewer?.id || '');
-  const implementerId = String(implementation?.agentId || implementer?.id || '');
+  const implementerId = implementerIds.at(-1) || '';
   return {
     reviewerId,
     reviewerName: reviewer?.name || '',
     implementerId,
-    implementerName: implementer?.name || '',
+    implementerName: implementerNames.at(-1) || '',
+    implementerIds,
+    implementerNames,
     implementationStepId: implementation?.id || '',
-    selfReview: isSelfReview('reviewer', reviewer, implementerId),
+    implementationStepIds,
+    selfReview:
+      reviewerId &&
+      implementerIds.some((id) => isSelfReview('reviewer', reviewer, id)),
   };
 }
 

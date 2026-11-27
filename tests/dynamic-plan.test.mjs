@@ -14,7 +14,7 @@ const fixture = path.join(
 process.env.AGENTFORGE_DATA_DIR = temp;
 
 const { store } = await import('../server/store.mjs');
-const { startTask } = await import('../server/orchestrator.mjs');
+const { startTask, repairPathsFor } = await import('../server/orchestrator.mjs');
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -196,6 +196,92 @@ test('非法规划 JSON 保留模板计划并写入 plan.fallback', async () => 
   } finally {
     store.updateAgent(planner.id, before);
     restoreAgents(saved.filter((agent) => agent.id !== planner.id));
+    store.updateSettings(previous);
+  }
+});
+
+test('返工路径聚合全部 coder/tester 真实产物，并拒绝越界与重复路径', () => {
+  const task = {
+    goal: '返工路径',
+    plan: [
+      {
+        id: 'core',
+        role: 'coder',
+        status: 'done',
+        agentId: 'coder-a',
+        outputPaths: ['src/core.js', 'src/core.js', '../escape.js'],
+      },
+      {
+        id: 'api',
+        role: 'coder',
+        status: 'done',
+        agentId: 'coder-b',
+        outputPaths: ['src/api.js'],
+      },
+      {
+        id: 'tests',
+        role: 'tester',
+        status: 'done',
+        agentId: 'tester-a',
+        outputPaths: ['tests/core.test.js'],
+      },
+    ],
+    artifacts: [
+      { path: 'src/core.js', stepId: 'core', agentId: 'coder-a', status: '' },
+      { path: 'src/api.js', stepId: 'api', agentId: 'coder-b', status: '' },
+      { path: 'tests/core.test.js', stepId: 'tests', agentId: 'tester-a', status: '' },
+      { path: 'C:/outside.js', stepId: 'core', agentId: 'coder-a', status: '' },
+      { path: '.git/config', stepId: 'core', agentId: 'coder-a', status: '' },
+    ],
+  };
+  assert.deepEqual(repairPathsFor(task, {
+    text: 'Fix src/api.js and src/core.js; ignore ../../outside.js',
+  }), ['src/api.js', 'src/core.js', 'tests/core.test.js']);
+});
+
+test('真实 CLI 首评失败后会修复两个模块并回归复评通过', async () => {
+  const saved = configureFixtureAgents();
+  const secondCoder = addSecondCoder();
+  const previous = {
+    debateEnabled: store.db.settings.debateEnabled,
+    dynamicPlanEnabled: store.db.settings.dynamicPlanEnabled,
+    maxRepairRounds: store.db.settings.maxRepairRounds,
+    maxAutoReplans: store.db.settings.maxAutoReplans,
+  };
+  store.updateSettings({
+    debateEnabled: false,
+    dynamicPlanEnabled: true,
+    maxRepairRounds: 1,
+    maxAutoReplans: 0,
+  });
+  try {
+    const task = store.createTask({ goal: '动态计划返工夹具', debate: 'direct' });
+    configureTestCommand(task);
+    const ok = await startTask(task.id, { speed: 1000 });
+    const done = store.getTask(task.id);
+
+    assert.equal(ok, true, done.error || done.plan.map((step) => `${step.id}:${step.status}`).join(','));
+    const fix = done.plan.find((step) => step.id === 'fix-1');
+    const retest = done.plan.find((step) => step.id === 'retest-1');
+    assert.deepEqual(
+      new Set(fix.outputPaths),
+      new Set(['src/core.js', 'src/api.js', 'tests/core.test.js']),
+    );
+    assert.ok(fix.outputPaths.includes('tests/core.test.js'));
+    assert.ok(retest.outputPaths.includes('tests/core.test.js'));
+    assert.equal(done.plan.find((step) => step.id === 'review').verdict, 'fail');
+    assert.equal(done.plan.find((step) => step.id === 're-review-1').verdict, 'pass');
+    assert.equal(done.status, 'done');
+    assert.match(fs.readFileSync(path.join(done.workspace, 'src/core.js'), 'utf8'), /repaired/);
+    assert.match(fs.readFileSync(path.join(done.workspace, 'src/api.js'), 'utf8'), /repaired/);
+    assert.ok(
+      done.events.some(
+        (event) => event.type === 'quality.gate.passed' && event.stepId === 're-review-1',
+      ),
+    );
+  } finally {
+    store.removeAgent(secondCoder.id);
+    restoreAgents(saved);
     store.updateSettings(previous);
   }
 });

@@ -13,8 +13,39 @@ function write(relPath, content) {
 }
 
 const close = (text) => process.stdout.write(text.trim() + '\n');
+const hasGoal = (text) => prompt.includes(text);
 
-if (prompt.includes('PLAN CONTRACT v1')) {
+if (hasGoal('动态计划返工夹具') && prompt.includes('STEP_ID: review')) {
+  close([
+    'The first review found issues in both implementation modules.',
+    '- `src/core.js`: missing the repaired marker.',
+    '- `src/api.js`: missing the repaired marker.',
+    'VERDICT: {"decision":"FAIL","blockers":2,"should":0}',
+  ].join('\n'));
+} else if (hasGoal('动态计划返工夹具') && prompt.includes('STEP_ID: fix-1')) {
+  write('src/core.js', "export const core = 'core repaired';\n");
+  write('src/api.js', "export const api = 'api repaired';\n");
+  close('Repaired both implementation modules.\n下一步建议：回归验证。');
+} else if (hasGoal('动态计划返工夹具') && prompt.includes('STEP_ID: retest-1')) {
+  write(
+    'tests/core.test.js',
+    [
+      "import assert from 'node:assert/strict';",
+      "import { core } from '../src/core.js';",
+      "import { api } from '../src/api.js';",
+      "assert.equal(core, 'core repaired');",
+      "assert.equal(api, 'api repaired');",
+      "console.log('dynamic plan repair fixture passed');",
+      '',
+    ].join('\n'),
+  );
+  close('Wrote the regression test after repair.\n下一步建议：复评。');
+} else if (hasGoal('动态计划返工夹具') && prompt.includes('STEP_ID: re-review-1')) {
+  close([
+    'Both repaired modules now satisfy the original blockers.',
+    'VERDICT: {"decision":"PASS","blockers":0,"should":0}',
+  ].join('\n'));
+} else if (prompt.includes('PLAN CONTRACT v1')) {
   const steps = [
     {
       id: 'core',

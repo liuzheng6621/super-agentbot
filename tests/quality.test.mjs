@@ -176,6 +176,47 @@ test('自审按 reviewerId 与 implementerId 判定，并在记录中带出双�
   assert.equal(store.taskSummary(saved).quality.selfReview, true, '/api/state 的任务摘要可见');
 });
 
+test('多 coder 场景聚合全部实现者，任一命中都标为自审', () => {
+  const coder = store.findAgentByRole('coder');
+  const tester = store.findAgentByRole('tester');
+  const secondCoder = store.addAgent({
+    name: 'Second coder',
+    role: 'coder',
+    title: 'Implementation pool',
+    seat: false,
+    mode: 'sim',
+  });
+  try {
+    const task = store.createTask({ goal: '多实现者独立性' });
+    store.setPlan(task.id, [
+      { id: 'core', title: '核心', role: 'coder', agentId: coder.id },
+      { id: 'api', title: 'API', role: 'coder', agentId: secondCoder.id },
+      { id: 'review', title: '评审', role: 'reviewer', agentId: tester.id },
+    ]);
+    store.updateStep(task.id, 'core', { status: 'done' });
+    store.updateStep(task.id, 'api', { status: 'done' });
+
+    const independent = reviewIndependenceFor(store.getTask(task.id), tester);
+    assert.deepEqual(
+      new Set(independent.implementerIds),
+      new Set([coder.id, secondCoder.id]),
+      'must retain every implementation agent',
+    );
+    assert.deepEqual(
+      new Set(independent.implementationStepIds),
+      new Set(['core', 'api']),
+    );
+    assert.equal(independent.selfReview, false);
+
+    const selfByFirst = reviewIndependenceFor(store.getTask(task.id), coder);
+    assert.equal(selfByFirst.selfReview, true, 'matching any coder is self review');
+    const selfBySecond = reviewIndependenceFor(store.getTask(task.id), secondCoder);
+    assert.equal(selfBySecond.selfReview, true, 'matching the last coder is self review');
+  } finally {
+    store.removeAgent(secondCoder.id);
+  }
+});
+
 test('上下文包可以直接复用目录快照，不再重复扫描', () => {
   const dir = workspace({ 'a.js': 'a' }).workspace;
   const task = { id: 'ctx-task', goal: '看板', workspace: dir, status: 'running', mode: 'auto', plan: [], messages: [] };

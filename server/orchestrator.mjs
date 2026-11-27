@@ -174,6 +174,7 @@ export async function writeWorkspaceFile(task, relPath, content, meta = {}) {
     agentId: meta.agentId || '',
     principal: { kind: 'system', id: 'orchestrator', name: 'Orchestrator' },
     stepId: meta.stepId || '',
+    executionId: meta.executionId || '',
     source: 'orchestrator',
   });
   const executionAgent = meta.agentId ? store.getAgent(meta.agentId) : null;
@@ -1971,6 +1972,7 @@ async function runStep(
     await writeWorkspaceFile(task, file.path, file.content, {
       agentId: agent.id,
       stepId: step?.id || '',
+      executionId: execution?.executionId || '',
     });
   }
   if (step?.role === 'architect') {
@@ -1978,10 +1980,15 @@ async function runStep(
     await writeWorkspaceFile(task, `docs/${mod.name}-design.md`, sim.designDoc({ goal: task.goal }), {
       agentId: agent.id,
       stepId: step.id,
+      executionId: execution?.executionId || '',
     });
   }
   if (step?.role === 'tester') {
-    await writeWorkspaceFile(task, 'README.md', readmeFor(task), { agentId: agent.id, stepId: step.id });
+    await writeWorkspaceFile(task, 'README.md', readmeFor(task), {
+      agentId: agent.id,
+      stepId: step.id,
+      executionId: execution?.executionId || '',
+    });
   }
   return {
     ok: true,
@@ -2437,6 +2444,142 @@ function applyPlannerPlan(taskId, plannerOutput, { runId } = {}) {
   };
 }
 
+const REPAIR_PATH_LIMIT = 12;
+
+/**
+ * Repair prompts must be based on actual workspace artifacts, not a guessed
+ * single module. Keep this validation in sync with the planner path contract.
+ */
+export function normalizeRepairPath(value) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.includes('\\')) return '';
+  if (raw.startsWith('/') || /^[A-Za-z]:/.test(raw)) return '';
+  const segments = raw.split('/');
+  if (segments.some((segment) => !segment || segment === '.' || segment === '..')) {
+    return '';
+  }
+  if (segments.some((segment) => segment === '.git' || segment === '.agentforge')) {
+    return '';
+  }
+  return raw;
+}
+
+function addRepairPath(output, seen, value) {
+  if (output.length >= REPAIR_PATH_LIMIT) return;
+  const relPath = normalizeRepairPath(value);
+  if (!relPath || seen.has(relPath)) return;
+  seen.add(relPath);
+  output.push(relPath);
+}
+
+function reviewPathHints(review) {
+  const values = [
+    review?.text,
+    ...(Array.isArray(review?.files) ? review.files : []),
+    ...(Array.isArray(review?.paths) ? review.paths : []),
+    ...(Array.isArray(review?.blockerFiles) ? review.blockerFiles : []),
+    ...(Array.isArray(review?.verdictDetails?.files) ? review.verdictDetails.files : []),
+    ...(Array.isArray(review?.verdictDetails?.paths) ? review.verdictDetails.paths : []),
+  ];
+  const output = [];
+  for (const value of values) {
+    const text = String(value || '');
+    const matches = text.match(
+      /[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9]+/g,
+    );
+    if (matches) output.push(...matches);
+  }
+  return output;
+}
+
+/**
+ * Collect every likely repair target in priority order. Planned output paths
+ * are declarations; artifact ledger entries are the evidence that a file was
+ * actually touched. The sim fallback is intentionally last.
+ */
+export function repairPathsFor(task, review = null) {
+  const plan = Array.isArray(task?.plan) ? task.plan : [];
+  const coderSteps = plan.filter(
+    (step) => step.role === 'coder' && ['done', 'running'].includes(step.status),
+  );
+  const testerSteps = plan.filter(
+    (step) => step.role === 'tester' && ['done', 'running'].includes(step.status),
+  );
+  const coderStepIds = new Set(coderSteps.map((step) => step.id));
+  const testerStepIds = new Set(testerSteps.map((step) => step.id));
+  const coderAgentIds = new Set(coderSteps.map((step) => step.agentId).filter(Boolean));
+  const testerAgentIds = new Set(testerSteps.map((step) => step.agentId).filter(Boolean));
+  const output = [];
+  const seen = new Set();
+
+  for (const hint of reviewPathHints(review)) addRepairPath(output, seen, hint);
+
+  for (const step of coderSteps) {
+    for (const relPath of step.outputPaths || []) addRepairPath(output, seen, relPath);
+  }
+
+  for (const artifact of task?.artifacts || []) {
+    if (!['A', 'M', ''].includes(String(artifact.status || ''))) continue;
+    if (
+      coderStepIds.has(artifact.stepId) ||
+      coderAgentIds.has(artifact.agentId)
+    ) {
+      addRepairPath(output, seen, artifact.path);
+    }
+  }
+
+  for (const step of testerSteps) {
+    for (const relPath of step.outputPaths || []) addRepairPath(output, seen, relPath);
+  }
+  for (const artifact of task?.artifacts || []) {
+    if (!['A', 'M', ''].includes(String(artifact.status || ''))) continue;
+    if (
+      testerStepIds.has(artifact.stepId) ||
+      testerAgentIds.has(artifact.agentId)
+    ) {
+      addRepairPath(output, seen, artifact.path);
+    }
+  }
+
+  if (!output.length) {
+    addRepairPath(output, seen, `src/${sim.pickModule(task?.goal || '').name}.js`);
+  }
+  return output;
+}
+
+function testerRepairPathsFor(task, review = null) {
+  const paths = repairPathsFor(task, review);
+  const plan = Array.isArray(task?.plan) ? task.plan : [];
+  const testerSteps = plan.filter(
+    (step) => step.role === 'tester' && ['done', 'running'].includes(step.status),
+  );
+  const testerStepIds = new Set(testerSteps.map((step) => step.id));
+  const testerAgentIds = new Set(testerSteps.map((step) => step.agentId).filter(Boolean));
+  const output = [];
+  const seen = new Set();
+  for (const step of testerSteps) {
+    for (const relPath of step.outputPaths || []) addRepairPath(output, seen, relPath);
+  }
+  for (const artifact of task?.artifacts || []) {
+    if (!['A', 'M', ''].includes(String(artifact.status || ''))) continue;
+    if (
+      testerStepIds.has(artifact.stepId) ||
+      testerAgentIds.has(artifact.agentId)
+    ) {
+      addRepairPath(output, seen, artifact.path);
+    }
+  }
+  if (!output.length) {
+    for (const relPath of paths) {
+      if (/^tests\//.test(relPath)) addRepairPath(output, seen, relPath);
+    }
+  }
+  if (!output.length) {
+    addRepairPath(output, seen, `tests/${sim.pickModule(task?.goal || '').name}.test.js`);
+  }
+  return output;
+}
+
 function describeFailure(result, plan) {
   const failedId = [...result.results.entries()].find(([, value]) => value?.ok === false)?.[0];
   const step = plan.find((s) => s.id === failedId);
@@ -2728,6 +2871,9 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
       store.updateTask(taskId, { repairRound });
 
       const previousReviewId = review.stepId;
+      const repairTask = store.getTask(taskId);
+      const repairOutputPaths = repairPathsFor(repairTask, review);
+      const retestOutputPaths = testerRepairPathsFor(repairTask, review);
       const repairSteps = [
         {
           id: `fix-${repairRound}`,
@@ -2735,7 +2881,7 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
           role: 'coder',
           needs: [previousReviewId],
           round: repairRound,
-          outputPaths: [`src/${sim.pickModule(task.goal).name}.js`],
+          outputPaths: repairOutputPaths,
           ...roleAgent('coder'),
         },
         {
@@ -2744,7 +2890,7 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
           role: 'tester',
           needs: [`fix-${repairRound}`],
           round: repairRound,
-          outputPaths: [`tests/${sim.pickModule(task.goal).name}.test.js`],
+          outputPaths: retestOutputPaths,
           ...roleAgent('tester'),
         },
         {
