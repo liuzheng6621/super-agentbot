@@ -2,7 +2,7 @@
 
 > 更新日期：2026-11-27
 > 状态：M3 / M4 / M5 已完成；本轮 P1-9、P1-10 与五项 P2 能力已完成
-> 当前文档基线：`14fe33d docs: align plan baseline and remaining backlog`
+> 当前文档基线：`024358d docs: close legacy backlog audit`
 > 来源：OpenBot 上游仓库（https://github.com/OpenHands/OpenBot）+ AgentForge 现有路线图（`agent-platform-roadmap.md`）
 > 说明：本计划只吸收机制与契约，不移植 OpenBot 的 Electron / Bun / Cloudflare 架构。
 
@@ -28,7 +28,7 @@ AgentForge 继续保留零依赖、零构建、可直接运行的优点，并通
 | --- | --- | --- |
 | Tool Gateway | 已覆盖工作区读、写、搜索、移动、删除、事务和审计 | Agent 调用必须带工具白名单；人工管理员通道仍可绕过 Agent 白名单 |
 | Shell / 命令 | 固定命令白名单、operator 审批、一次性执行、超时和进程树回收 | 不开放任意 shell；Agent 只能申请，不能自行批准 |
-| CLI 执行 | 每次调用启动独立子进程，Provider Profile 负责环境、参数、路由和回退 | 没有长期 Provider 会话；`inherit` 不是内核级隔离 |
+| CLI 执行 | 每次调用启动独立子进程，Provider Profile 负责环境、参数、路由和回退 | 没有长期 Provider 会话；`inherit` 不是内核级隔离；外部 CLI 安装 / 授权需逐项验收 |
 | Scheduler | 全局任务并发、Provider 配额、Agent 租约和排队原因可见 | Automation / Scheduler 仍是进程内调度，不是分布式队列 |
 | Automation | 周期 / 每日、CRUD、暂停恢复、重试、历史、启动恢复和 durable `await_event` | 事件等待持久化在 `settings.automations`；进程内调度器仍不是分布式队列 |
 | 服务安全 | owner / operator / agent / system 主体、Token 作用域、租户过滤、配额和审计 | 不是完整账号、RBAC、SSO 或按用户计费 |
@@ -54,7 +54,7 @@ AgentForge 继续保留零依赖、零构建、可直接运行的优点，并通
 
 已完成：
 
-- Provider 用量账本记录 `providerId / model / taskId / runId / agentId / tokensIn / tokensOut / estimatedCost / source / at`；未知成本保持 `null`。
+- Provider 用量账本记录 `providerId / model / taskId / runId / agentId / tokensIn / tokensOut / cost / source / at`；未知成本保持 `null`，不伪造零成本。
 - `/api/state` 暴露任务级 `contextStates`，未知窗口保持 `null`，压缩记录保留摘要和原始消息引用。
 - `history_search` / `history_read` 只读、任务内限定、cursor 分页。
 - `clientMessageId` 在 24 小时窗口内返回同一任务，不重复创建工作区。
@@ -119,6 +119,8 @@ AgentForge 继续保留零依赖、零构建、可直接运行的优点，并通
 
 全量验证：`npm test`（统一隔离数据目录）；跨平台矩阵由 `.github/workflows/ci.yml` 运行。测试数量随用例增减，不在计划中固定。
 
+自动夹具验证的是调用契约和进程边界，不是外部 CLI 的安装、授权或完整交付。真实矩阵需要逐项记录 CLI 版本、Provider 配置、一次成功调用和一次失败 / 超时恢复。
+
 ## 本轮已完成
 
 | 条目 | 完成内容 | 主要验证 |
@@ -134,6 +136,7 @@ AgentForge 继续保留零依赖、零构建、可直接运行的优点，并通
 | 文件夹选择器浏览器验收 | 真实 Edge/CDP 覆盖当前构建；缺少浏览器时显式跳过 | `tests/folder-picker.test.mjs` |
 | agent-web 开发期验收 | 固定提交 `fe543ea`，真实 HTTP 适配器跑通 10 个核心案例；可选、不进入生产依赖 | `tests/agent-web-compat.test.mjs` |
 | 团队体检 Provider 注入 | 已绑定 Agent 的 Provider Profile 会注入真实体检子进程；覆盖模型、Base URL、密钥环境引用、参数模板与 Windows `.cmd` | `tests/team.test.mjs` |
+| 增量工作区索引 | 按任务与真实工作区根复用快照；平台写 / 移动 / 删除显式失效；截断扫描不产生删除结论 | `tests/quality.test.mjs`、`tests/workspace.test.mjs` |
 
 ## 后续 backlog
 
@@ -141,8 +144,11 @@ AgentForge 继续保留零依赖、零构建、可直接运行的优点，并通
 
 | 优先级 | 条目 | 当前情况与建议 |
 | --- | --- | --- |
+| P2 | Provider 级费用预算 | 账本已有 token 和未知 `cost: null`；价格来源、预算周期与超额动作尚未定义，需产品决策后补测试 |
+| P2 | 内核级 CLI 代理与隔离 | 当前是原生沙箱映射；网络代理、系统调用拦截和跨进程文件租约需独立架构评审 |
 | P2 | 监听与权限边界 | `HOST`、`bypassPermissions`、`yolo` 仍沿用现有策略；单独做安全评审和显式配置 |
 | P2 | 完整账号 / RBAC / SSO | 当前是 Token 主体和租户过滤，不是完整用户身份体系 |
 | P2 | 外部数据库 / 分布式队列 | 当前是 JSON + 文件锁 + 租约；SQLite 或队列引入前需单独架构决策 |
+| P2 | 真实外部 CLI 交付矩阵 | 15 个内置候选有自动契约测试，但安装、授权、模型可用性和真实交付仍需按环境逐项验收 |
 
 每项实现前都应先补最小失败测试；不得为了通过测试 mock 掉真实命令、工具或持久化路径。

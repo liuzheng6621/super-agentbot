@@ -1,8 +1,8 @@
 # AgentForge 修复与验收计划
 
 > 核查日期：2026-11-27
-> 核查对象：`E:\SKIl.1\bot` 当前工作树
-> 文档同步基线：`14fe33d docs: align plan baseline and remaining backlog`
+> 核查对象：当前仓库工作树
+> 文档同步基线：`024358d docs: close legacy backlog audit`
 > 本文性质：修复与验收文档；每项状态以“当前状态”和对应提交 / 测试为准
 
 ## 1. 目的与边界
@@ -11,7 +11,7 @@
 
 1. 上一轮列出的 7 个失败中，哪些已经解决，证据是什么。
 2. 当前代码里还有哪些缺陷、旧账和不能误报成“已解决”的风险。
-3. `E:\SKIl.1\agent-web` 能否用于本项目，以什么方式使用。
+3. 独立 checkout 的 `agent-web` 能否用于本项目，以什么方式使用。
 
 本文件最初用于盘点残余项。盘点后，基础项 3.1、3.2、3.3、3.4、3.5、3.6、3.7 已按独立提交落地；本文件持续记录剩余验收项，不能用早期盘点结论覆盖后续代码事实。
 
@@ -19,11 +19,11 @@
 
 ### 2.1 测试结果
 
-在 Windows、Node.js `v22.23.4` 下执行：
+在 Windows、Node.js 20 / 22 下执行：
 
 ```powershell
-$env:AGENTFORGE_DATA_DIR = 'C:\Users\six\AppData\Local\Temp\agentforge-fixplan-baseline'
-node --test tests/*.test.mjs
+npm test
+npm run check:syntax
 ```
 
 结果：
@@ -34,7 +34,9 @@ node --test tests/*.test.mjs
 | 数据隔离 | 每次运行使用独立临时 `AGENTFORGE_DATA_DIR` |
 | 当前结果 | 全量通过；具体数量随用例增减，不在文档中固定 |
 
-结论：**当前工作树在这一个环境下全绿，旧的“153/160、7 个失败”不能再当作当前基线。** 这不等于跨平台、干净环境和真实 CLI 链路都已验收；下面仍列出这些缺口。工作树在核查期间仍在变化，测试数量随用例增减，不能把任何固定数字写成 README 常量。
+结论：**当前工作树在本地环境全绿，旧的“153/160、7 个失败”不能再当作当前基线。** 这不等于每个真实外部 CLI 的安装、授权和完整交付都已验收；下面仍列出这些缺口。测试数量随用例增减，不能把任何固定数字写成 README 常量。
+
+本文件保留历史修复记录和当时的判断，当前状态以各节“已实施”段落及第 11 节收口表为准。
 
 ### 2.2 已确认改善
 
@@ -46,7 +48,9 @@ node --test tests/*.test.mjs
 | 超长产物 spill | 已覆盖事件、消息、工具输出和导出 | 已有自动化回归；大任务端到端压测仍建议保留 |
 | 工作区文件闭环 | 读、写、增、删、移、查、事务与审计均有测试 | 跨进程 CLI 的强制边界仍有限 |
 
-## 3. 仍需修复的问题
+## 3. 修复记录与残余风险
+
+本节保留问题发现时的描述、修复方案和验收证据，用于追溯“为什么改、改成了什么”。带“（已完成）”或“已实施”的条目是历史修复记录，不代表当前仍有同一缺陷；当前未完成项统一列在第 11 节。
 
 ### 3.1 P0：测试入口探测与执行范围不一致（已完成）
 
@@ -191,7 +195,7 @@ node --test tests/**/*.test.{js,mjs,cjs}
 
 **位置**：`public/app.js` 的 `inlineMd()` 当前约 191-197 行；消息渲染在 `patchMessage()` 当前约 765-769 行。
 
-**现状**：先做 HTML 转义，再把 Markdown 链接直接拼成 `<a href="$2">`。`[x](javascript:...)` 这类内容可能成为可点击的危险链接。
+**现状**：先做 HTML 转义，再把 Markdown 链接直接拼成 `<a href="$2">`。带 `javascript:` 协议的链接可能成为可点击的危险链接。
 
 **风险等级**：代码层确认存在；尚未在浏览器中复现利用链，因此文档不把它写成已发生安全事件。
 
@@ -256,18 +260,9 @@ node --test tests/**/*.test.{js,mjs,cjs}
 
 **环境限制**：无 Edge 或无法启动 CDP 时该浏览器用例显式跳过，并提示设置 `AGENTFORGE_EDGE_PATH`；API 错误路径仍会执行。桌面壳使用同一套前端与服务，但本轮未做 Windows 桌面窗口自动化，因此“桌面端不可见”的旧截图仍不能作为根因证据。
 
-### 3.11 P2：结构债务（逐步提取中）
+### 3.11 P2：结构债务（部分提取，持续改善）
 
-当前主要文件规模：
-
-| 文件 | 行数 |
-| --- | ---: |
-| `public/app.js` | 4984 |
-| `public/styles.css` | 6093 |
-| `server/store.mjs` | 3164 |
-| `server/orchestrator.mjs` | 3130 |
-| `server/workspace.mjs` | 1118 |
-| `server/tool-gateway.mjs` | 607 |
+当前主要文件仍是数千行级单文件，精确行数会随提交漂移，因此不在文档中维护行数快照。
 
 当前已开始按稳定职责拆，不做一次性重写。`server/test-entry.mjs`、`server/review-independence.mjs`、`server/review-analysis.mjs`、`server/debate-analysis.mjs` 和 `server/context-budget.mjs` 已从 `server/orchestrator.mjs` 提取，保留原导出兼容；后续继续按小步提交：
 
@@ -316,21 +311,21 @@ node --test tests/**/*.test.{js,mjs,cjs}
 
 ### 4.2 是否基于 Magpie
 
-不是整体基于 Magpie。代码中仍能看到 Magpie 的模型/网关默认值和 CLI 参数模板，但工作区文件、工具网关、调度、持久化和评审不是 Magpie 实现的。
+不是整体基于 Magpie。内置 CLI 候选已移除 Magpie 地址、模型和凭据参数，工作区文件、工具网关、调度、持久化和评审也不是 Magpie 实现的。
 
 更准确的说法：
 
 - **编排与文件能力**：AgentForge 自有实现。
-- **部分 CLI 的默认模型/网关配置**：仍有 Magpie 相关硬编码。
+- **CLI 的模型 / 网关配置**：由 Provider Profile `cliBindings` 注入，不再写死在 `CANDIDATES`。
 - **执行隔离**：部分是 CLI 原生沙箱映射，不是 Magpie 代理。
 
 ### 4.3 提升泛用性
 
-1. 把 `CANDIDATES` 里的 Magpie 地址、模型名、API key 模板迁到 Provider Profile。
+1. `CANDIDATES` 的 Magpie 地址、模型名和 API key 模板已由 Provider Profile `cliBindings` 承接；后续新增 CLI 继续使用同一契约。
 2. 定义通用 CLI 适配器契约：发现、探活、参数模板、stdin 模式、超时、退出码分类、能力声明。
 3. 工具能力用声明式 manifest 表示，不按命令名写分支。
 4. 对不支持原生沙箱的 CLI 明确标为“不可强制隔离”，strict 下拒绝。
-5. 用统一验收夹具验证任意新 CLI，而不是只给内置 10 个命令加特例。
+5. 用统一验收夹具验证任意新 CLI，而不是只给内置 15 个候选加特例。
 
 ## 5. 工作区、工作树与流程视图
 
@@ -395,13 +390,13 @@ node --test tests/**/*.test.{js,mjs,cjs}
 5. 任务开始前生成“能力缺口报告”，缺工具时拒绝假装可完成。
 6. 工作区池的配额、保留期和回收审计已覆盖平台产物；继续补跨任务池的独立配额。
 
-## 7. `E:\SKIl.1\agent-web` 评估
+## 7. 独立 `agent-web` 评估
 
 ### 7.1 它是什么
 
 | 项 | 实际情况 |
 | --- | --- |
-| 路径 | `E:\SKIl.1\agent-web` |
+| 路径 | 外部 checkout，通过 `AGENT_WEB_ROOT` 指定 |
 | HEAD | `fe543ea chore(release): v0.78.3...` |
 | 包名 | `agent-case` |
 | 版本 | `0.78.3` |
@@ -442,7 +437,7 @@ node --test tests/**/*.test.{js,mjs,cjs}
 
 采用**开发期验收预言机**，不进入生产运行链：
 
-1. 在 AgentForge 仓库外保留独立 checkout：`E:\SKIl.1\agent-web`。
+1. 在 AgentForge 仓库外保留独立 checkout，通过 `AGENT_WEB_ROOT` 指定。
 2. 通过环境变量 `AGENT_WEB_ROOT` 或测试脚本定位，不复制源码进主仓库。
 3. 固定到已验收提交 `fe543ea`，升级必须单独评审；测试脚本先校验 `git rev-parse HEAD`，不一致就明确报错或跳过。
 4. 编写 AgentForge adapter，实现五方法契约。
@@ -460,7 +455,7 @@ node --test tests/**/*.test.{js,mjs,cjs}
 推荐环境变量：
 
 ```text
-AGENT_WEB_ROOT=E:\SKIl.1\agent-web
+AGENT_WEB_ROOT=<agent-web checkout>
 AGENT_WEB_COMMIT=fe543ea
 ```
 
@@ -531,17 +526,17 @@ AgentForge 应把这些概念映射到任务、工序、工具调用、文件变
 ### 9.1 自动化
 
 ```powershell
-node --check server/index.mjs
-node --test tests/*.test.mjs
+npm test
+npm run check:syntax
 ```
 
-已加入 CI：`npm run check:syntax` 与 `npm test` 是仓库统一入口，不在文档里复制散落命令。
+`npm run check:syntax` 与 `npm test` 是仓库统一入口，CI 在 Ubuntu / Windows × Node 20 / 22 上运行。
 
 agent-web 独立验收（checkout 固定到 `fe543ea`）：
 
 ```powershell
-node bin/agent-web.mjs verify E:\SKIl.1\bot\tests\fixtures\agent-web\cases `
-  --adapter=E:\SKIl.1\bot\tests\fixtures\agent-web\agentforge-adapter.mjs --json
+node bin/agent-web.mjs verify tests/fixtures/agent-web/cases `
+  --adapter=tests/fixtures/agent-web/agentforge-adapter.mjs --json
 ```
 
 仓库内 `tests/agent-web-compat.test.mjs` 会校验固定提交并断言 10 条全部 `pass`；没有 checkout 时显式跳过，不会伪报通过。
@@ -595,7 +590,7 @@ node bin/agent-web.mjs verify E:\SKIl.1\bot\tests\fixtures\agent-web\cases `
 | 类别 | 条目 | 当前结论 | 下一步 |
 | --- | --- | --- | --- |
 | 需要产品决策 | Provider 级费用预算 | 用量账本已有真实 `tokensIn / tokensOut` 和未知成本 `null`，但没有价格表、币种、窗口和超额动作；不能把 token 数擅自换算成费用 | 先确定价格来源（Profile 单价 / 环境变量价格表）、预算周期（任务 / 日 / 月）和超额策略（排队 / 拒绝 / 仅告警），再补最小失败测试 |
-| 需要真实环境验收 | `claude`、`codex`、`opencode`、`dsh`、`kimi`、`trae-cli`、`crush`、`aider`、`gemini`、`qwen` | 自动测试已覆盖调用契约、Provider 注入、Windows `.cmd`、超时、进程回收与失败回退；当前机器不能据此声称全部安装并授权 | 逐项记录安装版本、Provider、授权状态和一次真实交付；未满足项保持“未验收” |
+| 需要真实环境验收 | `claude`、`codex`、`opencode`、`cursor-agent`、`copilot`、`cn`、`dsh`、`kimi`、`trae-cli`、`crush`、`goose`、`aider`、`gemini`、`qwen`、`ollama` | 自动测试已覆盖调用契约、Provider 注入、Windows `.cmd`、超时、进程回收与失败回退；当前机器不能据此声称全部安装并授权 | 逐项记录安装版本、Provider、授权状态和一次真实交付；未满足项保持“未验收” |
 | 需要单独架构评审 | 内核级 CLI 代理、完整账号 / RBAC / SSO、外部数据库或分布式队列、监听与权限边界 | 当前边界已写入 README；改动会触及安全模型或运行时架构，不属于旧缺陷的最小修复 | 单独立项、威胁建模和迁移方案；在此之前不扩大承诺 |
 
 团队体检的 Provider 注入已收口：已绑定 Agent 的 Profile 会进入真实体检子进程，参数模板、模型、Base URL 和密钥环境引用均由 `withProviderProfile()` 解析；Windows `.cmd` 与 stdin 路径由 `tests/team.test.mjs` 覆盖。该结论不替代外部 CLI 的安装与授权验收。

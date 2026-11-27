@@ -1,38 +1,43 @@
-# AgentForge 三项能力升级设计（以 DSH 内部实现为蓝本）
+# AgentForge 文件、读图与上下文设计（以 DSH 内部实现为蓝本）
 
-> 调研对象：`@deepseek-ai/dsh` 全局包（`C:\Users\six\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh`），
-> 依据 `docs/subsystems/*.zh.md` 与各插件包 `README.zh.md`，并实测本机 magpie 路由。
-> 本文最初用于设计与差距分析。三项能力现已落地；保留原文中的设计判断，落地状态以本页“实施结果”和当前测试为准。
+> 调研对象：`@deepseek-ai/dsh` 的公开包文档与本地运行时行为。
+> 依据：DSH 子系统文档、插件包 README，以及受控兼容网关的图片输入验证。
+> 文档状态：本文最初用于设计与差距分析。三项能力现已落地；前半部分保留“设计初稿时”的判断，当前状态以本页“实施结果”和测试为准。
+
+**当前结论**
+
+- 文件原子写、内容版本、读后写守卫和事务回滚已经落地。
+- 图片附件已经有类型 / 体积 / 尺寸校验、内容寻址存储和 Provider `vision` 能力门禁；尚未完成外部 CLI 的逐项真实视觉验收，也没有图片重编码规范化。
+- 上下文已经有稳定段序、token 估算、spill、自动压缩、质量评估和回放；当前摘要仍是**抽取式**，不是模型生成的语义摘要。
+- 这些能力不等于内核级隔离：`strict` 仍是 CLI 原生沙箱映射，网络请求、系统调用和跨进程文件租约尚未统一拦截。
 
 ---
 
 ## 0. 结论摘要
 
-| # | 领域 | AgentForge 现状 | DSH 的做法 | 差距性质 |
+| # | 领域 | 设计初稿时的 AgentForge | DSH 的做法 | 差距性质 |
 |---|---|---|---|---|
 | 1 | 文件读写 | `fs.writeFileSync` 直写；靠 `mtimeMs+bytes` 判断变更 | 原子交换 + 不透明版本令牌 + 意图守卫 + 12 个稳定错误码 | **正确性**（断电/并发写坏文件、等长改写漏检） |
-| 2 | 读图 | 零能力，消息只有纯文本 | 内容寻址附件 + 规范化 + `ImageBlock` 引用 + 按路由投影 + 超预算省略 | **能力缺失**（本机路由实测支持视觉，白放着） |
+| 2 | 读图 | 零能力，消息只有纯文本 | 内容寻址附件 + 规范化 + `ImageBlock` 引用 + 按路由投影 + 超预算省略 | **能力缺失**（兼容路由验证支持视觉，但当时未接入） |
 | 3 | 上下文 | 单条扁平 prompt，**易变块排在最前**；`ceil(len/3)` 估 token；依赖产物 `clip(6000)` 丢中间 | 分段注册表 + 仅追加日志投影 + 前缀友好的稳定段 + compaction/pruner/spill 三层减法 | **成本 + 质量**（每一步都打掉前缀缓存，且信息不可恢复地丢失） |
 
-三条里性价比最高的是 **3**：不新增依赖、不改协议，只调整 prompt 的段序与预算，立刻省钱。
-其次是 **1** 的原子写（几十行代码，消灭一类数据损坏）。
-**2** 工作量最大，但本机路由已实测可用，属于「纯增量、不碰现有路径」的能力扩展。
+设计初稿时三条里性价比最高的是 **3**：不新增依赖、不改协议，只调整 prompt 的段序与预算，立刻省钱。其次是 **1** 的原子写。**2** 工作量最大，但兼容路由已能接受图片输入，属于纯增量能力。上述三项现均已实现基础版本。
 
 ---
 
 ## 1. 读写的文件操作
 
-### 1.1 DSH 的分层（可直接照搬的角色划分）
+### 1.1 DSH 的分层与 AgentForge 的对应实现
 
 | 角色 | 包 | 职责 | 与 AgentForge 的对应物 |
 |---|---|---|---|
-| Service Definition | `dsh-fs` | `ctx.fs` 抽象接口 + 受防护的变更操作 | 尚无，等价物是 `orchestrator.mjs` 里散落的 `fs.*` |
-| Service Provider | `dsh-fs-local` | 本地磁盘实现（原子写、版本令牌） | 待建 `server/fs.mjs` |
-| Policy | `dsh-fs-observation-policy` | 记录「谁读过什么」，把写入意图升级成守卫 | 待建（约 60 行） |
-| Consumer | `dsh-tool-fs` | 面向模型的 read / read_image / write / edit / apply_patch | 待建（面向 CLI 的等价物是「给路径 + 给约束」） |
+| Service Definition | `dsh-fs` | `ctx.fs` 抽象接口 + 受防护的变更操作 | 不做通用服务 seam；由 `server/workspace.mjs` 与 Tool Gateway 提供受控操作 |
+| Service Provider | `dsh-fs-local` | 本地磁盘实现（原子写、版本令牌） | `server/fs.mjs` 提供原子写、内容版本和 spill |
+| Policy | `dsh-fs-observation-policy` | 记录「谁读过什么」，把写入意图升级成守卫 | `server/workspace.mjs` 在工作区与网关链路中校验最近读取版本 |
+| Consumer | `dsh-tool-fs` | 面向模型的 read / read_image / write / edit / apply_patch | Tool Gateway 提供工作区文件能力；外部 CLI 通过只读路径与约束读取 |
 | Pure lib | `dsh-fs-patch` | 补丁解析与文本应用 | 可选，暂不做 |
 
-关键设计原则：**换后端不改策略，换策略不改工具 schema**。AgentForge 现在没有这层，`fs.writeFileSync` 在 `writeWorkspaceFile`、`store.mjs`（db.json）、`orchestrator.mjs`（产物收集）三处各写一遍，语义不一致。
+关键设计原则是**换后端不改策略，换策略不改工具 schema**。AgentForge 不引入 DSH 的完整服务 seam，但已经把原子写、版本、读后写守卫、事务和工作区索引拆到稳定模块中，避免各调用点各写一套文件语义。
 
 ### 1.2 DSH 的六个关键机制
 
@@ -83,23 +88,23 @@ interface FsWriteOutcome { operation: 'create'|'update'; version; before: string
 `owner` = `exec.agent.session`（当作不透明 WeakMap key 用）。写入决策把「未见/已缺失」映射到 `createIfAbsent`、把「存在」映射到 `replaceIfVersion`。
 **该插件随发行版交付但默认 `disabled: true`**——需要「先读后写」的部署自己打开。这解释了为什么 DSH 默认允许无条件写：它是可选项，不是默认纪律。
 
-### 1.3 AgentForge 现状的四个具体缺陷
+### 1.3 设计初稿时 AgentForge 的四个具体缺陷
 
-以 `server/orchestrator.mjs` 为准：
+以下以当时的 `server/orchestrator.mjs` 为准，保留为设计依据；当前实现已由 `server/fs.mjs`、`server/workspace.mjs`、`server/workspace-index.mjs` 和 `server/store.mjs` 取代。
 
-| 位置 | 现状 | 风险 |
+| 位置 | 设计初稿时现状 | 风险 |
 |---|---|---|
 | `writeWorkspaceFile` L37-51 | `fs.writeFileSync(abs, content, 'utf8')` | **非原子**：进程在写到一半被杀 → 文件截断，且原内容已丢 |
 | `listWorkspaceFiles` L68-96 | 全量 `readdirSync` + `statSync`，上限 20000 文件 / 深度 12 | 每次 CLI 调用**前后各扫一遍全仓**（`cliMessage` L223 与 L275），大仓库上是 O(2×N) 同步 IO |
 | `cliMessage` L274-288 | 变更识别 = `prev.bytes !== f.bytes || prev.mtimeMs !== f.mtimeMs` | 等长同毫秒改写漏检；CLI 覆盖自己刚写的文件不会产生新 artifact 记录 |
 | 全局 | 没有「读后写」概念，没有错误码 | CLI 直接落盘，AgentForge 只能事后发现，无法拒绝 |
 
-另有一处**真实数据损坏隐患**：`store.mjs` 把整个 `db.json`（当前 115 KB）当单文档写。任务越多越大，写盘窗口越宽。
+另有一处**真实数据损坏隐患**：`store.mjs` 把整个 `db.json` 当单文档写。任务越多越大，写盘窗口越宽。当前已改为 200ms dirty 窗口、按子树记录脏区、原子替换，并在退出前 flush。
 
-### 1.4 落地设计（新增 `server/fs.mjs`，零依赖）
+### 1.4 落地设计（`server/fs.mjs` 与工作区模块，零依赖）
 
 ```js
-// server/fs.mjs —— 只做三件事：原子写、内容版本、读后写守卫
+// 设计示意：原子写与内容版本；读后写守卫位于工作区 / Tool Gateway 链路
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -133,7 +138,7 @@ export function versionOf(abs) {
 守卫层（对应 `fs-observation-policy`）：
 
 ```js
-// 观测记录挂在任务对象上：WeakMap 的语义等价物，但可持久化、可跨进程重启
+// 观测记录挂在任务对象上：DSH WeakMap 的可持久化等价物
 const observed = new Map();   // taskId -> Map<relPath, {version, kind:'present'|'absent'}>
 
 export function observe(taskId, relPath, version) { ... }
@@ -155,12 +160,12 @@ errno 映射：`ENOENT|ENOTDIR → FS_NOT_FOUND`、`EACCES|EPERM → FS_PERMISSI
 
 **刻意不做的**：文件 IO **不设 timeoutMs**。本地系统调用最多是「尽力中止」，超时无法中止进行中的 `fsync`/`rename`，设了就是一个自己骗自己的截止时间。取消通过 `AbortSignal` 在系统调用边界传播。
 
-**对 AgentForge 的最小改动清单**
+**当时对 AgentForge 的最小改动清单（已落地）**
 
-1. `writeWorkspaceFile` 换 `writeFileAtomic`（3 行）。
-2. `cliMessage` 的 before/after 快照从「全量 walk」改成「按 mtime 粗筛 + 命中项算 `versionOf`」，变更判定用版本而不是 `mtimeMs+bytes`。
-3. `store.addArtifact` 增 `version` 字段，产物列表能显示「已变更」而不只是「存在」。
-4. `db.json` 换 `writeFileAtomic`（消灭截断风险）。
+1. `writeWorkspaceFile` 已接入原子写。
+2. 工作区快照已按任务与真实工作区根复用，变更判定使用纳秒 mtime 粗筛加内容版本。
+3. artifact 已记录 `version`。
+4. `db.json` 已使用临时文件 + 原子替换，并在正常退出 / `SIGINT` / `SIGTERM` 前 flush；当前没有显式 `fsync`，这是已知持久化边界。
 
 **验收判据**（机器可判）
 
@@ -172,17 +177,17 @@ errno 映射：`ENOENT|ENOTDIR → FS_NOT_FOUND`、`EACCES|EPERM → FS_PERMISSI
 
 ## 2. 读图多模态
 
-### 2.1 先确认可行性（已实测）
+### 2.1 设计初稿时的可行性验证
 
 ```
-POST http://127.0.0.1:3425/v1/chat/completions
-model: trae-cn/glm-5.3-flash
+POST <provider-base-url>/chat/completions
+model: <vision-capable-model>
 content: [{type:'text',text:'这张图是什么颜色？只答颜色'},
           {type:'image_url',image_url:{url:'data:image/png;base64,iVBORw0KG...'}}]
 → 200，回答「红色」
 ```
 
-**本机路由接受 data URL 图片输入**。也就是说 AgentForge 现在完全可以把截图/设计稿喂给成员，只是没做。
+受控兼容路由接受 data URL 图片输入。这条验证只证明直连兼容网关可以接收图片，不代表每个外部 CLI 都已具备图片输入能力。
 
 ### 2.2 DSH 的图片链路（七步）
 
@@ -194,19 +199,21 @@ content: [{type:'text',text:'这张图是什么颜色？只答颜色'},
 6. **超预算省略**（`image-offload`）：路由因图片超预算拒绝时返回 `IMAGE_OFFLOAD_REQUIRED` + `offloadImages: n`；执行器按请求顺序遍历表层、跳过 assistant 节点与已标记项，追加 `image/offload {seq, imageIndexes}` 事件，把这些位置**永久**换成占位文本（注明附件与只读路径），然后重试——**不消耗提供方重试预算**。KV 缓存只能复用到第一张被改的图片之前。
 7. **通用文件不进 provider**：非图片文件原样保存，模型只收到一行 handle 文本（文件名 + 字节数 + 摘要前缀 + 只读保存路径），需要时用文件工具去读。
 
-### 2.3 AgentForge 现状
+### 2.3 设计初稿时的 AgentForge 现状
 
 - 消息体只有 `{agentId, name, role, kind, text}`，`kind` 只用于展示分类。
-- `artifacts` 只记 `{path, bytes, mtimeMs, lang}`，**没有摘要、没有 MIME**。
+- `artifacts` 只记 `{path, bytes, mtimeMs, lang}`，没有摘要、没有 MIME。
 - 前端没有图片渲染路径（消息正文按 Markdown 渲染文本）。
-- 没有任何「附件」概念，截图只能靠 CLI 自己写到工作区，然后当作普通文件列在「已知文件」里。
+- 没有「附件」概念，截图只能靠 CLI 自己写到工作区，然后当作普通文件列在「已知文件」里。
+
+当前已实现：`server/attachments.mjs` 负责签名识别、尺寸读取、内容寻址和视觉门禁；消息只持久化附件引用，不内联 base64 或本地绝对路径。前端已有图片上传、缩略图和消息渲染；外部 CLI 的真实图片读取仍要按各自能力验收。
 
 ### 2.4 落地设计
 
 **存储**（`data/attachments/<sha256[0:2]>/<sha256>.<ext>`，内容寻址，天然去重）：
 
 ```js
-// server/attach.mjs
+// server/attachments.mjs
 export function admitImage(buffer, { maxBytes = 8 << 20, maxPixels = 4_000_000, maxDim = 2048 } = {}) {
   const kind = sniffImage(buffer);            // 按签名判 PNG/JPEG/WebP/GIF，不信扩展名
   if (!kind) throw new AttachError('IMAGE_UNSUPPORTED_FORMAT', '只接受 PNG/JPEG/WebP/GIF');
@@ -215,30 +222,30 @@ export function admitImage(buffer, { maxBytes = 8 << 20, maxPixels = 4_000_000, 
   const sha = sha256(buffer);
   const abs = path.join(ATTACH_ROOT, sha.slice(0, 2), `${sha}.${kind.ext}`);
   if (!fs.existsSync(abs)) writeFileAtomic(abs, buffer);
-  return { id: sha.slice(0, 16), sha256: sha, bytes: buffer.length, ...meta, mime: kind.mime, abs };
+  return { id: sha.slice(0, 16), sha256: sha, bytes: buffer.length, ...meta, mime: kind.mime };
 }
 ```
 
 **消息形态**（照 `ContentBlock` 的思路，但保持 AgentForge 的扁平风格）：
 
 ```js
-{ agentId, name, role, kind: 'image', image: { id, sha256, mime, width, height, bytes, path } }
+{ agentId, name, role, kind: 'image', image: { id, sha256, mime, width, height, bytes } }
 ```
 
 **给成员用的两种投递方式**
 
 | 场景 | 做法 | 理由 |
 |---|---|---|
-| CLI 真进程 | 在 prompt 里给**只读绝对路径**（`<image path="...">`），让 CLI 自己的 read 工具去读 | 本机 10 个 CLI 里只有部分支持图片输入；路径最通用 |
-| 直连 API / sim 模式 | 直接把 `data:<mime>;base64,...` 塞进 `image_url` | 已实测可用 |
+| CLI 真进程 | 在 prompt 里给**只读路径**，让 CLI 自己的 read 工具去读 | 内置 15 个候选里只有部分支持图片输入；路径最通用 |
+| 直连兼容网关 | 把 `data:<mime>;base64,...` 放进 `image_url` | 受控网关曾验证可接收；当前产品链路仍需按 Provider 和 CLI 分别验收 |
 
 **能力门禁**（DSH 的 `IMAGE_UNSUPPORTED_MODEL` 等价物）：每个成员记录 `caps.vision`，路由不支持时**拒绝**把图片块投进去，并给出「换支持视觉的模型」的明确指令——不要让文本路由的持久历史里出现图片块。
 
 **超预算处理**：不要像 DSH 那样靠「先失败一次」，AgentForge 可以在投递前用 `bytes` 预算先算，超了就换占位文本：
 
-```
+```text
 [图片已省略] id=ab12cd34 1440×900 PNG 412KB
-只读路径: E:\SKIl.1\bot\data\attachments\ab\ab12...png
+只读路径: <data>/attachments/ab/ab12...png
 需要细节时用文件工具读取该路径。
 ```
 
@@ -246,7 +253,7 @@ export function admitImage(buffer, { maxBytes = 8 << 20, maxPixels = 4_000_000, 
 
 - `admitImage` 对 1×1 PNG / JPEG / WebP / GIF 全部通过；对 `.png` 后缀的文本文件抛 `IMAGE_UNSUPPORTED_FORMAT`。
 - 同一张图二次上传不产生第二个文件（内容寻址去重）。
-- 端到端：任务里贴一张截图，成员消息中出现 `kind:'image'` 块，模型回答能说出图中内容（用上面那张红图即可回归）。
+- 端到端：任务里贴一张截图，成员消息中出现 `kind:'image'` 块，模型回答能说出图中内容。自动测试覆盖附件校验和视觉门禁；外部 CLI 的真实视觉端到端仍需逐项验收。
 - 不支持视觉的成员收到图片时抛 `IMAGE_UNSUPPORTED_MODEL`，且消息不落库。
 
 ---
@@ -327,27 +334,27 @@ saveText({ owner:{sessionId}, source:{kind:'tool',toolName,callId,label}, sugges
 
 `suggestedName` 是**命名提示不是路径**（后端会清洗成单个安全段）；`locator` 是品牌化不透明句柄，消费方**只能拿 `retrievalHint` 渲染，不许解析**。
 
-### 3.2 AgentForge 现状的三个硬伤
+### 3.2 设计初稿时 AgentForge 的三个硬伤（均已修复）
 
-**硬伤 A：易变块排在最前，每一步都打掉前缀缓存**
+**硬伤 A：易变块曾排在最前，每一步都打掉前缀缓存**
 
 `buildPrompt`（`orchestrator.mjs:319-364`）的第一行就是 `buildContextBlock(context, step?.title || '')`，而 `buildContextBlock`（L126-152）里有 `- 状态: ${context.status}`、`- 当前工序: ${step}`、工序账本、最近协作摘要、文件清单——**每步都在变**。
 
-后果：每个成员的每次调用，prompt 的第一个 token 就和上一次不同。提供方的前缀缓存（无论 Claude/Codex/Gemini 都按内容前缀命中）**命中率趋近 0**。DSH 的规则正好相反：稳定段在前（人格 → 规则 → 目标），易变段在后，且易变部分作为 `PromptContext` 只在变化时记录。
+当时的后果是每个成员的每次调用，prompt 的第一个 token 都和上一次不同，提供方的前缀缓存命中率趋近 0。当前已拆出 `stableBlock()` / `volatileBlock()`，稳定段在前、易变段在后；以下保留原判断作为设计依据。
 
 同样的账本信息，位置挪一下，成本立刻掉一截。
 
-**硬伤 B：token 估算是错的量级**
+**硬伤 B：token 估算曾是错的量级**
 
 `store.endMessage({ tokens: Math.ceil((res.stdout || '').length / 3) })`、`store.mjs:487` 的 `Math.ceil(delta.length / 2)`。
-中文按 1 字 ≈ 1 token 量级，`/3` 会把中文低估约 3 倍；两处系数还不一致（3 vs 2）。于是 `stats.tokens` 不能用来做任何预算决策。
+中文按 1 字 ≈ 1 token 量级，旧 `/3` 会把中文低估约 3 倍，两处系数还不一致（3 vs 2）。当前统一使用 `server/tokens.mjs` 的 CJK / ASCII / 其他字符估算。
 
-**硬伤 C：依赖产物被 `clip` 掉中间，且不可恢复**
+**硬伤 C：依赖产物曾被 `clip` 掉中间，且不可恢复**
 
 `clip(text, 6000)` = 头 75% + 尾 20%，中间写一句「…（中间省略 N 字）…」。
-下游成员**永远拿不到那 25%**，而且没有任何句柄能取回原文——DSH 的 `spill` 正是为这件事存在：原文落盘，模型拿到 `locator + retrievalHint`，需要时自己读。
+当时下游成员拿不到被裁掉的中间内容，也没有句柄能取回原文。当前已把超长内容写入 `data/spill/`，prompt 保留只读定位符和摘录。
 
-### 3.3 落地设计（三步走，都不改协议）
+### 3.3 落地设计（三步走，都不改协议；均已实现）
 
 **第 1 步：重排 prompt 段序（30 分钟，立刻见效）**
 
@@ -366,7 +373,7 @@ saveText({ owner:{sessionId}, source:{kind:'tool',toolName,callId,label}, sugges
 ```
 
 判据：同一任务连续两步的 prompt，**最长公共前缀 ≥ 稳定区长度**（写个 20 行脚本断言即可）。
-注意 `buildContextBlock` 目前是「一个函数吐一整块」，要拆成 `stableBlock()` / `volatileBlock()` 两个导出，`index.mjs` 的 `/api/state` 里那份 `context` 不受影响。
+当时的改造点是把「一个函数吐一整块」拆成 `stableBlock()` / `volatileBlock()` 两个导出，同时保持 `index.mjs` 的 `/api/state` 中 `context` 兼容。该拆分已落地。
 
 **第 2 步：token 计量换成可校准的估算 + usage 回填**
 
@@ -410,15 +417,15 @@ if (text.length > SPILL_AT) {          // 建议 8000 字
 
 **第 4 步（可选，工作量最大）：压缩**
 
-AgentForge 现在的「压缩」只发生在 `buildContextPack`：只取最后 8 条消息、每条压空白后 300 字。这已经是一种粗暴的裁剪，但它**不写日志**，所以 UI 上看到的和模型看到的不是一回事——违反 DSH 的「模型可见即已记录」。
+AgentForge 当时只在 `buildContextPack` 做粗暴裁剪：取最后 8 条消息、每条压空白后 300 字，而且不写压缩记录。当前已由 `server/context-budget.mjs` 提供预算、自动触发、来源范围、质量评估、历史与原文回放。
 
-若要做正规压缩，最小可行版：
+当时规划的最小压缩方案是：
 
 ```
 触发：estimateTokens(prompt) > 预算 × 0.8
-保留：最近 N 步的完整产物（逐字），更早的用一次 CLI 调用生成摘要
-落库：task.compactions.push({ at, fromSeq, toSeq, summary, shadowedTokens })
-替换：buildContextPack 读 compactions，把被遮蔽区间替换成摘要段
+保留：最近 N 步的完整产物（逐字），更早的用抽取式摘要压缩
+落库：task.contextState.compactions.push({ ...sourceMessageIds, sourceRange, quality })
+替换：buildContextPack 读压缩记录，把被遮蔽区间替换成摘要段
 ```
 
 `shadowedRange` 用「消息 id 区间」而不是数值区间，并且**记录被遮蔽的 id 列表**（对应 DSH 的 `shadowedSeqs` 是权威集合这一点）。
@@ -448,7 +455,7 @@ AgentForge 的对应动作：
 
 ---
 
-## 5. 实施顺序与工作量
+## 5. 历史实施顺序与工作量
 
 | 顺序 | 事项 | 文件 | 预估 | 风险 |
 |---|---|---|---|---|
@@ -457,26 +464,26 @@ AgentForge 的对应动作：
 | 3 | `writeFileAtomic` + `versionOf`，`writeWorkspaceFile` 与 `db.json` 接入 | 新增 `server/fs.mjs` + 2 处调用 | 1h | 低 |
 | 4 | artifact 增 `version`，变更判定用版本 | `orchestrator.mjs` `cliMessage` | 1h | 中（需回归产物收集） |
 | 5 | 依赖产物 spill + 句柄 | `orchestrator.mjs` `dependencyText` | 1h | 低 |
-| 6 | 附件存储 + `admitImage` + 消息 `kind:'image'` | 新增 `server/attach.mjs` + `store.mjs` | 3h | 中（新能力，需 UI 配合） |
+| 6 | 附件存储 + `admitImage` + 消息 `kind:'image'` | 新增 `server/attachments.mjs` + `store.mjs` + 前端 | 3h | 中（新能力，需 UI 配合） |
 | 7 | 读后写守卫（`FS_NOT_OBSERVED` / `FS_STALE_VERSION`） | 新增 `server/fs-observe.mjs` | 1.5h | 中（会开始拒绝以前能通过的写） |
-| 8 | 正规压缩（compaction 记录 + 摘要替换） | `orchestrator.mjs` + `store.mjs` | 4h+ | 高（影响模型可见历史） |
+| 8 | 上下文压缩（compaction 记录 + 抽取式摘要替换） | `context-budget.mjs` + `store.mjs` | 4h+ | 高（影响模型可见历史） |
 
 **建议先做 1→2→3→5**：四件事合计 3 小时，全部是「不改行为、只改成本与可靠性」，跑一遍 `node --test tests/` 就能验收。
 **6/7/8 属于能力扩展**，各自独立，做不做都不影响前四件。
 
 ---
 
-## 6. 明确不做的
+## 6. 明确不做与保留边界
 
 - **不做 `ctx.fs` 那种服务 seam**：AgentForge 是单进程零依赖，一个模块 + 函数就够，抽象层是投机。
 - **不做内核级沙箱代理**：成员仍是外部 CLI；平台在 `strict` 模式下映射各 CLI 的原生沙箱，无法强制的组合直接拒绝。网络代理、文件租约与系统调用拦截属于后续独立能力，不在文件上下文模块里硬塞。
 - **不做图片规范化（重编码）**：本机没有零依赖的图片编码器。只做**校验 + 尺寸读取 + 原样存储**，超限直接拒。DSH 的 8-bit sRGB 规范化依赖它的原生管线，抄不来。
-- **不做附件 GC**：内容寻址 + 不删，和 DSH 一样推迟。真需要时按 `data/attachments` 的引用计数另开一轮。
-- **不改 `db.json` 的整体形状**：加字段可以，拆库是另一个话题（115 KB 现在完全够用，原子写就解决了截断风险）。
+- **暂不做附件 GC**：内容寻址 + 不删，和 DSH 一样推迟。真需要时按 `data/attachments` 的引用计数另开一轮。
+- **不改 `db.json` 的整体形状**：加字段可以，拆库是另一个话题；当前采用 200ms dirty 窗口、按子树序列化和原子替换，退出前 flush。
 
 ---
 
-## 7. 实施状态（2026-11-25 已落地 1→2→3→5）
+## 7. 历史实施快照（2026-11-25 已落地 1→2→3→5）
 
 | 项 | 落点 | 验收结果 |
 |---|---|---|
@@ -484,11 +491,11 @@ AgentForge 的对应动作：
 | token 估算 | 新增 `server/tokens.mjs`（CJK 1.0 / ASCII 1/3.6 / 其他 1/2）；`cliMessage` 与 `store.appendMessage` 都改用它，消灭 `/3` 与 `/2` 两套不一致系数 | 20 个汉字估到 20 token（旧算法 7），误差测试断言 16–26 区间 |
 | 原子写 + 内容版本 | 新增 `server/fs.mjs` 的 `writeFileAtomic()`（同级临时文件 + `fsync` + `rename`，Windows 占用退避重试）与 `versionOf()`（sha256 前 16 位）；`writeWorkspaceFile` 与 artifact 记录接入 `version` | 测试断言：写入后无 `.tmp` 残留、等长改写产生新版本、缺失文件返回 null |
 | 变更识别 | `listWorkspaceFiles` 改用 `statSync(..., { bigint: true })` 取纳秒 `mtimeNs`；`cliMessage` 先按 size+mtimeNs 粗筛，命中项再算内容版本 | 端到端实跑产物记录带 `v=xxxxxxxx` 版本号 |
-| 上游产物 spill | `dependencyBody()`：>8000 字的产物落盘到 `data/spill/<taskId>/`，prompt 里只放「只读路径 + 1600 字摘录」 | 测试断言原文可完整取回、同内容不产生第二个文件 |
+| 上游产物 spill | `dependencyBody()`：>8000 字的产物落盘到 `data/spill/<taskId>/`，prompt 里只放「只读路径 + 摘录」；后续已推广到事件、消息、工具输出和导出 | 测试断言原文可完整取回、同内容不产生第二个文件 |
 
 端到端实跑（任务 `a90f8253-31f5-46cc-97d1-aefd5dc447c4`，direct 模式）：plan / design / implement / test-design / review 全过，`VERDICT: PASS`，status=done，产出 requirements.md / architecture.md / notes.md / README.md，token 累计 3010（旧算法会算成约 1000）。
 
-> 历史快照：这是设计初稿的边界记录，已被后续实现取代。
+> 历史快照：这是 2026-11-25 的落地记录，任务编号、耗时和 token 数字只用于当时复盘，不是当前验收指标。
 
 ## 实施结果
 
@@ -496,7 +503,7 @@ AgentForge 的对应动作：
 | --- | --- | --- |
 | 文件原子写与版本 | 已完成 | `server/fs.mjs` 提供原子写、内容版本和 spill；工作区变更与事务记录已接入 |
 | 读后写守卫 | 已完成 | 写入已有文件需提交最近读取版本；陈旧写入返回冲突并留审计，覆盖人工与 Agent 通道 |
-| 附件与读图 | 已完成 | 按签名识别 PNG / JPEG / WebP / GIF，校验体积、尺寸和像素；内容寻址保存；Provider 必须声明 `vision`，否则拒绝且不落消息 |
+| 附件与读图 | 基础能力已完成 | 按签名识别 PNG / JPEG / WebP / GIF，校验体积、尺寸和像素；内容寻址保存；Provider 必须声明 `vision`，否则拒绝且不落消息。前端已支持上传与渲染；外部 CLI 的真实视觉端到端、图片重编码和附件 GC 仍未完成 |
 | 上下文压缩 | 已完成 | 稳定前缀、预算、自动触发、来源范围、质量评估、历史与原文回放均已落地；摘要仍为抽取式 |
 
-验证入口：`npm test`。对应测试包括 `tests/workspace.test.mjs`、`tests/attachments.test.mjs` 与 `tests/context-budget.test.mjs`。具体数量随用例增减，不在文档中固定。
+验证入口：`npm test` 与 `npm run check:syntax`。对应测试包括 `tests/workspace.test.mjs`、`tests/attachments.test.mjs` 与 `tests/context-budget.test.mjs`。具体数量随用例增减，不在文档中固定。

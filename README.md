@@ -13,7 +13,7 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4)
 
-[快速开始](#快速开始) · [工作原理](#工作原理) · [接入本机-cli](#接入本机-cli) · [上下文预算](#上下文预算) · [工作区与工具](#工作区与工具策略) · [HTTP-API](#http-api) · [常见问题](#常见问题)
+[快速开始](#快速开始) · [工作原理](#工作原理) · [接入本机-cli](#接入本机-cli) · [上下文预算](#上下文预算) · [工作区与工具](#工作区与工具策略) · [HTTP-API](#http-api) · [文档导航](#文档导航) · [常见问题](#常见问题)
 
 <img src="docs/screenshot.png" alt="AgentForge 工作台" width="100%">
 
@@ -25,6 +25,8 @@
 
 本轮把“多智能体协作”推进到可追踪、可重规划、可审计的平台基线，并补齐 M3 / M4 / M5 的身份、工作区、生产可观测性与多实例能力：
 
+AgentForge 当前定位是**单机 / 团队服务基线**：一个 Node.js 进程即可运行，多个实例可以共享同一 JSON 数据目录并通过文件锁和租约协调。它不是分布式任务队列，也不是完整 SaaS；账号、RBAC、SSO、外部数据库和内核级 CLI 隔离仍在后续范围。
+
 - **真实质量门**：CLI 与模拟任务都执行工作区测试入口；没有入口、执行失败或超时都不能交付，并记录真实命令、退出码、耗时与输出。
 - **项目技能注入**：从工作区、源工作区与用户级 `.agents/skills/*/SKILL.md` 装载技能，按触发词或 Agent 显式标签激活，注入提案、质询、裁决、工序、收口与聊天 prompt；激活记录会出现在 `/api/state`、任务详情和界面上下文中。
 - **运行记录导出**：`GET /api/tasks/:id/export?format=markdown|html` 导出质量门、计划、技能激活、协作消息、事件、产物与讨论记录，敏感值会脱敏。
@@ -33,8 +35,8 @@
 - **服务安全边界**：默认回环地址可零配置启动；绑定到局域网或其他非回环地址时强制要求 `AGENTFORGE_API_TOKEN`，也可显式接受无鉴权风险。支持 Bearer、`X-AgentForge-Token`、浏览器 SSE 查询令牌、同源 / CORS 白名单和拒绝审计。
 - **统一 trace / span**：任务事件自动带 `traceId / spanId / parentSpanId / kind / runId`，运行根 span 写入任务详情；界面、`/api/state`、任务详情和 Markdown / HTML 导出都可追踪一次运行。
 - **Automation / 定时任务**：支持周期与每日计划、启停、立即运行、最近历史、失败重试、重叠运行阻止、启动恢复和 durable `await_event`；调度器只在本进程内运行，不伪装成分布式队列。
-- **上下文压缩与回放**：达到阈值可自动压缩，保留来源消息范围、摘要质量、历史记录和原文回放；压缩记录进入 `/api/state`，原始消息不删除。
-- **图片附件**：Provider Profile 需声明 `vision` 能力；只接收 PNG / JPEG / WebP / GIF，校验体积、尺寸和像素，按内容寻址保存，持久化数据不内联 base64 或本地绝对路径。
+- **上下文压缩与回放**：达到阈值可自动压缩，保留来源消息范围、摘要质量、历史记录和原文回放；当前摘要是**抽取式**，不是模型生成的语义摘要。压缩记录进入 `/api/state`，原始消息不删除。
+- **图片附件**：Provider Profile 需声明 `vision` 能力；只接收 PNG / JPEG / WebP / GIF，校验体积、尺寸和像素，按内容寻址保存，持久化数据不内联 base64 或本地绝对路径。自动测试覆盖类型、体积、尺寸、存储和视觉能力门禁；不同外部 CLI 的真实视觉端到端仍需逐项验收。
 - **重启恢复**：服务重启时把遗留的 queued / running 任务标为中断并写入 `run.recovered` 事件；已发出的 Automation 结果会重新对齐，不留下幽灵排队任务。
 - **任务优先级**：任务支持 `low / normal / high`，队列按优先级出队、同优先级保持 FIFO；选择器和任务列表会显示优先级，旧任务自动按 `normal` 迁移。
 - **增量持久化**：流式消息在 200ms dirty 窗口内合并落盘，只重新序列化变化任务；进程正常退出前会 flush 未完成窗口。
@@ -84,7 +86,7 @@
 
 **执行**
 
-- 🖥 **本机 CLI 体检接入** — 内置候选覆盖 10 个常用 CLI；启动后台并发体检已安装项，只有「真回了话且没有鉴权错误」的才占执行席位，同一个 CLI 可兼任多角色（`OpenCode · 架构师`）。体检复用已绑定 Agent 的 Provider Profile，参数模板、Base URL、模型和密钥环境引用会进入真实子进程；仓库自动测试验证调用契约、Provider 注入、Windows `.cmd` 与进程路径，不等于本机已安装并授权全部 10 个 CLI。
+- 🖥 **本机 CLI 体检接入** — 内置候选覆盖 15 个常用 CLI；启动后台并发体检已安装项，只有「真回了话且没有鉴权错误」的才占执行席位，同一个 CLI 可兼任多角色（`OpenCode · 架构师`）。体检复用已绑定 Agent 的 Provider Profile，参数模板、Base URL、模型和密钥环境引用会进入真实子进程；仓库自动测试验证调用契约、Provider 注入、Windows `.cmd` 与进程路径，不等于本机已安装并授权全部 15 个 CLI。
 - 🔎 **CLI 解析缓存** — `resolveCommand()` 缓存命令解析结果，避免每次调用都同步跑 `where.exe` / `which`；探测或刷新团队时显式失效，带参数的命令串也能正确提取可执行文件。
 - 🔌 **Provider Profile、参数模板与自动回退** — 每个 Agent 可绑定独立 Provider Profile，保存 Base URL、模型、密钥环境变量引用、CLI 参数模板和并发上限；可配置有序备用 Provider，真实 CLI 失败后自动切换并把 `provider.fallback` 写入任务事件流。密钥只从服务进程环境读取，不写入 `db.json`。
 - 🧾 **产物带内容版本** — 每个产物记录 `version`（sha256 前 16 位），改写即换版本，可判断「这一步到底动了什么」。
@@ -103,7 +105,7 @@
 **工程**
 
 - 📦 **零依赖、零构建** — 纯 Node.js + 原生 ESM，`node server/index.mjs` 就起来，前端不打包、不装包管理器。
-- ✅ **全量测试入口** — `npm test` 统一设置隔离数据目录后运行 `node --test`，覆盖并行调度、失败传播、真实质量门、结构化评审、项目技能、运行记录导出、独立评审、持久化 dirty 窗口、可执行文件解析缓存、上下文预算与压缩、工作区文件闭环、工作区池与事务回滚、读后写守卫、Git 隔离、工具策略、CLI 强制沙箱映射、计划版本、消息路由、Tool Gateway 审计、Provider Profile 与用量账本、CLI 参数模板、Provider 自动回退、全局调度队列、Agent 租约、真实工时统计、输出完整性判定、服务 Token / 作用域 / CORS、MCP、审批、trace / OTLP、Automation 恢复与事件等待、租户隔离、多实例锁与 `/api/state` 分页。
+- ✅ **统一验证入口** — `npm test` 统一设置隔离数据目录后运行真实测试；`npm run check:syntax` 检查全部 `.js/.mjs`。覆盖范围按领域列在下方[测试](#测试)章节。
 
 ## 快速开始
 
@@ -123,6 +125,8 @@ npm start
 data/db.json                 团队、任务、设置、Webhook Token
 data/workspaces/<taskId>/    每个任务的真实工作区（产物就在这里）
 data/spill/<taskId>/         超长上游产物的落盘副本
+data/attachments/<sha前两位>/<sha>.<ext>
+                             图片附件的内容寻址副本
 ```
 
 > **Windows 一键**：双击 `安装到桌面.bat`，桌面与开始菜单会出现 `AGENTFORGE` 快捷方式，双击开窗、关窗回收。
@@ -169,20 +173,27 @@ flowchart TD
 
 左栏「扫描本机 CLI」用 `where.exe` / `which` 确认命令存在并读版本；启动后台还会对每个已安装 CLI **真发一条最短提示词**（`Reply with exactly: OK`）做体检，判定标准是「有回复 + 没有鉴权错误」，而不是「进程退出码为 0」——因为很多 CLI 失败时也返回 0。
 
-已实测跑通（Windows，统一指向本地网关）：
+下表是**内置候选与调用契约**，记录当前适配参数、prompt 传递方式和历史 Windows 体检耗时。它不代表每台机器、每个版本都已安装并授权；外部 CLI 的安装、Provider 配置和一次真实交付仍要逐项验收。
 
-| CLI | 调用方式 | 免审批参数 | prompt 传递 | 体检耗时 |
+| CLI | 调用方式 | 免审批参数 | prompt 传递 | 历史 Windows 体检耗时 |
 | --- | --- | --- | --- | --- |
 | `claude` | `.exe` 直连 | `--permission-mode bypassPermissions` | argv | ≈ 7s |
 | `codex` | `.exe` 直连 | `--sandbox workspace-write` | argv | ≈ 17s |
 | `opencode` | `.cmd` | `run --auto` | stdin | ≈ 11s |
+| `cursor-agent` | 命令直连（平台解析） | `-p` | argv | — |
+| `copilot` | 命令直连（平台解析） | `-p` | argv | — |
+| `cn` | 命令直连（平台解析） | `-p` | argv | — |
 | `dsh` | `.cmd` | `--permission-mode workspace-write --approval-policy never` | stdin | ≈ 30s |
 | `kimi` | `.cmd` | —（打印模式不接受 `--auto`） | argv | ≈ 8s |
 | `trae-cli` | `.exe` 直连 | `run --config-file …` | argv | ≈ 14s |
 | `crush` | `.exe` 直连 | `run -y` | stdin | ≈ 28s |
+| `goose` | 命令直连（平台解析） | `run -t` | argv | — |
 | `aider` | `.exe` 直连 | `--yes` | argv | ≈ 16s |
 | `gemini` | `.cmd` | `--skip-trust --approval-mode yolo` | stdin | ≈ 7s |
 | `qwen` | `.cmd` | `--approval-mode yolo` | stdin | ≈ 20s |
+| `ollama` | 命令直连（平台解析） | `run qwen2.5-coder` | argv | — |
+
+仓库自动测试覆盖调用契约、Provider Profile 注入、Windows `.cmd` 参数、stdin、超时和进程回收；这些测试使用受控夹具，不等于真实外部 CLI 的完整交付矩阵。
 
 三条踩过的坑，写在这里省你几小时：
 
@@ -233,6 +244,8 @@ Agent 可以绑定主 Provider 与有序备用 Provider；执行时会解析成�
 | **超长产物 spill** | 上游产物超过 8000 字落 `data/spill/<taskId>/`，prompt 里只放「只读路径 + 1600 字摘录」 | 直接 `clip` 丢掉中间 25% 是**不可恢复**的信息损失 |
 
 设计依据与完整取舍写在 [docs/design-io-image-context.md](docs/design-io-image-context.md)。
+
+上下文压缩会在达到阈值时保留最近消息和来源范围，把较早内容折叠为可回放的摘要。当前摘要基于抽取与合并，不调用模型生成新的语义摘要；因此它降低上下文体积，但不会替代完整历史或人工评审。
 
 ## 工作区与工具策略
 
@@ -384,7 +397,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 | `PORT` | `8787` | HTTP 端口（被占用时会打印明确提示并以退出码 2 退出，不会静默失败） |
 | `HOST` | `127.0.0.1` | 监听地址；局域网共享设 `0.0.0.0` 并配置服务 Token |
 | `AGENTFORGE_DATA_DIR` | `<repo>/data` | 数据目录，测试与多套数据隔离时用 |
-| `AGENTFORGE_MODEL` | `trae-cn/glm-5.3-flash` | 全局模型名兜底；Agent 绑定的 Provider Profile 可覆盖模型和 Base URL |
+| `AGENTFORGE_MODEL` | 空 | 项目没有内置默认模型；绑定 Provider Profile 后，Profile 的 `model` 会写入子进程环境，并可按 `cliBindings` 注入命令参数 |
 | `AGENTFORGE_API_TOKEN` | 空 | 跨租户 owner Token，至少 16 个字符；非回环监听时必需 |
 | `AGENTFORGE_OPERATOR_TOKEN` | 空 | 单租户 operator Token；可配 `AGENTFORGE_OPERATOR_ID`、`AGENTFORGE_OPERATOR_TENANT`、`AGENTFORGE_OPERATOR_TASK_LIMIT`、`AGENTFORGE_OPERATOR_SCOPES` |
 | `AGENTFORGE_AGENT_TOKENS` | 空 | Agent Token 的 JSON 数组或映射；每项可带 `id`、`tenantId`、`scopes`、`taskLimit` |
@@ -419,11 +432,14 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 │   ├── collaboration.mjs 计划版本、消息信封与路由差异
 │   ├── tool-gateway.mjs  工具白名单、主体校验与调用审计
 │   ├── workspace.mjs     工作区树、读写、搜索、回收站、Diff、路径边界
+│   ├── workspace-index.mjs 工作区快照复用与增量索引失效
 │   ├── dag.mjs           依赖图校验与并行调度
 │   ├── adapters.mjs      CLI 适配（argv / stdin / 免审批参数）、模拟流式、本机探测
 │   ├── team.mjs          体检判定与真实席位组建
 │   ├── fs.mjs            原子写入、内容版本、超长文本 spill
 │   ├── tokens.mjs        中文感知的 token 估算
+│   ├── attachments.mjs   图片类型识别、尺寸校验、内容寻址与视觉门禁
+│   ├── context-budget.mjs 上下文预算、压缩与回放
 │   ├── adopt.mjs         本机 CLI 扫描与接入
 │   └── sim.mjs           内置内容引擎（仅回退用）
 ├── public/               前端（原生 ESM，无构建）
@@ -437,20 +453,49 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 │   ├── design-io-image-context.md
 │   ├── agent-platform-roadmap.md
 │   ├── agentforge-openbot-plan.md
-│   └── fix-plan.md
+│   ├── fix-plan.md
+│   └── release.md
+├── CHANGELOG.md
 ├── tests/                测试文件与隔离数据入口
 ├── 安装到桌面.bat
 ├── 卸载桌面快捷方式.bat
 └── data/                 运行时数据（gitignore）
 ```
 
+## 文档导航
+
+| 文档 | 用途 |
+| --- | --- |
+| [平台演进路线](docs/agent-platform-roadmap.md) | 当前能力、已完成里程碑、边界与后续方向 |
+| [OpenBot 融合计划](docs/agentforge-openbot-plan.md) | M3-M5 的依赖顺序、完成证据与 backlog |
+| [修复与验收计划](docs/fix-plan.md) | 历史缺陷、验证证据、残余风险与待决策项 |
+| [文件、读图与上下文设计](docs/design-io-image-context.md) | 设计判断、实现结果、未完成能力与取舍 |
+| [发布规范](docs/release.md) | 版本源、发布检查清单与双远端同步 |
+| [变更记录](CHANGELOG.md) | 用户可见的新增、变更与修复 |
+
 ## 测试
+
+统一入口：
 
 ```bash
 npm test
+npm run check:syntax
 ```
 
-全量测试覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、结构化评审结论与字段校验、辩论评分 / 多样性 / 角度覆盖规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `no-test-entry` 判定、真实 CLI 任务同样执行质量门、独立评审与自审身份判定、目录快照复用与增量索引失效、上游瞬时故障只重试一次且不掩盖真实失败、上下文预算 / 自动压缩 / 质量与回放、事件与导出 spill、图片附件视觉门禁、工作区文件闭环与路径/敏感文件边界、工作区池与事务回滚、读后写守卫、Agent 工具策略、CLI 强制沙箱映射与拒绝事件、计划版本与已完成工序保留、消息路由、Tool Gateway 权限与审计、Provider Profile 持久化与迁移、Provider 用量账本、CLI 参数模板渲染、Provider 路由与真实子进程回退、全局任务并发、Provider 配额、Agent 租约与排队取消、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计、输出完整性判定、提案宽松解析、退出码分类与参数拼装、dirty 窗口合并落盘与退出前 flush、可执行文件解析缓存、项目技能发现与边界保护、运行记录导出与脱敏、Markdown 链接协议白名单、服务 Token / 作用域 / CORS / 安全审计、MCP 只读边界、命令审批与一次性执行、trace / span / OTLP 链路、Automation 调度 / 重试 / 幂等 / 恢复 / 事件等待、租户隔离与配额、多实例锁与租约、目录懒加载、`/api/state` 分页。
+测试按领域组织，数量随用例增减，不在 README 固定：
+
+| 领域 | 覆盖重点 |
+| --- | --- |
+| 编排 | 五席位分工、辩论评分与多样性、DAG 并行 / 失败传播 / 取消、计划版本、有限重规划 |
+| 质量与评审 | 测试入口探测、真实命令执行、`no-test-entry`、超时与非零退出、结构化 `VERDICT`、独立评审与自审标记 |
+| 工作区 | 文件读写、路径与敏感文件边界、Git worktree / clone 回退、未跟踪 Diff、工作区池、事务回滚、读后写守卫、快照复用与增量索引 |
+| 工具与安全 | Tool Gateway 审计、CLI 严格策略、固定命令审批、Token / 作用域 / CORS、MCP 只读边界、Markdown 链接白名单 |
+| 上下文与附件 | 稳定段序、token 估算、原子写、spill、压缩与回放、图片类型 / 体积 / 尺寸校验、视觉能力门禁 |
+| 持久化与多实例 | dirty 窗口合并落盘、退出前 flush、文件锁、任务与 Automation 租约、重启恢复、`/api/state` 分页 |
+| 可观测性与集成 | trace / span、OTLP、运行记录导出与脱敏、Automation 调度 / 重试 / 幂等 / 事件等待、agent-web 可选夹具 |
+| CLI 适配 | argv / stdin、Windows `.cmd` 参数、命令解析缓存、Provider Profile 注入、自动回退、团队体检 |
+
+CI 在 Ubuntu / Windows × Node 20 / 22 上运行 `npm test` 和 `npm run check:syntax`。真实外部 CLI 的安装、授权和完整交付仍需单独的环境验收。
 
 ## 已知边界
 
@@ -462,11 +507,14 @@ npm test
 - **CLI 严格策略是原生能力映射，不是内核级代理**：`strict` 只放行 Codex / DSH / Claude 能明确表达的组合，并覆盖参数里的危险开关；`inherit` 仍允许 CLI 使用自身工具。真正的网络代理和跨进程系统调用拦截仍待后续。
 - **网关由 Provider Profile 决定**：项目不依赖 Magpie 或任何内置兼容网关；Provider Profile、密钥引用、CLI 参数模板、自动回退和 CLI 严格策略已落地。
 - **调度粒度仍是任务级**：全局任务并发、Provider 配额、显式 Agent 租约和任务优先级已生效；Provider 配额按绑定该 Provider 的活跃任务计数，不按每次 CLI 调用计数。
-- **agent-web 是可选开发期验收工具**：`E:\SKIl.1\agent-web` 固定提交 `fe543ea`，由 [tests/agent-web-compat.test.mjs](tests/agent-web-compat.test.mjs) 校验真实 HTTP 适配器与 10 个核心案例；不复制其源码，也不进入生产依赖。
+- **Provider 级费用预算未实现**：用量账本记录输入 / 输出 token，未知费用保持 `null`；尚无价格表、预算周期和超额策略，不能把 token 数擅自换算成金额。
+- **内核级 CLI 隔离未实现**：`strict` 只是原生能力映射，不能拦截网络请求、系统调用或所有跨进程文件写入；完整隔离需要独立架构评审。
+- **真实 CLI 矩阵仍需环境验收**：自动夹具覆盖调用契约与进程边界，不等于 15 个内置候选的安装、授权和真实交付全部通过。
+- **agent-web 是可选开发期验收工具**：通过 `AGENT_WEB_ROOT` 指向外部 checkout，固定提交 `fe543ea`，由 [tests/agent-web-compat.test.mjs](tests/agent-web-compat.test.mjs) 校验真实 HTTP 适配器与 10 个核心案例；不复制其源码，也不进入生产依赖。
 
 ## Roadmap
 
-- [x] CLI 体检组队与 10 个内置候选适配（自动测试覆盖调用契约、Provider 注入和 Windows `.cmd`；具体 CLI 安装与授权需本机验收）
+- [x] CLI 体检组队与 15 个内置候选适配（自动测试覆盖调用契约、Provider 注入和 Windows `.cmd`；具体 CLI 安装与授权需本机验收）
 - [x] 方案辩论、DAG 并行、真实质量门返工
 - [x] 独立评审（禁止实现者自审）
 - [x] dirty 窗口增量持久化与退出前 flush
@@ -490,8 +538,8 @@ npm test
 - [x] 服务重启恢复（中断任务、`run.recovered`、Automation 对账）
 - [x] 任务优先级与磁盘配额（`low / normal / high` 队列、平台产物配额与回收站保留期）
 - [x] 跨任务工作区总览、DAG 图与时间回放
-- [x] 附件与读图（视觉能力声明、类型 / 体积 / 尺寸校验、内容寻址存储）
-- [x] 正规压缩（长任务的摘要式上下文压缩）
+- [x] 附件与读图基础（视觉能力声明、类型 / 体积 / 尺寸校验、内容寻址存储；外部 CLI 真实视觉验收待逐项完成）
+- [x] 抽取式上下文压缩（来源范围、质量评估、历史与原文回放；模型生成的语义摘要待后续）
 - [x] 租户隔离与任务配额（不含完整账号 / RBAC / SSO）
 - [x] OTLP / OpenTelemetry 导出
 - [x] 多实例 JSON 持久化 + 文件锁 + 任务 / Automation 租约
@@ -503,6 +551,9 @@ npm test
 - [x] 上下文压缩自动触发、质量评估与回放
 - [ ] 完整用户账号、RBAC、SSO
 - [ ] 外部数据库或分布式队列
+- [ ] Provider 级费用预算
+- [ ] 内核级 CLI 代理与隔离
+- [ ] 15 个内置候选的安装 / 授权 / 真实交付矩阵
 
 ## 常见问题
 
@@ -528,13 +579,13 @@ gemini -p "Reply with exactly: OK" --skip-trust
 <details>
 <summary><b>怎么把所有 CLI 指向自己的网关或模型？</b></summary>
 
-为每个 Provider Profile 配置 `baseUrl`、`model`、`apiKeyRef` 和 `cliBindings`，再把 Agent 绑定到该 Profile。参数模板会把模型、网关、密钥引用和 prompt 解析到子进程环境或参数里，无需修改源码。`AGENTFORGE_MODEL` 只作为显式兜底，不会改写各 CLI 的内置网关参数。
+为每个 Provider Profile 配置 `baseUrl`、`model`、`apiKeyRef` 和 `cliBindings`，再把 Agent 绑定到该 Profile。参数模板会把模型、网关、密钥引用和 prompt 解析到子进程环境或参数里，无需修改源码。项目不提供 `AGENTFORGE_MODEL` 的内置默认值；没有绑定 Profile 时，不会替你改写各 CLI 的模型或网关配置。
 </details>
 
 <details>
 <summary><b>数据存在哪？能备份吗？</b></summary>
 
-全在 `data/`：`db.json` 是团队 / 任务 / 设置，`workspaces/<taskId>/` 是每个任务的真实产物。整个目录拷走即是完整备份，删掉即是从零开始。
+全在 `data/`：`db.json` 是团队 / 任务 / 设置，`workspaces/<taskId>/` 是每个任务的真实产物，`spill/` 保存超长内容副本，`attachments/` 保存内容寻址的图片附件。整个目录拷走即是完整备份，删掉即是从零开始。
 </details>
 
 <details>

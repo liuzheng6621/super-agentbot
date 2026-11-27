@@ -2,7 +2,7 @@
 
 > 评估日期：2026-11-27
 
-本文基于当前仓库实现，区分“已经落地”“已有边界”和“下一阶段建议”，避免把提示词约束、平台 API 和真实 Tool Gateway 混为一谈。M3 / M4 / M5 已完成；测试通过情况以 `npm test` 与 CI 矩阵为准，不在文档中固定数量。
+本文基于当前仓库实现，区分“已经落地”“已有边界”和“下一阶段建议”，避免把提示词约束、平台 API 和真实 Tool Gateway 混为一谈。M3 / M4 / M5 已完成；测试通过情况以 `npm test` 与 CI 矩阵为准，不在文档中固定数量。本文状态口径与 [fix-plan.md](fix-plan.md)、[agentforge-openbot-plan.md](agentforge-openbot-plan.md) 保持一致。
 
 ## 1. 工具调用能力
 
@@ -72,18 +72,18 @@ Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile �
 
 因此，当前泛用性瓶颈已从“CLI 适配参数是硬编码的”转移到“不同 CLI 的原生沙箱能力不一致，平台需要持续维护能力矩阵并明确拒绝无法强制的组合”。
 
-### 改进建议：Provider Profile
+### Provider Profile
 
-增加独立的 Provider Profile 层：
+Provider Profile 已落地。当前结构示例：
 
 ```json
 {
-  "id": "local-magpie",
-  "label": "Local Magpie",
+  "id": "team-gateway",
+  "name": "Team Gateway",
   "kind": "openai-compatible",
-  "baseUrl": "http://127.0.0.1:3425/v1",
-  "apiKeyRef": "env:MAGPIE_API_KEY",
-  "defaultModel": "trae-cn/glm-5.3-flash",
+  "baseUrl": "https://llm.example.com/v1",
+  "apiKeyRef": "TEAM_LLM_API_KEY",
+  "model": "provider-model",
   "capabilities": ["chat", "tools", "vision"],
   "cliBindings": {
     "codex": {
@@ -103,13 +103,13 @@ Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile �
 
 实现顺序：
 
-1. 把 CLI 参数中的固定网关、模型和凭据改为模板变量。已完成 `cliBindings`。
-2. Provider Profile 持久化，并支持创建、测试、复制和停用。已完成创建、测试、复制和停用。
-3. Agent 可选择 Provider Profile 与模型，健康检查按 Profile 执行。已完成。
-4. 增加路由与回退：同一角色可配置主 Provider、备用 Provider 和预算上限。已完成主/备路由和失败回退，费用预算待补。
-5. 凭据只保存引用或系统密钥，不把明文 API Key 写进 `db.json`。
+1. `cliBindings` 已承接 CLI 参数中的模型、网关和凭据模板。
+2. Provider Profile 已支持持久化、创建、测试、复制和停用。
+3. Agent 可选择 Provider Profile 与模型，团队体检按已绑定 Profile 执行。
+4. 主 / 备 Provider 路由与失败回退已完成；费用预算未完成，需要先确定价格来源、预算周期和超额策略。
+5. `apiKeyRef` 只保存环境变量名，真实值由服务进程环境提供，不把明文 API Key 写进 `db.json`。
 
-验收标准：不修改源码即可新增一个 OpenAI/Anthropic 兼容网关，并让不同 Agent 使用不同 Provider、模型和凭据。
+验收标准：不修改源码即可新增一个 OpenAI / Anthropic 兼容网关，并让不同 Agent 使用不同 Provider、模型和凭据。当前已覆盖自动测试；外部 CLI 的真实安装与授权仍需逐项验收。
 
 ## 3. 工作区、工作树与工作流展示
 
@@ -128,7 +128,7 @@ Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile �
 ### 当前边界
 
 - 已有只读 DAG、时间回放和跨任务总览；仍没有两个 Agent 产出的并排可视化合并评审。
-- 工作区树已支持目录懒加载，但超大仓库的索引复用和增量快照仍可继续优化。
+- 工作区树已支持目录懒加载；`server/workspace-index.mjs` 已实现按任务与真实工作区根绑定的快照复用、增量失效和截断扫描保护。CLI 前后仍执行权威全量扫描，超大仓库压测仍建议单独保留。
 - 跨任务工作区池已支持显式共享 / 私有模式；平台产物配额与回收站保留期已实现，外部项目文件不纳入配额。
 
 ### 改进建议
@@ -208,7 +208,9 @@ Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile �
 | 工作区配额 | 已完成 | 平台产物配额、`413` 显式拒绝、回收站保留期和任务用量投影 |
 | CLI 执行策略 | 第一层已完成 | `inherit / strict`；工具白名单推导沙箱；Codex / DSH / Claude 能力矩阵；不可强制时拒绝；策略事件与消息元数据 |
 | Shell 沙箱 | 已完成固定命令路径 | 固定命令白名单、operator 审批、一次性执行、超时和进程树回收；任意 shell 仍关闭 |
-| 测试入口提取 | 已完成第一步 | `server/test-entry.mjs` 负责真实测试文件枚举与命令生成；`orchestrator.mjs` 保留兼容导出 |
+| 测试入口提取 | 已完成模块提取 | `server/test-entry.mjs` 负责真实测试文件枚举与命令生成；`orchestrator.mjs` 保留兼容导出 |
+| 工作区增量索引 | 已完成 | `server/workspace-index.mjs` 复用任务快照，写 / 移动 / 删除显式失效；截断扫描不产生删除结论 |
+| 团队体检 Provider 注入 | 已完成 | 已绑定 Agent 的 Profile 会注入真实体检子进程，覆盖参数模板、模型、Base URL、密钥引用和 Windows `.cmd` |
 | 文件夹选择器浏览器验收 | 已完成 | 真实 Edge/CDP 验证目录进入、返回、中文与空格路径；缺少 Edge 时显式跳过 |
 
 ## M1 首批增量（2026-11-27）
@@ -271,8 +273,11 @@ M3 不包含：自由 shell、Agent 自审批、MCP 写工具、Provider fill-fi
 
 | 优先级 | 条目 | 现状 | 建议 |
 | --- | --- | --- | --- |
+| P2 | Provider 级费用预算 | 用量账本记录输入 / 输出 token，未知费用保持 `null` | 先确定价格来源、币种、预算周期和超额策略，再补最小失败测试 |
+| P2 | 内核级 CLI 代理与隔离 | `strict` 是原生沙箱能力映射，不是网络 / 系统调用代理 | 单独做威胁建模；在此之前不扩大隔离承诺 |
 | P2 | 完整账号 / RBAC / SSO | 已有 Token 主体、作用域、租户过滤和任务配额 | 需要用户身份、角色权限、SSO 和按用户计费时再做 |
 | P2 | 外部数据库 / 分布式队列 | 当前是 JSON + 文件锁 + 租约，多实例可共享同一数据目录 | SQLite 或队列引入前先做架构决策，保持零依赖承诺清楚 |
+| P2 | 真实 CLI 交付矩阵 | 自动测试覆盖调用契约、Provider 注入、Windows `.cmd`、超时与进程回收 | 逐项记录 15 个内置候选的安装版本、授权状态和一次真实交付 |
 
 ## 后续 backlog
 
@@ -282,5 +287,5 @@ M3 不包含：自由 shell、Agent 自审批、MCP 写工具、Provider fill-fi
 | --- | --- | --- | --- |
 | P2 | 监听与权限边界 | `HOST`、`bypassPermissions`、`yolo` 仍沿用现有策略 | 单独做安全评审和显式配置，不在本轮修改 |
 
-以上剩余条目是后续 backlog。M3 / M4 / M5 已完成；P1-9、P1-10、辩论多样性、CLI 网关去硬编码、附件读图、上下文压缩和 Automation durable `await_event` 已移出 backlog。当前没有修改 CLI `bypassPermissions` / `yolo` 的权限边界，也没有实现完整用户账号、RBAC、SSO 或分布式队列。
+以上剩余条目是后续 backlog。M3 / M4 / M5 已完成；P1-9、P1-10、辩论多样性、CLI 网关去硬编码、附件读图基础、抽取式上下文压缩和 Automation durable `await_event` 已移出 backlog。附件能力仍待外部 CLI 的真实视觉端到端验收，模型生成的语义摘要也仍未实现。当前没有修改 CLI `bypassPermissions` / `yolo` 的权限边界，也没有实现完整用户账号、RBAC、SSO 或分布式队列。
 
