@@ -1117,6 +1117,7 @@ function renderDebate() {
 
   const dec = d.decision;
   const degraded = isDegradedDecision(dec, d.status);
+  const diversity = dec?.diversity;
   head.innerHTML = `
     <div class="debate-status" data-status="${d.status}">
       <b>${DEBATE_STATUS[d.status] || d.status}</b>
@@ -1143,6 +1144,13 @@ function renderDebate() {
                 degraded ? "无有效交叉评分" : `平均 ${dec.average ?? "—"} 分`
               } · ${dec.votes} 票</span>
               <span class="dw-judge">主持人 ${escapeHtml(dec.judgeName)}</span>
+              ${
+                diversity && !diversity.sufficient
+                  ? `<span class="dw-warning">多样性不足：${escapeHtml(
+                      diversity.issues.map((issue) => issue.message).join("；"),
+                    )}</span>`
+                  : ""
+              }
               ${degraded ? `<span class="dw-warning">${escapeHtml(dec.reason || "按提案顺序临时采用，需人工复核")}</span>` : ""}
             </div>
           </div>`

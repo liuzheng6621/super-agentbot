@@ -1588,7 +1588,106 @@ export function parseProposalScores(text, { selfId = '' } = {}) {
   return scores;
 }
 
+const PROPOSAL_DUPLICATE_THRESHOLD = 0.72;
+
+function proposalFingerprint(text) {
+  const normalized = String(text || '')
+    .toLowerCase()
+    .replace(/```[\s\S]*?```/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, '');
+  if (normalized.length < 3) return new Set();
+  const grams = new Set();
+  for (let index = 0; index <= normalized.length - 3; index += 1) {
+    grams.add(normalized.slice(index, index + 3));
+  }
+  return grams;
+}
+
+function jaccardSimilarity(left, right) {
+  if (!left.size || !right.size) return 0;
+  let intersection = 0;
+  for (const item of left) {
+    if (right.has(item)) intersection += 1;
+  }
+  return intersection / (left.size + right.size - intersection);
+}
+
+/**
+ * 辩论不是投票越多越好：多个成员重复同一条路线时，表面票数会掩盖视角缺失。
+ * 这里只做确定性审计，不调用模型，也不改变提案原文和原始评分。
+ */
+export function proposalDiversity(proposals = []) {
+  const items = proposals
+    .filter((proposal) => proposal.status !== 'failed')
+    .map((proposal) => ({
+      id: String(proposal.id || ''),
+      angleKey: sim.angleByKey(proposal.angleKey).key,
+      fingerprint: proposalFingerprint(proposal.text),
+    }))
+    .filter((proposal) => proposal.id);
+  const pairs = [];
+  for (let left = 0; left < items.length; left += 1) {
+    for (let right = left + 1; right < items.length; right += 1) {
+      pairs.push({
+        ids: [items[left].id, items[right].id],
+        similarity: jaccardSimilarity(items[left].fingerprint, items[right].fingerprint),
+      });
+    }
+  }
+  const duplicatePairs = pairs.filter(
+    (pair) => pair.similarity >= PROPOSAL_DUPLICATE_THRESHOLD,
+  );
+  const duplicateIds = new Set(duplicatePairs.flatMap((pair) => pair.ids));
+  const duplicateGroups = [];
+  for (const pair of duplicatePairs) {
+    const matching = duplicateGroups.find((group) =>
+      pair.ids.some((id) => group.includes(id)),
+    );
+    if (matching) {
+      for (const id of pair.ids) {
+        if (!matching.includes(id)) matching.push(id);
+      }
+    } else {
+      duplicateGroups.push([...pair.ids]);
+    }
+  }
+  const angleKeys = [...new Set(items.map((proposal) => proposal.angleKey))];
+  const expectedAngles = Math.min(3, Math.max(2, items.length));
+  const angleCoverage = expectedAngles ? angleKeys.length / expectedAngles : 0;
+  const maxSimilarity = pairs.reduce(
+    (maximum, pair) => Math.max(maximum, pair.similarity),
+    0,
+  );
+  const issues = [];
+  if (duplicatePairs.length) {
+    issues.push({
+      code: 'duplicate-proposals',
+      message: '存在高度相似方案，独立视角不足',
+      ids: [...duplicateIds],
+    });
+  }
+  if (items.length >= 3 && angleKeys.length < expectedAngles) {
+    issues.push({
+      code: 'angle-coverage-low',
+      message: `仅覆盖 ${angleKeys.length} 个角度，建议至少 ${expectedAngles} 个`,
+      angleKeys,
+    });
+  }
+  return {
+    sufficient: issues.length === 0,
+    threshold: PROPOSAL_DUPLICATE_THRESHOLD,
+    maxSimilarity: Math.round(maxSimilarity * 1000) / 1000,
+    duplicateIds: [...duplicateIds],
+    duplicateGroups,
+    angleKeys,
+    angleCoverage: Math.round(Math.min(1, angleCoverage) * 1000) / 1000,
+    issues,
+  };
+}
+
 export function rankProposals(proposals = []) {
+  const diversity = proposalDiversity(proposals);
+  const duplicateIds = new Set(diversity.duplicateIds);
   const list = proposals
     .filter((p) => p.status !== 'failed')
     .map((p) => {
@@ -1596,6 +1695,9 @@ export function rankProposals(proposals = []) {
       const average = votes.length
         ? votes.reduce((sum, v) => sum + Number(v.score || 0), 0) / votes.length
         : null;
+      const duplicateOf = (diversity.duplicateGroups.find((group) => group.includes(p.id)) || [])
+        .filter((id) => id !== p.id);
+      const diversityPenalty = duplicateIds.has(p.id) ? 1.5 : 0;
       return {
         id: p.id,
         name: p.name,
@@ -1603,16 +1705,21 @@ export function rankProposals(proposals = []) {
         angleKey: p.angleKey,
         angleLabel: sim.angleByKey(p.angleKey).label,
         average,
+        effectiveScore: average == null ? null : average - diversityPenalty,
+        diversityPenalty,
+        duplicateGroup: duplicateOf.length ? [p.id, ...duplicateOf] : [],
         votes: votes.length,
         text: p.text || '',
       };
     });
 
   list.sort((a, b) => {
-    if (a.average == null && b.average == null) return a.id.localeCompare(b.id);
-    if (a.average == null) return 1;
-    if (b.average == null) return -1;
-    if (Math.abs(b.average - a.average) > 1e-9) return b.average - a.average;
+    if (a.effectiveScore == null && b.effectiveScore == null) return a.id.localeCompare(b.id);
+    if (a.effectiveScore == null) return 1;
+    if (b.effectiveScore == null) return -1;
+    if (Math.abs(b.effectiveScore - a.effectiveScore) > 1e-9) {
+      return b.effectiveScore - a.effectiveScore;
+    }
     if (b.votes !== a.votes) return b.votes - a.votes;
     return a.id.localeCompare(b.id);
   });
@@ -2053,6 +2160,7 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
 
   const latest = store.getTask(task.id).debate;
   const ranking = rankProposals(latest.proposals);
+  const diversity = proposalDiversity(latest.proposals);
   const winner = ranking[0];
   const voteCount = ranking.reduce((sum, p) => sum + p.votes, 0);
   const degraded = voteCount === 0;
@@ -2076,6 +2184,7 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
     reason: decisionReason,
     brief: clip(winner.text, 2000),
     ranking: ranking.map(({ text, ...rest }) => rest),
+    diversity,
     critiqueCount: critiques.filter((c) => c.ok).length,
     decidedAt: Date.now(),
   };

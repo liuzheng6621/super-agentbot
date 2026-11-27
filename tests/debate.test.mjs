@@ -12,6 +12,7 @@ const {
   selectDebateRoster,
   parseProposalScores,
   rankProposals,
+  proposalDiversity,
   stepAgentCandidates,
   isUsableProposalText,
   isCompleteProposalText,
@@ -70,6 +71,90 @@ test('排名按平均分、票数依次比较，未评分与失败方案排在�
   assert.equal(ranking[0].average, 9);
   assert.equal(ranking[2].average, null);
   assert.equal(ranking[0].angleLabel, '最小闭环');
+});
+
+test('方案相似度检测会识别重复角度，并避免同质方案无条件压过差异方案', () => {
+  const repeated = [
+    '# 核心主张',
+    '先冻结接口契约，再实现仓储层。'.repeat(18),
+    '# 技术路线',
+    '领域层只依赖端口，适配器负责 IO。'.repeat(14),
+    '# 落地工序',
+    '先写契约，再实现，最后补测试。'.repeat(14),
+    '# 代价与风险',
+    '前置设计偏重。'.repeat(12),
+    '# 工作量估计',
+    '约 2 人日。',
+  ].join('\n');
+  const proposals = [
+    {
+      id: 'A',
+      name: '契约甲',
+      angleKey: 'contract',
+      status: 'done',
+      text: repeated,
+      votes: [{ score: 9 }, { score: 9 }],
+    },
+    {
+      id: 'B',
+      name: '契约乙',
+      angleKey: 'contract',
+      status: 'done',
+      text: repeated.replace('契约甲', '契约乙'),
+      votes: [{ score: 8.9 }, { score: 8.9 }],
+    },
+    {
+      id: 'C',
+      name: '风险优先',
+      angleKey: 'risk-first',
+      status: 'done',
+      text: [
+        '# 核心主张',
+        '先把并发、越权和错误泄漏三类风险封死。'.repeat(16),
+        '# 技术路线',
+        '所有入口先过鉴权与限流，再进入领域逻辑。'.repeat(13),
+        '# 落地工序',
+        '风险清单、防线、压测、灰度。'.repeat(13),
+        '# 代价与风险',
+        '首版功能推进较慢。'.repeat(12),
+        '# 工作量估计',
+        '约 3 人日。',
+      ].join('\n'),
+      votes: [{ score: 8.7 }, { score: 8.7 }],
+    },
+  ];
+
+  const diversity = proposalDiversity(proposals);
+  assert.equal(diversity.sufficient, false);
+  assert.ok(diversity.maxSimilarity >= 0.72);
+  assert.ok(
+    diversity.duplicateGroups.some(
+      (group) => group.includes('A') && group.includes('B'),
+    ),
+  );
+  assert.ok(diversity.issues.some((issue) => issue.code === 'duplicate-proposals'));
+
+  const ranking = rankProposals(proposals);
+  assert.equal(ranking[0].id, 'C', '同质方案应被多样性惩罚，差异角度方案应胜出');
+  assert.equal(ranking.find((item) => item.id === 'A').average, 9);
+  assert.ok(ranking.find((item) => item.id === 'A').effectiveScore < 9);
+});
+
+test('正常多角色不同角度提案不产生重复标记', () => {
+  const proposals = ['contract', 'mvp', 'test-first'].map((angleKey, index) => ({
+    id: String.fromCharCode(65 + index),
+    name: `成员${index + 1}`,
+    angleKey,
+    status: 'done',
+    text: `# ${angleKey}\n${angleKey} 的独立论证和落地路径。`.repeat(20),
+    votes: [{ score: 8 }],
+  }));
+
+  const diversity = proposalDiversity(proposals);
+  assert.equal(diversity.sufficient, true);
+  assert.deepEqual(diversity.duplicateGroups, []);
+  assert.equal(diversity.angleCoverage, 1);
+  assert.deepEqual(diversity.issues, []);
 });
 
 test('讨论组优先执行席位，并纳入工具池 CLI，主持人除外', () => {
