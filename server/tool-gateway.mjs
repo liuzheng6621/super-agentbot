@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { store, TOOL_CATALOG } from './store.mjs';
+import { store, TOOL_CATALOG, redactTranscriptText } from './store.mjs';
 import {
   WorkspaceError,
   deleteWorkspaceEntry,
@@ -74,6 +74,21 @@ function normalizeArguments(tool, operation, input = {}) {
 }
 
 function auditArguments(args = {}) {
+  const secretKey = /(?:api[_-]?key|access[_-]?token|token|secret|password|authorization)/i;
+  const auditValue = (value, depth = 0) => {
+    if (depth > 4) return '[TRUNCATED]';
+    if (value === null || typeof value === 'number' || typeof value === 'boolean') return value;
+    if (typeof value === 'string') return redactTranscriptText(value).slice(0, 240);
+    if (Array.isArray(value)) return value.slice(0, 20).map((item) => auditValue(item, depth + 1));
+    if (value && typeof value === 'object') {
+      const out = {};
+      for (const [key, item] of Object.entries(value).slice(0, 40)) {
+        out[key] = secretKey.test(key) ? '[REDACTED]' : auditValue(item, depth + 1);
+      }
+      return out;
+    }
+    return '';
+  };
   const output = {};
   for (const [key, value] of Object.entries(args)) {
     if (key === 'content') {
@@ -82,6 +97,20 @@ function auditArguments(args = {}) {
     }
     if (key === 'args' && Array.isArray(value)) {
       output.args = value.slice(0, 20).map((item) => String(item).slice(0, 240));
+      continue;
+    }
+    if (key === 'arguments' && value && typeof value === 'object' && !Array.isArray(value)) {
+      const audited = auditValue(value);
+      const serialized = JSON.stringify(audited);
+      output.arguments = audited;
+      output.argumentsBytes = Buffer.byteLength(serialized);
+      output.argumentsTruncated = serialized.length > 1000;
+      if (output.argumentsTruncated) {
+        output.arguments = {
+          preview: serialized.slice(0, 1000),
+          truncated: true,
+        };
+      }
       continue;
     }
     if (typeof value === 'string') output[key] = value.slice(0, 500);

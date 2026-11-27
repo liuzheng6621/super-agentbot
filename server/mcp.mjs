@@ -245,7 +245,8 @@ export async function probeMcpServer(server, { cwd = '', env = process.env } = {
       tools: tools.map((tool) => ({
         name: text(tool.name, 120),
         description: text(tool.description, 500),
-        effect: text(tool.annotations?.effect || tool.effect || 'read', 40),
+        effect: text(tool.annotations?.effect || tool.effect || 'unknown', 40),
+        readOnlyHint: tool.annotations?.readOnlyHint === true,
       })),
     };
   } finally {
@@ -254,8 +255,11 @@ export async function probeMcpServer(server, { cwd = '', env = process.env } = {
 }
 
 export function assertReadOnlyMcpTool(tool) {
-  const effect = String(tool?.annotations?.effect || tool?.effect || 'read').toLowerCase();
-  if (!['read', 'readonly', 'read-only'].includes(effect)) {
+  const effect = String(tool?.annotations?.effect || tool?.effect || 'unknown').toLowerCase();
+  const explicitlyReadOnly =
+    tool?.annotations?.readOnlyHint === true ||
+    ['read', 'readonly', 'read-only'].includes(effect);
+  if (!explicitlyReadOnly) {
     throw new Error(`MCP 工具 ${tool?.name || ''} 不是只读工具，当前版本拒绝调用`);
   }
   return true;

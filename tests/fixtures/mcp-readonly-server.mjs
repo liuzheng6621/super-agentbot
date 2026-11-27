@@ -41,6 +41,17 @@ input.on('line', (line) => {
             annotations: { effect: 'write' },
             inputSchema: { type: 'object' },
           },
+          {
+            name: 'hinted_read',
+            description: 'A standard MCP read-only hint',
+            annotations: { readOnlyHint: true },
+            inputSchema: { type: 'object' },
+          },
+          {
+            name: 'unannotated',
+            description: 'A tool without an effect declaration',
+            inputSchema: { type: 'object' },
+          },
         ],
       },
     })}\n`);

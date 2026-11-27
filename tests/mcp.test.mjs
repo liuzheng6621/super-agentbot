@@ -46,6 +46,10 @@ test('MCP config is persisted as env references and never exposes resolved secre
   assert.equal(probe.ok, true);
   assert.ok(probe.tools.some((tool) => tool.name === 'read_doc' && tool.effect === 'read'));
   assert.ok(probe.tools.some((tool) => tool.name === 'write_doc' && tool.effect === 'write'));
+  assert.ok(probe.tools.some((tool) => tool.name === 'unannotated' && tool.effect === 'unknown'));
+  assert.ok(
+    probe.tools.some((tool) => tool.name === 'hinted_read' && tool.readOnlyHint === true),
+  );
 });
 
 test('Agent MCP whitelist defaults to deny and permits only listed servers', async () => {
@@ -104,6 +108,25 @@ test('MCP write tools and startup timeouts fail closed', async () => {
     }),
     /不是只读工具/,
   );
+  await assert.rejects(
+    toolGateway.invokeTool({
+      taskId: task.id,
+      toolId: 'mcp.call',
+      operation: 'call',
+      args: { op: 'call', serverId: 'fixture', tool: 'unannotated' },
+      principal: { kind: 'owner', id: 'owner', name: 'Owner UI' },
+    }),
+    /不是只读工具/,
+  );
+
+  const hinted = await toolGateway.invokeTool({
+    taskId: task.id,
+    toolId: 'mcp.call',
+    operation: 'call',
+    args: { op: 'call', serverId: 'fixture', tool: 'hinted_read' },
+    principal: { kind: 'owner', id: 'owner', name: 'Owner UI' },
+  });
+  assert.equal(hinted.ok, true);
 
   const hanging = addServer({
     id: 'hanging',
@@ -115,6 +138,35 @@ test('MCP write tools and startup timeouts fail closed', async () => {
     probeMcpServer(hanging, { cwd: temp }),
     /MCP 调用超时/,
   );
+});
+
+test('MCP call audit keeps bounded, redacted nested arguments', async () => {
+  const task = store.createTask({ goal: 'MCP audit arguments' });
+  await toolGateway.invokeTool({
+    taskId: task.id,
+    toolId: 'mcp.call',
+    operation: 'call',
+    args: {
+      op: 'call',
+      serverId: 'fixture',
+      tool: 'read_doc',
+      arguments: {
+        query: 'fixture',
+        apiKey: 'fixture-secret-value',
+        payload: Array.from({ length: 30 }, () => 'x'.repeat(240)),
+      },
+    },
+    principal: { kind: 'owner', id: 'owner', name: 'Owner UI' },
+  });
+  const event = store
+    .getTask(task.id)
+    .events.findLast(
+      (item) => item.type === 'tool.call.start' && item.data.tool === 'mcp.call',
+    );
+  assert.ok(event);
+  assert.match(JSON.stringify(event.data.arguments.arguments), /\[REDACTED\]/);
+  assert.equal(event.data.arguments.argumentsTruncated, true);
+  assert.ok(event.data.arguments.arguments.preview.length <= 1000);
 });
 
 test('MCP working directories cannot escape the task workspace', () => {

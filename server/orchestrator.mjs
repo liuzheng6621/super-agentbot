@@ -148,9 +148,9 @@ export async function writeWorkspaceFile(task, relPath, content, meta = {}) {
     toolId: 'workspace.write',
     operation: 'write',
     args: { op: 'write', path: relPath, content },
-    // The orchestrator is the platform actor; the producing agent is retained
-    // in event metadata rather than impersonating a second permission check.
-    agentId: '',
+    // The system principal authorizes the write; agentId keeps the producing
+    // agent in the audit trail without impersonating it for permission checks.
+    agentId: meta.agentId || '',
     principal: { kind: 'system', id: 'orchestrator', name: 'Orchestrator' },
     stepId: meta.stepId || '',
     source: 'orchestrator',
