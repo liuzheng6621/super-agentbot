@@ -9,7 +9,7 @@
 [![Node](https://img.shields.io/badge/node-%E2%89%A520.11-3c873a?logo=node.js&logoColor=white)](https://nodejs.org)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-blue)
 ![Build](https://img.shields.io/badge/build-none-lightgrey)
-![Tests](https://img.shields.io/badge/tests-67%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-86%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4)
 
@@ -25,6 +25,10 @@
 
 本轮把“多智能体协作”从固定流水线推进到可追踪、可重规划、可审计的第一层平台：
 
+- **真实质量门**：CLI 与模拟任务都执行工作区测试入口；没有入口、执行失败或超时都不能交付，并记录真实命令、退出码、耗时与输出。
+- **独立评审**：评审候选只允许 `reviewer / tester / architect`，实现者不会被悄悄拉来审自己；自审按真实 `reviewerId / implementerId` 判定并写入任务事件。
+- **增量持久化**：流式消息在 200ms dirty 窗口内合并落盘，只重新序列化变化任务；进程正常退出前会 flush 未完成窗口。
+- **CLI 解析缓存**：命令解析走进程级缓存，PATH 变化时由探测/刷新接口显式失效，减少热路径同步调用。
 - **计划版本**：初版、返工和手动重规划都会生成不可变快照，已完成工序不会被重规划抹掉；自动重规划最多一次，避免无限重试。
 - **消息路由**：每条协作消息记录来源、目标、父消息、关联工序、产物引用和 `correlationId`。
 - **Tool Gateway 第一层**：平台 API 统一校验工具白名单、执行主体和工作区边界，并记录 `tool.call.start` / `tool.call.end` / `tool.policy.denied`。
@@ -50,7 +54,8 @@
 
 - 🧠 **方案辩论先行** — 4 个执行席位 + 1 个工具池 CLI 各出一版方案（契约先行 / 最小闭环 / 测试先行 / 风险优先 / 分阶段交付），互相匿名打 1–10 分并各指一个硬伤，主持人按平均分裁决；只有 1 份有效提案或评分不足时会在裁决里标注置信度，不假装形成共识。
 - 🔀 **依赖图并行** — 架构定稿后「实现」与「测试设计」并行推进，DAG 校验依赖与环路，失败按依赖链传播，取消是即时生效而不是等当前工序跑完。
-- 🚦 **真实质量门** — 评审前真的执行测试命令，`VERDICT: PASS` 才允许交付；FAIL 进入「修复 → 回归 → 复评」有界回环，轮次可配。测试入口按 `package.json scripts.test` → pytest → cargo → go → Makefile → `tests/` 依次探测，找不到就标 `missing` 让界面显示「没有测试入口」，绝不静默跳过；真实 CLI 任务同样执行这套质量门，而不是一律跳过。评审员缺位退到其他席位时会如实标注「评审代质量门」，不让自审看起来像独立把关。
+- 🚦 **真实质量门** — 评审前真的执行测试命令，`VERDICT: PASS` 且质量门 `passed` 才允许交付；FAIL 进入「修复 → 回归 → 复评」有界回环，轮次可配。测试入口按 `package.json scripts.test` → Makefile `test` → pytest 配置 → Cargo → Go → `tests/` 探测；没有入口标为 `no-test-entry`，失败或超时同样阻断交付。每次记录真实命令、来源、退出码、耗时和 stdout/stderr，真实 CLI 任务也走同一套质量门。
+- 🧑‍⚖️ **独立评审** — 评审候选只允许 `reviewer / tester / architect`，实现者绝不会被悄悄拉来审自己；只有实现席位时评审明确不可用。自审按真实 `reviewerId / implementerId` 判定，身份和 `selfReview` 会写入工序、质量记录与 `review.independence` 事件。
 - 🎛 **工作流可视化配置** — 讨论开关与规模、工序并发、全局任务并发、返工轮次都在顶栏 ⚙ 里改，即时落库；另带「快速 / 均衡 / 严谨」三档预设。
 - 🔁 **任务级流程覆盖** — 输入框旁可切「先讨论」或「直接开工」，只影响当前任务，不动全局默认。
 - 🧭 **计划版本与有限重规划** — 计划以不可变快照保存；失败后自动重规划最多一次，手动重规划会保留已完成工序，方便在复杂项目中继续推进。
@@ -62,10 +67,11 @@
 **执行**
 
 - 🖥 **10 个本机 CLI 真接入** — 启动后台并发体检每个 CLI，只有「真回了话且没有鉴权错误」的才占执行席位；同一个 CLI 可兼任多角色（`OpenCode · 架构师`）。
+- 🔎 **CLI 解析缓存** — `resolveCommand()` 缓存命令解析结果，避免每次调用都同步跑 `where.exe` / `which`；探测或刷新团队时显式失效，带参数的命令串也能正确提取可执行文件。
 - 🔌 **Provider Profile、参数模板与自动回退** — 每个 Agent 可绑定独立 Provider Profile，保存 Base URL、模型、密钥环境变量引用、CLI 参数模板和并发上限；可配置有序备用 Provider，真实 CLI 失败后自动切换并把 `provider.fallback` 写入任务事件流。密钥只从服务进程环境读取，不写入 `db.json`。
 - 🧾 **产物带内容版本** — 每个产物记录 `version`（sha256 前 16 位），改写即换版本，可判断「这一步到底动了什么」。
 - 🧷 **不合格输出不流转** — 每个角色的回复都要过结构校验：提案需 5 段标题、质询需覆盖全部方案、步骤需可执行产出；半截回复或「我无法完成」直接重试，不把残稿喂给下一步。
-- 💾 **原子写入** — 临时文件 → `fsync` → `rename`，Windows 占用自动退避重试，不会留下半截文件。
+- 💾 **原子写入 + 增量持久化** — 临时文件 → `fsync` → `rename`，Windows 占用自动退避重试；流式输出使用 200ms dirty 窗口合并写盘，只序列化变化任务，正常退出前自动 flush。
 
 **界面**
 
@@ -78,7 +84,7 @@
 **工程**
 
 - 📦 **零依赖、零构建** — 纯 Node.js + 原生 ESM，`node server/index.mjs` 就起来，前端不打包、不装包管理器。
-- ✅ **78 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、质量门返工与入口探测、体检判定、上下文预算、工作区文件闭环、Git 隔离、工具策略、CLI 强制沙箱映射、计划版本、消息路由、Tool Gateway 审计、Provider Profile、CLI 参数模板、Provider 自动回退、全局调度队列、Agent 租约、真实工时统计、输出完整性判定与退出码分类。
+- ✅ **86 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、真实质量门、独立评审、持久化 dirty 窗口、可执行文件解析缓存、上下文预算、工作区文件闭环、Git 隔离、工具策略、CLI 强制沙箱映射、计划版本、消息路由、Tool Gateway 审计、Provider Profile、CLI 参数模板、Provider 自动回退、全局调度队列、Agent 租约、真实工时统计、输出完整性判定与退出码分类。
 
 ## 快速开始
 
@@ -251,7 +257,7 @@ Git 隔离支持两种模式：
 | **中栏** | 工作流阶段条（讨论 → 拆解 → 架构与实施 → 评审 → 交付，实时高亮负责人，可点击跳转）、按阶段分隔的协作时间线、流式输出、方案 / 质询 / 裁决标签、底部群聊输入框 |
 | **右栏** | 上下文包、方案讨论（提案人 / 评分 / 票数 / 胜出方案 / 质询记录）、DAG 链路（依赖 / 并行 / 尝试次数 / 返工）、产物源码、统计与 Bot Hook |
 | **全屏工作区控制台** | 左侧工作树与变更；中间六视图：文件 / 执行轨迹 / 计划版本 / 协作消息 / 工具审计 / Diff；右侧上下文与 Agent 工具策略；桌面和移动端都可直接进入 |
-| **统计面板** | 每个数字都来自落库事实：累计 TOKENS = 各成员 token 之和（输入与输出分开记账，`tokensIn` / `tokensOut`，不把成本低估一个数量级）；协作轮次 = 真实调用成员次数 `stats.agentRuns`；产物文件 = 产物清单条数；返工轮次 = `repairRound`；总耗时 = 各工序实际耗时之和（墙钟含排队与重试等待，只作悬浮提示）；质量门 = `passed / failed / missing / skipped / 未执行` 五态，中断的任务不会永远停在「待执行」 |
+| **统计面板** | 每个数字都来自落库事实：累计 TOKENS = 各成员 token 之和（输入与输出分开记账，`tokensIn` / `tokensOut`，不把成本低估一个数量级）；协作轮次 = 真实调用成员次数 `stats.agentRuns`；产物文件 = 产物清单条数；返工轮次 = `repairRound`；总耗时 = 各工序实际耗时之和（墙钟含排队与重试等待，只作悬浮提示）；质量门 = `passed / failed / timeout / no-test-entry / running / skipped / not-run` 等状态，中断的任务不会永远停在「待执行」 |
 | **顶栏** | 状态、⚙ 工作流设置、`SHIFT` 切换配色 |
 
 群聊里一次 `@` 多位成员，会自动组成讨论组出方案——这是「临时开个小会」的最短路径。
@@ -368,7 +374,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 │   ├── screenshot.png
 │   ├── design-io-image-context.md
 │   └── agent-platform-roadmap.md
-├── tests/                11 个测试文件、78 个测试
+├── tests/                13 个测试文件、86 个测试
 ├── 安装到桌面.bat
 ├── 卸载桌面快捷方式.bat
 └── data/                 运行时数据（gitignore）
@@ -380,7 +386,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 npm test
 ```
 
-78 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、评审结论解析、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `missing` 判定、真实 CLI 任务同样执行质量门、评审员兜底不落到实现者、目录快照复用、上游瞬时故障（ECONNRESET / 429 / socket hang up）只重试一次且不掩盖真实失败、上下文预算（段序稳定性、中文 token 估算、原子写版本、spill 可还原）、工作区文件闭环与路径/敏感文件边界、Agent 工具策略、CLI 强制沙箱映射与拒绝事件、计划版本与已完成工序保留、消息路由、Tool Gateway 权限与审计、Provider Profile 持久化与迁移、CLI 参数模板渲染、Provider 路由与真实子进程回退、全局任务并发、Provider 配额、Agent 租约与排队取消、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计（只累加结束过的工序，不拿墙钟冒充）、输出完整性判定（半截提案 / 缺段质询 / 空步骤都会判不合格）、提案宽松解析（`A=7`、`B：8分`、`方案 C 7/10`）、退出码分类（超时 / 已停止 / 命令缺失 / 策略拒绝 / `0xC0000142`）与参数拼装。
+86 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、评审结论解析、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `no-test-entry` 判定、真实 CLI 任务同样执行质量门、独立评审与自审身份判定、目录快照复用、上游瞬时故障（ECONNRESET / 429 / socket hang up）只重试一次且不掩盖真实失败、上下文预算（段序稳定性、中文 token 估算、原子写版本、spill 可还原）、工作区文件闭环与路径/敏感文件边界、Agent 工具策略、CLI 强制沙箱映射与拒绝事件、计划版本与已完成工序保留、消息路由、Tool Gateway 权限与审计、Provider Profile 持久化与迁移、CLI 参数模板渲染、Provider 路由与真实子进程回退、全局任务并发、Provider 配额、Agent 租约与排队取消、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计（只累加结束过的工序，不拿墙钟冒充）、输出完整性判定（半截提案 / 缺段质询 / 空步骤都会判不合格）、提案宽松解析（`A=7`、`B：8分`、`方案 C 7/10`）、退出码分类（超时 / 已停止 / 命令缺失 / 策略拒绝 / `0xC0000142`）与参数拼装、dirty 窗口合并落盘、退出前 flush、可执行文件解析缓存。
 
 ## 已知边界
 
@@ -395,7 +401,10 @@ npm test
 ## Roadmap
 
 - [x] 真实 CLI 体检组队（10 个 CLI 实测跑通）
-- [x] 方案辩论、DAG 并行、质量门返工
+- [x] 方案辩论、DAG 并行、真实质量门返工
+- [x] 独立评审（禁止实现者自审）
+- [x] dirty 窗口增量持久化与退出前 flush
+- [x] CLI 可执行文件解析缓存
 - [x] 上下文预算（段序 / token 估算 / 原子写 / spill）
 - [x] 工作区文件闭环、全屏控制台、执行泳道与 Diff
 - [x] Agent 工具白名单与 Git worktree/clone 隔离
