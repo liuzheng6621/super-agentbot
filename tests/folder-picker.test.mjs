@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -98,6 +99,171 @@ async function stopServer(server) {
   });
 }
 
+class WebSocketConnection {
+  constructor(url) {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'ws:') throw new Error(`unsupported WebSocket protocol: ${parsed.protocol}`);
+    this.host = parsed.hostname;
+    this.port = Number(parsed.port || 80);
+    this.path = `${parsed.pathname}${parsed.search}`;
+    this.socket = null;
+    this.buffer = Buffer.alloc(0);
+    this.fragments = [];
+    this.fragmentOpcode = 0;
+    this.onmessage = null;
+    this.onclose = null;
+  }
+
+  open() {
+    return new Promise((resolve, reject) => {
+      const key = crypto.randomBytes(16).toString('base64');
+      const socket = net.createConnection({ host: this.host, port: this.port });
+      this.socket = socket;
+      let handshake = Buffer.alloc(0);
+      let upgraded = false;
+      const fail = (err) => {
+        socket.destroy();
+        reject(err);
+      };
+      socket.once('error', fail);
+      socket.once('connect', () => {
+        socket.write(
+          `GET ${this.path} HTTP/1.1\r\n` +
+            `Host: ${this.host}:${this.port}\r\n` +
+            'Upgrade: websocket\r\n' +
+            'Connection: Upgrade\r\n' +
+            `Sec-WebSocket-Key: ${key}\r\n` +
+            'Sec-WebSocket-Version: 13\r\n\r\n',
+        );
+      });
+      socket.on('data', (chunk) => {
+        if (upgraded) {
+          this.receive(chunk);
+          return;
+        }
+        handshake = Buffer.concat([handshake, chunk]);
+        const end = handshake.indexOf('\r\n\r\n');
+        if (end < 0) return;
+        const headers = handshake.subarray(0, end).toString('latin1');
+        if (!/^HTTP\/1\.1 101\b/.test(headers)) {
+          fail(new Error(`CDP WebSocket handshake failed: ${headers.split('\r\n')[0]}`));
+          return;
+        }
+        upgraded = true;
+        socket.removeListener('error', fail);
+        socket.on('error', () => this.onclose?.());
+        socket.on('close', () => this.onclose?.());
+        resolve();
+        const rest = handshake.subarray(end + 4);
+        if (rest.length) this.receive(rest);
+      });
+    });
+  }
+
+  receive(chunk) {
+    this.buffer = Buffer.concat([this.buffer, chunk]);
+    while (this.buffer.length >= 2) {
+      const first = this.buffer[0];
+      const second = this.buffer[1];
+      const fin = (first & 0x80) !== 0;
+      const opcode = first & 0x0f;
+      const masked = (second & 0x80) !== 0;
+      let length = second & 0x7f;
+      let offset = 2;
+      if (length === 126) {
+        if (this.buffer.length < 4) return;
+        length = this.buffer.readUInt16BE(2);
+        offset = 4;
+      } else if (length === 127) {
+        if (this.buffer.length < 10) return;
+        const size = this.buffer.readBigUInt64BE(2);
+        if (size > BigInt(Number.MAX_SAFE_INTEGER)) {
+          throw new Error('CDP WebSocket frame is too large');
+        }
+        length = Number(size);
+        offset = 10;
+      }
+      const maskOffset = offset;
+      if (masked) offset += 4;
+      if (this.buffer.length < offset + length) return;
+      let payload = this.buffer.subarray(offset, offset + length);
+      if (masked) {
+        const mask = this.buffer.subarray(maskOffset, maskOffset + 4);
+        payload = Buffer.from(payload);
+        for (let index = 0; index < payload.length; index += 1) {
+          payload[index] ^= mask[index % 4];
+        }
+      } else {
+        payload = Buffer.from(payload);
+      }
+      this.buffer = this.buffer.subarray(offset + length);
+      if (opcode === 0x8) {
+        this.close();
+        return;
+      }
+      if (opcode === 0x9) {
+        this.sendFrame(payload, 0x0a);
+        continue;
+      }
+      if (opcode === 0x0a) continue;
+      if (opcode === 0x0) {
+        this.fragments.push(payload);
+        if (fin) {
+          const message = Buffer.concat(this.fragments).toString('utf8');
+          this.fragments = [];
+          this.onmessage?.({ data: message });
+        }
+        continue;
+      }
+      if (!fin) {
+        this.fragmentOpcode = opcode;
+        this.fragments = [payload];
+        continue;
+      }
+      if (opcode === 0x1) this.onmessage?.({ data: payload.toString('utf8') });
+    }
+  }
+
+  sendFrame(payload, opcode = 0x1) {
+    if (!this.socket || this.socket.destroyed) throw new Error('CDP WebSocket is closed');
+    const data = Buffer.from(payload);
+    const mask = crypto.randomBytes(4);
+    let header;
+    if (data.length < 126) {
+      header = Buffer.alloc(2);
+      header[1] = 0x80 | data.length;
+    } else if (data.length <= 0xffff) {
+      header = Buffer.alloc(4);
+      header[1] = 0x80 | 126;
+      header.writeUInt16BE(data.length, 2);
+    } else {
+      header = Buffer.alloc(10);
+      header[1] = 0x80 | 127;
+      header.writeBigUInt64BE(BigInt(data.length), 2);
+    }
+    header[0] = 0x80 | opcode;
+    const masked = Buffer.alloc(data.length);
+    for (let index = 0; index < data.length; index += 1) {
+      masked[index] = data[index] ^ mask[index % 4];
+    }
+    this.socket.write(Buffer.concat([header, mask, masked]));
+  }
+
+  send(value) {
+    this.sendFrame(value);
+  }
+
+  close() {
+    if (!this.socket || this.socket.destroyed) return;
+    try {
+      this.sendFrame(Buffer.alloc(0), 0x8);
+    } catch {
+      /* The socket may already be closing. */
+    }
+    this.socket.end();
+  }
+}
+
 class Cdp {
   constructor(url) {
     this.url = url;
@@ -108,11 +274,7 @@ class Cdp {
   }
 
   async open() {
-    this.socket = new WebSocket(this.url);
-    await new Promise((resolve, reject) => {
-      this.socket.onopen = resolve;
-      this.socket.onerror = () => reject(new Error('CDP WebSocket failed'));
-    });
+    this.socket = new WebSocketConnection(this.url);
     this.socket.onmessage = (event) => {
       const message = JSON.parse(String(event.data));
       if (message.id && this.pending.has(message.id)) {
@@ -124,6 +286,7 @@ class Cdp {
       }
       if (message.method) this.events.push(message);
     };
+    await this.socket.open();
   }
 
   send(method, params = {}) {
