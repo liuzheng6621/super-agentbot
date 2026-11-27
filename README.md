@@ -9,7 +9,7 @@
 [![Node](https://img.shields.io/badge/node-%E2%89%A520.11-3c873a?logo=node.js&logoColor=white)](https://nodejs.org)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-blue)
 ![Build](https://img.shields.io/badge/build-none-lightgrey)
-![Tests](https://img.shields.io/badge/tests-178%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-CI%20matrix-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4)
 
@@ -102,7 +102,7 @@
 **工程**
 
 - 📦 **零依赖、零构建** — 纯 Node.js + 原生 ESM，`node server/index.mjs` 就起来，前端不打包、不装包管理器。
-- ✅ **178 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、真实质量门、结构化评审、项目技能、运行记录导出、独立评审、持久化 dirty 窗口、可执行文件解析缓存、上下文预算与压缩、工作区文件闭环、工作区池与事务回滚、读后写守卫、Git 隔离、工具策略、CLI 强制沙箱映射、计划版本、消息路由、Tool Gateway 审计、Provider Profile 与用量账本、CLI 参数模板、Provider 自动回退、全局调度队列、Agent 租约、真实工时统计、输出完整性判定、服务 Token / 作用域 / CORS、MCP、审批、trace / OTLP、Automation 恢复与事件等待、租户隔离、多实例锁与 `/api/state` 分页。
+- ✅ **全量测试入口** — `npm test` 统一设置隔离数据目录后运行 `node --test`，覆盖并行调度、失败传播、真实质量门、结构化评审、项目技能、运行记录导出、独立评审、持久化 dirty 窗口、可执行文件解析缓存、上下文预算与压缩、工作区文件闭环、工作区池与事务回滚、读后写守卫、Git 隔离、工具策略、CLI 强制沙箱映射、计划版本、消息路由、Tool Gateway 审计、Provider Profile 与用量账本、CLI 参数模板、Provider 自动回退、全局调度队列、Agent 租约、真实工时统计、输出完整性判定、服务 Token / 作用域 / CORS、MCP、审批、trace / OTLP、Automation 恢复与事件等待、租户隔离、多实例锁与 `/api/state` 分页。
 
 ## 快速开始
 
@@ -433,8 +433,9 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 │   ├── screenshot.png
 │   ├── design-io-image-context.md
 │   ├── agent-platform-roadmap.md
-│   └── agentforge-openbot-plan.md
-├── tests/                29 个测试文件、178 个测试
+│   ├── agentforge-openbot-plan.md
+│   └── fix-plan.md
+├── tests/                测试文件与隔离数据入口
 ├── 安装到桌面.bat
 ├── 卸载桌面快捷方式.bat
 └── data/                 运行时数据（gitignore）
@@ -446,7 +447,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 npm test
 ```
 
-178 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、结构化评审结论与字段校验、辩论评分 / 多样性 / 角度覆盖规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `no-test-entry` 判定、真实 CLI 任务同样执行质量门、独立评审与自审身份判定、目录快照复用、上游瞬时故障只重试一次且不掩盖真实失败、上下文预算 / 自动压缩 / 质量与回放、事件与导出 spill、图片附件视觉门禁、工作区文件闭环与路径/敏感文件边界、工作区池与事务回滚、读后写守卫、Agent 工具策略、CLI 强制沙箱映射与拒绝事件、计划版本与已完成工序保留、消息路由、Tool Gateway 权限与审计、Provider Profile 持久化与迁移、Provider 用量账本、CLI 参数模板渲染、Provider 路由与真实子进程回退、全局任务并发、Provider 配额、Agent 租约与排队取消、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计、输出完整性判定、提案宽松解析、退出码分类与参数拼装、dirty 窗口合并落盘与退出前 flush、可执行文件解析缓存、项目技能发现与边界保护、运行记录导出与脱敏、服务 Token / 作用域 / CORS / 安全审计、MCP 只读边界、命令审批与一次性执行、trace / span / OTLP 链路、Automation 调度 / 重试 / 幂等 / 恢复 / 事件等待、租户隔离与配额、多实例锁与租约、目录懒加载、`/api/state` 分页。
+全量测试覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、结构化评审结论与字段校验、辩论评分 / 多样性 / 角度覆盖规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `no-test-entry` 判定、真实 CLI 任务同样执行质量门、独立评审与自审身份判定、目录快照复用、上游瞬时故障只重试一次且不掩盖真实失败、上下文预算 / 自动压缩 / 质量与回放、事件与导出 spill、图片附件视觉门禁、工作区文件闭环与路径/敏感文件边界、工作区池与事务回滚、读后写守卫、Agent 工具策略、CLI 强制沙箱映射与拒绝事件、计划版本与已完成工序保留、消息路由、Tool Gateway 权限与审计、Provider Profile 持久化与迁移、Provider 用量账本、CLI 参数模板渲染、Provider 路由与真实子进程回退、全局任务并发、Provider 配额、Agent 租约与排队取消、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计、输出完整性判定、提案宽松解析、退出码分类与参数拼装、dirty 窗口合并落盘与退出前 flush、可执行文件解析缓存、项目技能发现与边界保护、运行记录导出与脱敏、Markdown 链接协议白名单、服务 Token / 作用域 / CORS / 安全审计、MCP 只读边界、命令审批与一次性执行、trace / span / OTLP 链路、Automation 调度 / 重试 / 幂等 / 恢复 / 事件等待、租户隔离与配额、多实例锁与租约、目录懒加载、`/api/state` 分页。
 
 ## 已知边界
 

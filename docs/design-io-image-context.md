@@ -2,7 +2,7 @@
 
 > 调研对象：`@deepseek-ai/dsh` 全局包（`C:\Users\six\AppData\Roaming\npm\node_modules\@deepseek-ai\dsh`），
 > 依据 `docs/subsystems/*.zh.md` 与各插件包 `README.zh.md`，并实测本机 magpie 路由。
-> 本文只做设计与差距分析，**未改动任何源码**。
+> 本文最初用于设计与差距分析。三项能力现已落地；保留原文中的设计判断，落地状态以本页“实施结果”和当前测试为准。
 
 ---
 
@@ -488,4 +488,15 @@ AgentForge 的对应动作：
 
 端到端实跑（任务 `a90f8253-31f5-46cc-97d1-aefd5dc447c4`，direct 模式）：plan / design / implement / test-design / review 全过，`VERDICT: PASS`，status=done，产出 requirements.md / architecture.md / notes.md / README.md，token 累计 3010（旧算法会算成约 1000）。
 
-尚未做：**6 附件与读图**、**7 读后写守卫**、**8 正规压缩**。三项各自独立，按需再开。
+> 历史快照：这是设计初稿的边界记录，已被后续实现取代。
+
+## 实施结果
+
+| 原设计项 | 当前状态 | 落地内容与验证 |
+| --- | --- | --- |
+| 文件原子写与版本 | 已完成 | `server/fs.mjs` 提供原子写、内容版本和 spill；工作区变更与事务记录已接入 |
+| 读后写守卫 | 已完成 | 写入已有文件需提交最近读取版本；陈旧写入返回冲突并留审计，覆盖人工与 Agent 通道 |
+| 附件与读图 | 已完成 | 按签名识别 PNG / JPEG / WebP / GIF，校验体积、尺寸和像素；内容寻址保存；Provider 必须声明 `vision`，否则拒绝且不落消息 |
+| 上下文压缩 | 已完成 | 稳定前缀、预算、自动触发、来源范围、质量评估、历史与原文回放均已落地；摘要仍为抽取式 |
+
+验证入口：`npm test`。对应测试包括 `tests/workspace.test.mjs`、`tests/attachments.test.mjs` 与 `tests/context-budget.test.mjs`。具体数量随用例增减，不在文档中固定。

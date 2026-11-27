@@ -2,7 +2,7 @@
 
 > 评估日期：2026-11-27
 
-本文基于当前仓库实现，区分“已经落地”“已有边界”和“下一阶段建议”，避免把提示词约束、平台 API 和真实 Tool Gateway 混为一谈。M3 / M4 / M5 已完成，当前 `178 / 178` 测试通过。
+本文基于当前仓库实现，区分“已经落地”“已有边界”和“下一阶段建议”，避免把提示词约束、平台 API 和真实 Tool Gateway 混为一谈。M3 / M4 / M5 已完成；测试通过情况以 `npm test` 与 CI 矩阵为准，不在文档中固定数量。
 
 ## 1. 工具调用能力
 
@@ -200,6 +200,8 @@ Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile �
 | 协作消息路由 | 已完成 | 消息记录来源、目标、父消息、关联工序、产物引用和 correlationId |
 | Tool Gateway 第一层 | 已完成 | 统一工具描述、Owner/Agent/System 主体、工具白名单、工作区执行和审计事件 |
 | 工作区控制台 | 已完成 | 计划版本、协作消息、工具审计与原有文件、执行泳道、Diff 统一展示 |
+| Markdown 链接白名单 | 已完成 | 仅允许 http / https / mailto 与相对链接；拒绝 javascript / data / vbscript / file，外链带 noopener noreferrer |
+| CI 与语法门 | 已完成 | GitHub Actions 覆盖 Ubuntu / Windows × Node 20 / 22；`npm run check:syntax` 检查全部 `.js/.mjs` |
 | Provider Profile | 已完成 | Agent 绑定主/备 Profile；Base URL、模型、密钥环境变量引用、CLI 参数模板和并发上限可配置；真实 CLI 失败后按顺序回退 |
 | 全局 Scheduler | 第一层已完成 | 任务并发上限、Provider 配额、排队位置、等待原因、Agent 租约和取消排队 |
 | CLI 执行策略 | 第一层已完成 | `inherit / strict`；工具白名单推导沙箱；Codex / DSH / Claude 能力矩阵；不可强制时拒绝；策略事件与消息元数据 |
@@ -259,7 +261,7 @@ M3 不包含：自由 shell、Agent 自审批、MCP 写工具、Provider fill-fi
 
 ## 下一阶段 backlog
 
-> OpenBot 融合计划的执行拆分与验收标准见 [agentforge-openbot-plan.md](agentforge-openbot-plan.md)。本表只保留能力边界和尚未实施项，不重复给出另一套优先级。
+> OpenBot 融合计划的执行拆分与验收标准见 [agentforge-openbot-plan.md](agentforge-openbot-plan.md)；当前缺陷与验收进度见 [fix-plan.md](fix-plan.md)。本表只保留能力边界和尚未实施项，不重复给出另一套优先级。
 
 以下条目来自本轮与 OpenHands / OpenBot 能力对照，M3-M5 已完成项已移出：
 

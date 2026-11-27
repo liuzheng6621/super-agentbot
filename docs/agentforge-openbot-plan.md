@@ -5,6 +5,8 @@
 > 来源：OpenBot 上游仓库（https://github.com/OpenHands/OpenBot）+ AgentForge 现有路线图（`agent-platform-roadmap.md`）
 > 说明：本计划只吸收机制与契约，不移植 OpenBot 的 Electron / Bun / Cloudflare 架构。
 
+当前缺陷、残余验收项与 agent-web 接入判断见 [fix-plan.md](fix-plan.md)。
+
 ## 定位
 
 AgentForge 继续保留零依赖、零构建、可直接运行的优点，并通过 JSON 文件锁与租约支持多实例共享状态。它不把单机工具包装成完整 SaaS，也不把进程内 Automation / Scheduler 宣传成分布式队列。
@@ -114,7 +116,7 @@ AgentForge 继续保留零依赖、零构建、可直接运行的优点，并通
 | 5 | M4 Profile / 工作区 | 已完成 | Profile、池、读后写、事务、DAG / 回放测试 |
 | 6 | M5 生产化 | 已完成 | 租户、OTLP、多实例、懒加载、分页测试 |
 
-全量验证：`node --test tests/*.test.mjs`，当前 `178 / 178` 通过。
+全量验证：`npm test`（统一隔离数据目录）；跨平台矩阵由 `.github/workflows/ci.yml` 运行。测试数量随用例增减，不在计划中固定。
 
 ## 本轮已完成
 
