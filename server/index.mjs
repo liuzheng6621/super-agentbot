@@ -42,6 +42,7 @@ import {
   workspaceInfo,
 } from './workspace.mjs';
 import { crossTaskOverview, taskGraph, taskReplay } from './overview.mjs';
+import { OtlpExporter, otlpSpanFromEvent, resolveOtlpConfig } from './otlp.mjs';
 import {
   authenticateApi,
   authorizeApi,
@@ -88,6 +89,8 @@ if (!LISTEN_SECURITY.ok) {
 }
 if (LISTEN_SECURITY.warning) console.warn(`  !  ${LISTEN_SECURITY.warning}`);
 const PUBLIC_DIR = path.join(ROOT, 'public');
+const OTLP = resolveOtlpConfig(process.env);
+const otlpExporter = new OtlpExporter(OTLP);
 const commandRunner = new CommandRunner({
   workspaceRoot: WORKSPACE_DIR,
   dataRoot: DATA_DIR,
@@ -98,6 +101,9 @@ recoverInterruptedApprovals();
 expireApprovals();
 store.subscribe((event) => {
   if (event?.type === 'commands.changed') commandRunner.configure(store.commandWhitelist);
+  if (event?.type === 'trace.span') {
+    otlpExporter.enqueue(otlpSpanFromEvent(event.span, event.task));
+  }
 });
 
 const MIME = {
@@ -403,6 +409,7 @@ const server = http.createServer(async (req, res) => {
         scheduler: schedulerSnapshot(),
         automations: visibleAutomations(principal),
         automationRunner: automationRunnerSnapshot(),
+        otlp: otlpExporter.snapshot(),
         security: {
           ...securitySummary({ host: HOST, config: SECURITY }),
           principal: {
@@ -1306,6 +1313,7 @@ const server = http.createServer(async (req, res) => {
         tasks: store.tasks.length,
         scheduler: schedulerSnapshot(),
         automationRunner: automationRunnerSnapshot(),
+        otlp: otlpExporter.snapshot(),
         security: securitySummary({ host: HOST, config: SECURITY }),
         uptime: process.uptime(),
       });
@@ -1376,10 +1384,11 @@ process.on('unhandledRejection', (err) => console.error('[unhandledRejection]', 
 process.on('uncaughtException', (err) => console.error('[uncaughtException]', err));
 
 let shuttingDown = false;
-function shutdown() {
+async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   stopAutomationRunner();
+  await otlpExporter.flush();
   for (const res of clients) res.end();
   clients.clear();
   server.close(() => {
@@ -1392,8 +1401,12 @@ function shutdown() {
   }, 1500).unref();
 }
 
-process.once('SIGINT', shutdown);
-process.once('SIGTERM', shutdown);
+process.once('SIGINT', () => {
+  shutdown().catch((err) => console.error('[shutdown]', err));
+});
+process.once('SIGTERM', () => {
+  shutdown().catch((err) => console.error('[shutdown]', err));
+});
 process.once('exit', () => store.flush());
 
 // 端口被占用时 Node 只会抛一个裸 EADDRINUSE 并静默退出，容易误判成「启动成功但页面打不开」

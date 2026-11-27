@@ -16,6 +16,7 @@ const S = {
   task: null,
   settings: {},
   scheduler: null,
+  otlp: null,
   automations: [],
   automationRunner: null,
   commands: [],
@@ -535,6 +536,29 @@ function renderIdentity() {
   const tenant = principal.tenantId === "*" ? "all tenants" : principal.tenantId || "default";
   chip.textContent = `${principal.kind} · ${tenant}`;
   chip.title = `${principal.name || principal.id || principal.kind} / ${tenant}`;
+  chip.hidden = false;
+}
+
+function renderOtlpStatus() {
+  const chip = $("#otlpChip");
+  if (!chip) return;
+  const otlp = S.otlp;
+  if (!otlp || !otlp.enabled) {
+    chip.hidden = true;
+    return;
+  }
+  const failed = Number(otlp.failed || 0);
+  const state = failed ? "failed" : otlp.lastExportAt ? "ok" : "waiting";
+  chip.textContent = `OTLP ${state}`;
+  chip.dataset.status = state;
+  chip.title = [
+    otlp.endpoint,
+    `exported ${otlp.exported || 0}`,
+    `failed ${failed}`,
+    otlp.lastError ? `last error: ${otlp.lastError}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
   chip.hidden = false;
 }
 
@@ -2842,6 +2866,7 @@ function renderAll() {
   renderAgents();
   renderTasks();
   renderIdentity();
+  renderOtlpStatus();
   renderTopbar();
   renderMessages();
   renderPlan();
@@ -4427,6 +4452,7 @@ async function boot() {
     S.overview = state.overview || null;
     S.settings = state.settings || {};
     S.scheduler = state.scheduler || null;
+    S.otlp = state.otlp || null;
     S.automations = state.automations || [];
     S.automationRunner = state.automationRunner || null;
     S.commands = state.commands || [];

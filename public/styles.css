@@ -857,6 +857,14 @@ kbd {
   font-size: 9px;
 }
 
+.identity-chip[data-status="ok"] {
+  color: var(--leaf);
+}
+
+.identity-chip[data-status="failed"] {
+  color: var(--orange);
+}
+
 .quit-btn {
   margin-left: auto;
   font-family: var(--f-pixel);

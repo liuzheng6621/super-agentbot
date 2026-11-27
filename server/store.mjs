@@ -2179,6 +2179,18 @@ class Store {
       runId: saved.runId || null,
       event: { ...saved },
     });
+    this.broadcast({
+      type: 'trace.span',
+      taskId,
+      task: {
+        id: task.id,
+        title: task.title,
+        tenantId: task.tenantId,
+        runId: task.runId,
+        trace: task.trace ? { ...task.trace } : null,
+      },
+      span: { ...saved },
+    });
     this.save({ tasks: [taskId] });
     return saved;
   }
