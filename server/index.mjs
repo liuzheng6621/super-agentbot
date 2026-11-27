@@ -1079,7 +1079,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/fs' && method === 'GET') {
       const raw = String(searchParams.get('path') || '').trim();
       if (!raw) {
-        const home = process.env.USERPROFILE || process.env.HOME || ROOT;
+        const home = process.env.USERPROFILE || process.env.HOME || '';
         const dirs = [];
         if (process.platform === 'win32') {
           for (const letter of 'CDEFGH') {
@@ -1089,7 +1089,7 @@ const server = http.createServer(async (req, res) => {
         } else {
           dirs.push({ name: '/', path: '/' });
         }
-        dirs.unshift({ name: '用户目录', path: home });
+        if (home && fs.existsSync(home)) dirs.unshift({ name: '用户目录', path: home });
         dirs.push({ name: 'AgentForge 工作区', path: WORKSPACE_DIR });
         return json(res, 200, { path: '', parent: null, dirs });
       }
