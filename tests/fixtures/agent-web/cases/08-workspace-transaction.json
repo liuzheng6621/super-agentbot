@@ -1,0 +1,52 @@
+{
+  "schema_version": "agent-web/0.1",
+  "id": "agentforge/workspace-transaction",
+  "environment": { "adapter": "agentforge-http", "seed": {}, "clock_policy": "wall" },
+  "task": {
+    "natural_goal": "事务写入多个工作区文件并可读回。",
+    "allowed_capabilities": ["task.create", "workspace.transaction", "workspace.read"],
+    "preconditions": [
+      { "kind": "entity_exists", "selector": { "collection": "tasks" }, "min": 0, "max": 0 }
+    ],
+    "goal_assertions": [
+      { "kind": "entity_exists", "selector": { "collection": "tasks" }, "min": 1 }
+    ]
+  },
+  "reference_trajectory": [
+    {
+      "id": "s1",
+      "capability": "task.create",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": { "goal": "事务验收", "flowMode": "direct", "autoRun": false }
+    },
+    {
+      "id": "s2",
+      "capability": "workspace.transaction",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": {
+        "taskId": "$s1.taskId",
+        "operations": [
+          { "op": "write", "path": "tx/a.txt", "content": "alpha" },
+          { "op": "write", "path": "tx/b.txt", "content": "beta" }
+        ]
+      }
+    },
+    {
+      "id": "s3",
+      "capability": "workspace.read",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": { "taskId": "$s1.taskId", "path": "tx/a.txt" }
+    },
+    {
+      "id": "s4",
+      "capability": "workspace.read",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": { "taskId": "$s1.taskId", "path": "tx/b.txt" }
+    }
+  ],
+  "observability": { "declared_scopes": ["tasks", "events", "exports"] }
+}

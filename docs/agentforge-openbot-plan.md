@@ -132,6 +132,7 @@ AgentForge 继续保留零依赖、零构建、可直接运行的优点，并通
 | Automation durable `await_event` | 持久等待、eventId 匹配、幂等唤醒、取消、完成对账、租约互斥、API 与 UI 可见 | `tests/automation.test.mjs`、`tests/http-security.test.mjs` |
 | 测试入口结构提取 | `server/test-entry.mjs` 已承接测试文件枚举和命令生成，`orchestrator.mjs` 保留兼容导出 | `tests/quality.test.mjs` |
 | 文件夹选择器浏览器验收 | 真实 Edge/CDP 覆盖当前构建；缺少浏览器时显式跳过 | `tests/folder-picker.test.mjs` |
+| agent-web 开发期验收 | 固定提交 `fe543ea`，真实 HTTP 适配器跑通 10 个核心案例；可选、不进入生产依赖 | `tests/agent-web-compat.test.mjs` |
 
 ## 后续 backlog
 

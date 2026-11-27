@@ -1,0 +1,70 @@
+{
+  "schema_version": "agent-web/0.1",
+  "id": "agentforge/quality-pass",
+  "environment": { "adapter": "agentforge-http", "seed": {}, "clock_policy": "wall" },
+  "task": {
+    "natural_goal": "direct 任务执行真实质量门，记录真实命令、退出码和输出。",
+    "allowed_capabilities": ["environment.prepare", "task.create", "task.run", "task.wait"],
+    "preconditions": [
+      { "kind": "entity_exists", "selector": { "collection": "tasks" }, "min": 0, "max": 0 }
+    ],
+    "goal_assertions": [
+      { "kind": "entity_exists", "selector": { "collection": "tasks" }, "min": 1 },
+      {
+        "kind": "field_equals",
+        "selector": { "collection": "tasks", "index": 0 },
+        "path": "quality.status",
+        "value": "passed"
+      },
+      {
+        "kind": "payload",
+        "step": 4,
+        "path": "$.quality.code",
+        "op": "equals",
+        "value": 0
+      },
+      {
+        "kind": "payload",
+        "step": 4,
+        "path": "$.quality.stdout",
+        "op": "contains",
+        "value": "QUALITY_PASS_MARKER"
+      }
+    ]
+  },
+  "reference_trajectory": [
+    {
+      "id": "s1",
+      "capability": "environment.prepare",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": {
+        "files": {
+          "package.json": "{\"private\":true,\"scripts\":{\"test\":\"node -e \\\"console.log('QUALITY_PASS_MARKER'); process.exit(0)\\\"\"}}"
+        }
+      }
+    },
+    {
+      "id": "s2",
+      "capability": "task.create",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": { "goal": "质量门真实通过验收", "flowMode": "direct", "autoRun": false }
+    },
+    {
+      "id": "s3",
+      "capability": "task.run",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": { "taskId": "$s2.taskId", "flowMode": "direct", "speed": 20 }
+    },
+    {
+      "id": "s4",
+      "capability": "task.wait",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": { "taskId": "$s2.taskId", "until": "quality", "timeoutMs": 60000 }
+    }
+  ],
+  "observability": { "declared_scopes": ["tasks", "events", "exports"] }
+}

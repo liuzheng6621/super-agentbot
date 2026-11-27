@@ -1,0 +1,43 @@
+{
+  "schema_version": "agent-web/0.1",
+  "id": "agentforge/export-unicode",
+  "environment": { "adapter": "agentforge-http", "seed": {}, "clock_policy": "wall" },
+  "task": {
+    "natural_goal": "中文、emoji 与特殊字符任务可以导出 Markdown 和 HTML。",
+    "allowed_capabilities": ["task.create", "export.markdown", "export.html"],
+    "preconditions": [
+      { "kind": "entity_exists", "selector": { "collection": "tasks" }, "min": 0, "max": 0 }
+    ],
+    "goal_assertions": [
+      { "kind": "entity_exists", "selector": { "collection": "tasks" }, "min": 1 }
+    ]
+  },
+  "reference_trajectory": [
+    {
+      "id": "s1",
+      "capability": "task.create",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": {
+        "goal": "中文导出验收 🚀 <tag> & \"quoted\" 日本語",
+        "flowMode": "direct",
+        "autoRun": false
+      }
+    },
+    {
+      "id": "s2",
+      "capability": "export.markdown",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": { "taskId": "$s1.taskId" }
+    },
+    {
+      "id": "s3",
+      "capability": "export.html",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": { "taskId": "$s1.taskId" }
+    }
+  ],
+  "observability": { "declared_scopes": ["tasks", "events", "exports"] }
+}

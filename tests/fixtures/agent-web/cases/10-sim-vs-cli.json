@@ -1,0 +1,39 @@
+{
+  "schema_version": "agent-web/0.1",
+  "id": "agentforge/sim-vs-cli",
+  "environment": { "adapter": "agentforge-http", "seed": {}, "clock_policy": "wall" },
+  "task": {
+    "natural_goal": "任务创建后可读取任务详情，模拟与 CLI 共享同一状态契约。",
+    "allowed_capabilities": ["task.create", "task.observe", "health.read"],
+    "preconditions": [
+      { "kind": "entity_exists", "selector": { "collection": "tasks" }, "min": 0, "max": 0 }
+    ],
+    "goal_assertions": [
+      { "kind": "entity_exists", "selector": { "collection": "tasks" }, "min": 1 }
+    ]
+  },
+  "reference_trajectory": [
+    {
+      "id": "s1",
+      "capability": "health.read",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": {}
+    },
+    {
+      "id": "s2",
+      "capability": "task.create",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": { "goal": "sim 与 CLI 状态契约验收", "flowMode": "direct", "autoRun": false }
+    },
+    {
+      "id": "s3",
+      "capability": "task.observe",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": { "taskId": "$s2.taskId" }
+    }
+  ],
+  "observability": { "declared_scopes": ["tasks", "events", "exports"] }
+}

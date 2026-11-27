@@ -440,6 +440,14 @@ node --test tests/**/*.test.{js,mjs,cjs}
 5. 先覆盖只读和可回放场景，再覆盖真实 CLI。
 6. CI 中若需要它，先 vendoring 或发布私有包；当前不要依赖 404 的 npm 包。
 
+已完成开发期接入：
+
+- 适配器：`tests/fixtures/agent-web/agentforge-adapter.mjs`。
+- 案例：`tests/fixtures/agent-web/cases/`，共 10 个核心场景。
+- 自动验收入口：`tests/agent-web-compat.test.mjs`。
+- 固定提交：`fe543ead03c9b200a9bfebf39e86cf5b676edfbc`；commit 不符直接失败，checkout 缺失时显式跳过。
+- 2026-11-27 实测：10/10 `pass`，覆盖质量门通过、返工、超时、停止、重启恢复、工作区事务和 Unicode 导出。
+
 推荐环境变量：
 
 ```text
@@ -506,7 +514,7 @@ AgentForge 应把这些概念映射到任务、工序、工具调用、文件变
 | 8 | 超时浏览器与真实 CLI 冒烟 | P2 | 超时、取消、进程回收可观察 |
 | 9 | 乱码复现与迁移判断 | P2 | 创建、落库、重启、导出均保持原文 |
 | 10 | 文件夹选择器可见性验收 | P2 | 桌面端和浏览器端都可操作 |
-| 11 | 接入 agent-web 验收夹具 | P2 | 10 个核心案例可重复运行 |
+| 11 | 接入 agent-web 验收夹具 | P2 | 已完成：10/10 核心案例可重复运行 |
 | 12 | 拆巨型文件 | P2 | 每步测试全绿，无行为漂移 |
 
 ## 9. 统一验收清单
@@ -519,6 +527,15 @@ node --test tests/*.test.mjs
 ```
 
 已加入 CI：`npm run check:syntax` 与 `npm test` 是仓库统一入口，不在文档里复制散落命令。
+
+agent-web 独立验收（checkout 固定到 `fe543ea`）：
+
+```powershell
+node bin/agent-web.mjs verify E:\SKIl.1\bot\tests\fixtures\agent-web\cases `
+  --adapter=E:\SKIl.1\bot\tests\fixtures\agent-web\agentforge-adapter.mjs --json
+```
+
+仓库内 `tests/agent-web-compat.test.mjs` 会校验固定提交并断言 10 条全部 `pass`；没有 checkout 时显式跳过，不会伪报通过。
 
 ### 9.2 手工冒烟
 
@@ -560,6 +577,5 @@ node --test tests/*.test.mjs
 - Markdown 危险协议的浏览器利用链。
 - 真实 CLI 的完整端到端交付。
 - 多工作区高并发下的磁盘和 Provider 压测。
-- `agent-web` 与 AgentForge 的实际适配器兼容性。
 
 这些项目应在后续提交中逐项变成可重复测试，而不是只更新文字结论。

@@ -1,0 +1,12 @@
+{
+  "agentforge/task-workspace": "pass",
+  "agentforge/direct-delivery": "pass",
+  "agentforge/quality-pass": "pass",
+  "agentforge/quality-rework": "pass",
+  "agentforge/quality-timeout": "pass",
+  "agentforge/stop-cancel": "pass",
+  "agentforge/restart-recovery": "pass",
+  "agentforge/workspace-transaction": "pass",
+  "agentforge/export-unicode": "pass",
+  "agentforge/sim-vs-cli": "pass"
+}

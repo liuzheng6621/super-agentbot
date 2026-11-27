@@ -1,0 +1,87 @@
+{
+  "schema_version": "agent-web/0.1",
+  "id": "agentforge/restart-recovery",
+  "environment": { "adapter": "agentforge-http", "seed": {}, "clock_policy": "wall" },
+  "task": {
+    "natural_goal": "运行中的真实 CLI 任务在服务重启后标记为中断，并留下可审计的恢复记录。",
+    "allowed_capabilities": ["agent.update", "task.create", "task.run", "task.wait", "environment.restart", "task.observe"],
+    "preconditions": [
+      { "kind": "entity_exists", "selector": { "collection": "tasks" }, "min": 0, "max": 0 }
+    ],
+    "goal_assertions": [
+      { "kind": "entity_exists", "selector": { "collection": "tasks" }, "min": 1 },
+      {
+        "kind": "field_equals",
+        "selector": { "collection": "tasks", "index": 0 },
+        "path": "status",
+        "value": "stopped"
+      },
+      {
+        "kind": "field_equals",
+        "selector": { "collection": "tasks", "index": 0 },
+        "path": "recovery.previousStatus",
+        "value": "running"
+      },
+      {
+        "kind": "field_equals",
+        "selector": { "collection": "tasks", "index": 0 },
+        "path": "recovery.status",
+        "value": "interrupted"
+      }
+    ]
+  },
+  "reference_trajectory": [
+    {
+      "id": "s1",
+      "capability": "agent.update",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": {
+        "role": "planner",
+        "patch": {
+          "mode": "cli",
+          "cli": {
+            "command": "__NODE__",
+            "args": ["-e", "setTimeout(() => {}, 15000)"]
+          }
+        }
+      }
+    },
+    {
+      "id": "s2",
+      "capability": "task.create",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": { "goal": "重启恢复验收", "flowMode": "direct", "autoRun": false }
+    },
+    {
+      "id": "s3",
+      "capability": "task.run",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": { "taskId": "$s2.taskId", "flowMode": "direct", "speed": 20 }
+    },
+    {
+      "id": "s4",
+      "capability": "task.wait",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": { "taskId": "$s2.taskId", "until": "running", "timeoutMs": 15000 }
+    },
+    {
+      "id": "s5",
+      "capability": "environment.restart",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": {}
+    },
+    {
+      "id": "s6",
+      "capability": "task.observe",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": { "taskId": "$s2.taskId" }
+    }
+  ],
+  "observability": { "declared_scopes": ["tasks", "events", "exports"] }
+}

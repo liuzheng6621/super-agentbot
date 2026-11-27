@@ -1,0 +1,107 @@
+{
+  "schema_version": "agent-web/0.1",
+  "id": "agentforge/quality-rework",
+  "environment": { "adapter": "agentforge-http", "seed": {}, "clock_policy": "wall" },
+  "task": {
+    "natural_goal": "质量门真实失败时阻断交付，执行一轮返工与复评并保留失败证据。",
+    "allowed_capabilities": ["environment.prepare", "settings.update", "task.create", "task.run", "task.wait"],
+    "preconditions": [
+      { "kind": "entity_exists", "selector": { "collection": "tasks" }, "min": 0, "max": 0 }
+    ],
+    "goal_assertions": [
+      { "kind": "entity_exists", "selector": { "collection": "tasks" }, "min": 1 },
+      {
+        "kind": "field_equals",
+        "selector": { "collection": "tasks", "index": 0 },
+        "path": "quality.status",
+        "value": "failed"
+      },
+      {
+        "kind": "field_equals",
+        "selector": { "collection": "tasks", "index": 0 },
+        "path": "repairRound",
+        "value": 1
+      },
+      {
+        "kind": "field_equals",
+        "selector": { "collection": "tasks", "index": 0 },
+        "path": "status",
+        "value": "needs_attention"
+      },
+      {
+        "kind": "field_equals",
+        "selector": { "collection": "tasks", "index": 0 },
+        "path": "steps.6.id",
+        "value": "fix-1"
+      },
+      {
+        "kind": "field_equals",
+        "selector": { "collection": "tasks", "index": 0 },
+        "path": "steps.7.id",
+        "value": "retest-1"
+      },
+      {
+        "kind": "field_equals",
+        "selector": { "collection": "tasks", "index": 0 },
+        "path": "steps.8.id",
+        "value": "re-review-1"
+      },
+      {
+        "kind": "payload",
+        "step": 5,
+        "path": "$.quality.code",
+        "op": "equals",
+        "value": 1
+      },
+      {
+        "kind": "payload",
+        "step": 5,
+        "path": "$.quality.stderr",
+        "op": "contains",
+        "value": "QUALITY_FAIL_MARKER"
+      }
+    ]
+  },
+  "reference_trajectory": [
+    {
+      "id": "s1",
+      "capability": "environment.prepare",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": {
+        "files": {
+          "package.json": "{\"private\":true,\"scripts\":{\"test\":\"node -e \\\"console.error('QUALITY_FAIL_MARKER'); process.exit(1)\\\"\"}}"
+        }
+      }
+    },
+    {
+      "id": "s2",
+      "capability": "settings.update",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": { "patch": { "maxRepairRounds": 1 } }
+    },
+    {
+      "id": "s3",
+      "capability": "task.create",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": { "goal": "质量门真实失败与返工验收", "flowMode": "direct", "autoRun": false }
+    },
+    {
+      "id": "s4",
+      "capability": "task.run",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": { "taskId": "$s3.taskId", "flowMode": "direct", "speed": 20 }
+    },
+    {
+      "id": "s5",
+      "capability": "task.wait",
+      "as": "owner",
+      "expected_outcome": "applied",
+      "arguments": { "taskId": "$s3.taskId", "until": "terminal", "timeoutMs": 90000 }
+    }
+  ],
+  "observability": { "declared_scopes": ["tasks", "events", "exports"] }
+}

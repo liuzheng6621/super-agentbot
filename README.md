@@ -460,7 +460,7 @@ npm test
 - **CLI 严格策略是原生能力映射，不是内核级代理**：`strict` 只放行 Codex / DSH / Claude 能明确表达的组合，并覆盖参数里的危险开关；`inherit` 仍允许 CLI 使用自身工具。真正的网络代理和跨进程系统调用拦截仍待后续。
 - **网关由 Provider Profile 决定**：项目不依赖 Magpie 或任何内置兼容网关；Provider Profile、密钥引用、CLI 参数模板、自动回退和 CLI 严格策略已落地。
 - **调度粒度仍是任务级**：全局任务并发、Provider 配额和显式 Agent 租约已生效；Provider 配额按绑定该 Provider 的活跃任务计数，不按每次 CLI 调用计数。磁盘配额和任务优先级仍在路线图中。
-- **agent-web 尚未接入**：`E:\SKIl.1\agent-web` 仅作为开发期验收参考，固定提交适配器与 10 个验收案例仍在 [fix-plan.md](docs/fix-plan.md) 第 7 节 backlog 中，不进入生产依赖。
+- **agent-web 是可选开发期验收工具**：`E:\SKIl.1\agent-web` 固定提交 `fe543ea`，由 [tests/agent-web-compat.test.mjs](tests/agent-web-compat.test.mjs) 校验真实 HTTP 适配器与 10 个核心案例；不复制其源码，也不进入生产依赖。
 
 ## Roadmap
 
