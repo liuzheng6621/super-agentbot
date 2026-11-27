@@ -1181,6 +1181,13 @@ const server = http.createServer(async (req, res) => {
         'Content-Disposition': `attachment; filename="${transcript.filename}"`,
         'Cache-Control': 'no-store',
         'Content-Length': Buffer.byteLength(transcript.body),
+        ...(transcript.spill
+          ? {
+              'X-AgentForge-Spill': encodeURIComponent(transcript.spill.locator),
+              'X-AgentForge-Spill-Bytes': String(transcript.spill.bytes),
+              'X-AgentForge-Spill-Sha256': transcript.spill.sha256,
+            }
+          : {}),
       });
       return res.end(transcript.body);
     }

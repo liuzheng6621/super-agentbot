@@ -3,6 +3,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { estimateTokens } from './tokens.mjs';
+import { spillText, spillValue } from './fs.mjs';
 import {
   createMessageEnvelope,
   createPlanSnapshot,
@@ -42,6 +43,9 @@ const MAX_TASK_EVENTS = 800;
 const MAX_FILE_CHANGES = 500;
 const MAX_PLAN_VERSIONS = 40;
 const MAX_SKILL_ACTIVATIONS = 40;
+const MAX_INLINE_EVENT_BYTES = 32 * 1024;
+const MAX_INLINE_MESSAGE_BYTES = 64 * 1024;
+const MAX_INLINE_TRANSCRIPT_BYTES = 512 * 1024;
 const SAVE_WINDOW_MS = 200;
 const MAX_MCP_SERVERS = 32;
 const LOCK_FILE = path.join(DATA_DIR, '.db.lock');
@@ -2207,6 +2211,10 @@ class Store {
   addMessage(taskId, msg, options = {}) {
     const task = this.getTask(taskId);
     if (!task) return null;
+    const inlineText = String(msg?.text || '');
+    const spilled = Buffer.byteLength(inlineText) > MAX_INLINE_MESSAGE_BYTES
+      ? spillText({ taskId, name: `message-${msg?.kind || 'text'}`, content: inlineText })
+      : null;
     const draft = {
       id: randomUUID(),
       createdAt: Date.now(),
@@ -2214,6 +2222,17 @@ class Store {
       text: '',
       kind: 'text',
       ...msg,
+      ...(spilled
+        ? {
+            text: spilled.excerpt,
+            spill: {
+              locator: spilled.locator,
+              bytes: spilled.bytes,
+              sha256: spilled.sha256,
+              retrievalHint: spilled.retrievalHint,
+            },
+          }
+        : {}),
     };
     const message = {
       ...draft,
@@ -2580,6 +2599,15 @@ class Store {
     const task = this.getTask(taskId);
     if (!task) return null;
     if (!Array.isArray(task.events)) task.events = [];
+    const serializedData = JSON.stringify(event.data ?? {});
+    const spilledData = Buffer.byteLength(serializedData) > MAX_INLINE_EVENT_BYTES
+      ? spillValue({
+          taskId,
+          name: `event-${event.type || 'event'}`,
+          value: event.data ?? {},
+          mime: 'application/json',
+        })
+      : null;
     const at = Number(event.at) || Date.now();
     const type = String(event.type || 'event').slice(0, 120);
     const runId = String(event.runId || task.runId || '') || null;
@@ -2609,6 +2637,14 @@ class Store {
     const saved = {
       id: randomUUID(),
       ...event,
+      ...(spilledData
+        ? {
+            data: {
+              preview: spilledData.text,
+              spill: spilledData.spill,
+            },
+          }
+        : {}),
       at,
       runId,
       traceId: String(event.traceId || trace.traceId),
@@ -3017,11 +3053,27 @@ ${quality.stderr ? `<h3>stderr</h3><pre>${h(quality.stderr)}</pre>` : ''}
 export function taskTranscript(task, format = 'markdown') {
   if (!task?.id) throw new Error('任务不存在');
   const selected = String(format || '').toLowerCase() === 'html' ? 'html' : 'markdown';
+  const body = selected === 'html' ? transcriptHtmlBody(task) : transcriptMarkdownBody(task);
+  const spill = Buffer.byteLength(body) > MAX_INLINE_TRANSCRIPT_BYTES
+    ? spillText({
+        taskId: task.id,
+        name: `transcript-${selected}`,
+        content: body,
+      })
+    : null;
   return {
     format: selected,
     contentType: selected === 'html' ? 'text/html; charset=utf-8' : 'text/markdown; charset=utf-8',
     filename: `agentforge-${task.id.slice(0, 8)}.${selected === 'html' ? 'html' : 'md'}`,
-    body: selected === 'html' ? transcriptHtmlBody(task) : transcriptMarkdownBody(task),
+    body,
+    spill: spill
+      ? {
+          locator: spill.locator,
+          bytes: spill.bytes,
+          sha256: spill.sha256,
+          retrievalHint: spill.retrievalHint,
+        }
+      : null,
   };
 }
 

@@ -85,5 +85,98 @@ export function spillText({ taskId, name, content }) {
   const safeName = String(name || 'text').replace(/[^\w.-]+/g, '-').slice(0, 40) || 'text';
   const abs = path.join(spillRoot(), String(taskId || 'misc'), `${safeName}-${sha.slice(0, 8)}.md`);
   if (!fs.existsSync(abs)) writeFileAtomic(abs, text);
-  return { locator: abs, bytes: Buffer.byteLength(text), sha256: sha };
+  const bytes = Buffer.byteLength(text);
+  const excerpt = text.length > 1600 ? `${text.slice(0, 1200)}\n\n…（已截断，共 ${text.length} 字）…\n\n${text.slice(-320)}` : text;
+  return {
+    locator: abs,
+    bytes,
+    sha256: sha,
+    excerpt,
+    retrievalHint: `需要细节时读取该只读路径：${abs}`,
+    preview: excerpt.slice(0, 500),
+  };
+}
+
+/**
+ * Read a spill reference back only after validating its content hash and size.
+ * A locator is a handle, not a promise that the file is still intact.
+ */
+export function readSpillText(ref, { maxBytes = 16 * 1024 * 1024 } = {}) {
+  const locator = String(ref?.locator || ref?.path || '');
+  if (!locator) {
+    const error = new Error('spill 引用缺少路径');
+    error.code = 'SPILL_INVALID';
+    throw error;
+  }
+  const stat = fs.statSync(locator);
+  if (!stat.isFile()) {
+    const error = new Error('spill 引用不是普通文件');
+    error.code = 'SPILL_NOT_FILE';
+    throw error;
+  }
+  if (stat.size > maxBytes) {
+    const error = new Error(`spill 文件超过读取上限：${stat.size} bytes`);
+    error.code = 'SPILL_TOO_LARGE';
+    throw error;
+  }
+  const content = fs.readFileSync(locator, 'utf8');
+  const sha256 = crypto.createHash('sha256').update(content).digest('hex');
+  if (ref?.sha256 && sha256 !== String(ref.sha256)) {
+    const error = new Error('spill 文件摘要不匹配，内容可能已损坏');
+    error.code = 'SPILL_HASH_MISMATCH';
+    throw error;
+  }
+  const bytes = Buffer.byteLength(content);
+  if (ref?.bytes !== undefined && Number(ref.bytes) !== bytes) {
+    const error = new Error('spill 文件大小不匹配，内容可能已损坏');
+    error.code = 'SPILL_SIZE_MISMATCH';
+    throw error;
+  }
+  return { content, bytes, sha256 };
+}
+
+/**
+ * Store arbitrary content as a content-addressed attachment. Used for exports,
+ * binary attachments and any large payload that should not enter db.json.
+ */
+export function spillAttachment({ taskId, name, content, mime = 'application/octet-stream', extension = '' }) {
+  const buffer = Buffer.isBuffer(content) ? content : Buffer.from(String(content ?? ''), 'utf8');
+  const sha = crypto.createHash('sha256').update(buffer).digest('hex');
+  const safeName = String(name || 'attachment').replace(/[^\w.-]+/g, '-').slice(0, 48) || 'attachment';
+  const ext = String(extension || '').replace(/^\.+/, '').replace(/[^\w-]/g, '').slice(0, 12);
+  const suffix = ext ? `.${ext}` : '';
+  const abs = path.join(spillRoot(), String(taskId || 'misc'), `${safeName}-${sha.slice(0, 8)}${suffix}`);
+  if (!fs.existsSync(abs)) writeFileAtomic(abs, buffer);
+  return {
+    locator: abs,
+    bytes: buffer.length,
+    sha256: sha,
+    mime: String(mime || 'application/octet-stream'),
+    retrievalHint: `需要时读取该只读路径：${abs}`,
+  };
+}
+
+/**
+ * Compact a large value into a persisted reference. The returned object keeps
+ * the original shape's metadata but never the unbounded content.
+ */
+export function spillValue({ taskId, name, value, textKey = 'text', mime = 'application/json' }) {
+  const raw = typeof value === 'string' ? value : JSON.stringify(value ?? null, null, 2);
+  const ref = spillAttachment({
+    taskId,
+    name,
+    content: raw,
+    mime,
+    extension: mime.includes('json') ? 'json' : 'txt',
+  });
+  return {
+    [textKey]: String(raw).length > 1600 ? `${String(raw).slice(0, 1200)}\n\n…（已截断，共 ${String(raw).length} 字）…\n\n${String(raw).slice(-320)}` : String(raw),
+    spill: {
+      locator: ref.locator,
+      bytes: ref.bytes,
+      sha256: ref.sha256,
+      mime: ref.mime,
+      retrievalHint: ref.retrievalHint,
+    },
+  };
 }

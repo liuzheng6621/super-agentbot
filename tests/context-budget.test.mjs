@@ -8,7 +8,7 @@ import path from 'node:path';
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-budget-'));
 process.env.AGENTFORGE_DATA_DIR = temp;
 
-const { store } = await import('../server/store.mjs');
+const { store, taskTranscript } = await import('../server/store.mjs');
 const {
   stableBlock,
   volatileBlock,
@@ -17,7 +17,7 @@ const {
   compactTaskContext,
 } = await import('../server/orchestrator.mjs');
 const { estimateTokens } = await import('../server/tokens.mjs');
-const { writeFileAtomic, versionOf, spillText } = await import('../server/fs.mjs');
+const { writeFileAtomic, versionOf, spillText, readSpillText, spillValue } = await import('../server/fs.mjs');
 
 const context = (over = {}) => ({
   goal: '做一个并发安全的待办 API',
@@ -110,6 +110,64 @@ test('超长上游产物落盘成句柄，原文可完整取回', () => {
   // 同样的内容重复落盘不产生第二个文件
   const again = spillText({ taskId: 't-1', name: 'coder-implement', content: text });
   assert.equal(again.locator, ref.locator);
+  assert.ok(ref.excerpt.length < text.length);
+  assert.match(ref.retrievalHint, /只读路径/);
+  assert.equal(readSpillText(ref).content, text, 'spill 引用必须能校验并读回原文');
+});
+
+test('spill 引用会拒绝被篡改或大小不符的内容', () => {
+  const ref = spillText({ taskId: 't-2', name: 'tamper', content: '原始内容' });
+  writeFileAtomic(ref.locator, '被篡改');
+  assert.throws(() => readSpillText(ref), /摘要不匹配/);
+  assert.throws(() => readSpillText({ ...ref, sha256: '', bytes: 1 }), /大小不匹配/);
+});
+
+test('事件、消息、工具输出与导出都能被 spill 引用而不是无限内联', () => {
+  const task = store.createTask({ goal: 'spill 推广样本' });
+  const bigText = '事件细节'.repeat(12000);
+  const bigEventData = { stdout: bigText };
+  const event = store.addTaskEvent(task.id, {
+    type: 'tool.call.end',
+    data: bigEventData,
+  });
+  assert.ok(event.data.spill?.locator, '大事件必须落盘');
+  assert.ok(event.data.preview.length < bigText.length);
+  assert.deepEqual(JSON.parse(readSpillText(event.data.spill).content), bigEventData);
+
+  const message = store.addMessage(task.id, {
+    agentId: 'system',
+    name: 'system',
+    role: 'system',
+    title: 'SYS',
+    kind: 'text',
+    done: true,
+    text: bigText,
+  });
+  assert.ok(message.spill?.locator, '大消息必须落盘');
+  assert.equal(readSpillText(message.spill).content, bigText);
+
+  const value = spillValue({
+    taskId: task.id,
+    name: 'tool-output',
+    value: { stdout: bigText },
+  });
+  assert.ok(value.spill.locator);
+  assert.ok(value.text.length < bigText.length);
+
+  const transcript = store.getTask(task.id);
+  transcript.messages.push({
+    id: 'synthetic-transcript-message',
+    createdAt: Date.now(),
+    name: 'probe',
+    role: 'tester',
+    kind: 'text',
+    done: true,
+    text: '导出内容'.repeat(80000),
+  });
+  const exported = taskTranscript(transcript, 'markdown');
+  assert.ok(exported.spill?.locator, '超长导出必须生成 spill 句柄');
+  assert.match(exported.spill.retrievalHint, /只读路径/);
+  assert.equal(readSpillText(exported.spill).content, exported.body);
 });
 
 test('contextStates 区分未知窗口，压缩保留原文且摘要可审计', () => {
