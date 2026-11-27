@@ -62,6 +62,7 @@ import {
 import {
   automationRunnerSnapshot,
   automationSnapshot,
+  cancelAutomationWait,
   createAutomation,
   getAutomation,
   removeAutomation,
@@ -69,6 +70,8 @@ import {
   startAutomationRunner,
   stopAutomationRunner,
   updateAutomation,
+  waitForAutomationEvent,
+  wakeAutomationEvent,
 } from './automation.mjs';
 import { CommandRunner, CommandError, publicCommand } from './command-runner.mjs';
 import {
@@ -625,7 +628,9 @@ const server = http.createServer(async (req, res) => {
         return json(res, 400, { error: err.message });
       }
     }
-    const automationMatch = pathname.match(/^\/api\/automations\/([\w-]+)(\/run)?$/);
+    const automationMatch = pathname.match(
+      /^\/api\/automations\/([\w-]+)(?:\/(run|wait|events))?$/,
+    );
     if (automationMatch) {
       const automationId = automationMatch[1];
       const automation = getAutomation(automationId);
@@ -636,7 +641,7 @@ const server = http.createServer(async (req, res) => {
       ) {
         return json(res, 404, { error: '自动化不存在' });
       }
-      if (automationMatch[2] && method === 'POST') {
+      if (automationMatch[2] === 'run' && method === 'POST') {
         const body = await readBody(req).catch(() => ({}));
         const clientMessageId =
           typeof body.clientMessageId === 'string' ? body.clientMessageId.trim() : '';
@@ -644,6 +649,24 @@ const server = http.createServer(async (req, res) => {
           return json(res, 400, { error: 'clientMessageId 不能超过 200 个字符' });
         }
         const result = runAutomationNow(automationId, { clientMessageId });
+        return json(res, result.ok ? 202 : 409, result);
+      }
+      if (automationMatch[2] === 'wait' && method === 'POST') {
+        const body = await readBody(req).catch(() => ({}));
+        const result = waitForAutomationEvent(automationId, {
+          eventId: body.eventId,
+        });
+        return json(res, result.ok ? 200 : 409, result);
+      }
+      if (automationMatch[2] === 'wait' && method === 'DELETE') {
+        const result = cancelAutomationWait(automationId);
+        return json(res, result.ok ? 200 : 409, result);
+      }
+      if (automationMatch[2] === 'events' && method === 'POST') {
+        const body = await readBody(req).catch(() => ({}));
+        const result = wakeAutomationEvent(automationId, {
+          eventId: body.eventId,
+        });
         return json(res, result.ok ? 202 : 409, result);
       }
       if (method === 'PATCH') {

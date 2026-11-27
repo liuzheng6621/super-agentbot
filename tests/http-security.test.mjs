@@ -105,6 +105,52 @@ test('HTTP API enforces token, CORS and persisted automation routes end to end',
     assert.equal(listedBody.automations.length, 1);
     assert.equal(listedBody.automations[0].enabled, false);
 
+    const automationId = createdBody.automation.id;
+    const waitResponse = await fetch(`${baseUrl}/api/automations/${automationId}/wait`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ eventId: 'http-event-1' }),
+    });
+    assert.equal(waitResponse.status, 200);
+    assert.equal((await waitResponse.json()).eventWait.status, 'waiting');
+
+    const mismatch = await fetch(`${baseUrl}/api/automations/${automationId}/events`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ eventId: 'http-event-other' }),
+    });
+    assert.equal(mismatch.status, 409);
+
+    const wakeResponse = await fetch(`${baseUrl}/api/automations/${automationId}/events`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ eventId: 'http-event-1' }),
+    });
+    assert.equal(wakeResponse.status, 202);
+    const wakeBody = await wakeResponse.json();
+    assert.equal(wakeBody.eventWait.status, 'woken');
+    assert.ok(wakeBody.task.id);
+
+    const replayWake = await fetch(`${baseUrl}/api/automations/${automationId}/events`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ eventId: 'http-event-1' }),
+    });
+    assert.equal(replayWake.status, 202);
+    assert.equal((await replayWake.json()).duplicate, true);
+
     const streamController = new AbortController();
     const stream = await fetch(`${baseUrl}/api/stream?token=${encodeURIComponent(TOKEN)}`, {
       signal: streamController.signal,
@@ -122,6 +168,8 @@ test('HTTP API enforces token, CORS and persisted automation routes end to end',
 
     const saved = JSON.parse(fs.readFileSync(path.join(temp, 'db.json'), 'utf8'));
     assert.equal(saved.settings.automations[0].name, 'integration automation');
+    assert.equal(saved.settings.automations[0].eventWait.status, 'woken');
+    assert.equal(saved.settings.automations[0].eventWait.eventId, 'http-event-1');
   } catch (err) {
     throw new Error(`${err.message}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
   } finally {

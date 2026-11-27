@@ -4022,6 +4022,10 @@ kbd {
   overflow-wrap: anywhere;
 }
 
+.automation-row-main .automation-event-wait {
+  color: var(--warn, #f0b84b);
+}
+
 .automation-row-state {
   align-self: start;
   padding: 3px 6px;

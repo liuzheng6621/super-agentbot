@@ -61,12 +61,42 @@ function normalizeHistory(value) {
     .map((item) => ({
       id: String(item.id || randomUUID()),
       taskId: String(item.taskId || ''),
-      trigger: ['schedule', 'manual', 'retry'].includes(item.trigger) ? item.trigger : 'schedule',
+      trigger: ['schedule', 'manual', 'retry', 'event'].includes(item.trigger)
+        ? item.trigger
+        : 'schedule',
       status: String(item.status || 'scheduled'),
       startedAt: Number(item.startedAt) || null,
       finishedAt: Number(item.finishedAt) || null,
       error: cleanText(item.error, 1000),
+      eventId: cleanText(item.eventId, 200),
     }));
+}
+
+export function normalizeEventWait(value = null, previous = null, now = Date.now()) {
+  const source = value && typeof value === 'object' ? value : previous;
+  if (!source || typeof source !== 'object') return null;
+  const status = ['waiting', 'woken', 'cancelled', 'completed'].includes(source.status)
+    ? source.status
+    : 'waiting';
+  const processedEventIds = [
+    ...new Set(
+      (Array.isArray(source.processedEventIds) ? source.processedEventIds : [])
+        .map((id) => cleanText(id, 200))
+        .filter(Boolean),
+    ),
+  ].slice(-50);
+  return {
+    status,
+    eventId: cleanText(source.eventId, 200),
+    requestedAt: Number(source.requestedAt) || null,
+    wokenAt: Number(source.wokenAt) || null,
+    cancelledAt: Number(source.cancelledAt) || null,
+    completedAt: Number(source.completedAt) || null,
+    taskId: cleanText(source.taskId, 80),
+    runKey: cleanText(source.runKey, 200),
+    processedEventIds,
+    updatedAt: Number(source.updatedAt) || now,
+  };
 }
 
 export function normalizeAutomation(input = {}, existing = null, now = Date.now()) {
@@ -125,6 +155,11 @@ export function normalizeAutomation(input = {}, existing = null, now = Date.now(
       Number.MAX_SAFE_INTEGER,
       0,
     ),
+    eventWait: normalizeEventWait(
+      input.eventWait === undefined ? previous.eventWait : input.eventWait,
+      previous.eventWait,
+      now,
+    ),
     history: normalizeHistory(input.history ?? previous.history),
     createdAt: Number(previous.createdAt || input.createdAt) || now,
     updatedAt: now,
@@ -156,6 +191,13 @@ function historyEntry(automation, taskId, trigger, status, now, extra = {}) {
   return entry;
 }
 
+function eventHistoryEntry(automation, taskId, status, now, extra = {}) {
+  return historyEntry(automation, taskId, 'event', status, now, {
+    eventId: automation.eventWait?.eventId || '',
+    ...extra,
+  });
+}
+
 export function listAutomations() {
   return automationListInternal();
 }
@@ -168,6 +210,7 @@ export function automationSummary(automation) {
   if (!automation) return null;
   return {
     ...automation,
+    eventWait: automation.eventWait ? { ...automation.eventWait } : null,
     scheduleText:
       automation.schedule?.kind === 'daily'
         ? `每天 ${automation.schedule.time}`
@@ -273,6 +316,7 @@ function scheduleAutomation(automation, trigger, now, dependencies = {}) {
   const create = dependencies.createTask || ((input) => store.createTask(input));
   const schedule = dependencies.scheduleTask || scheduleTask;
   const clientMessageId = String(dependencies.clientMessageId || '').trim().slice(0, 200);
+  const eventId = String(dependencies.eventId || '').trim().slice(0, 200);
   const idempotencyScope = `automation:${automation.id}`;
   const tenantScope = String(automation.tenantId || 'default').trim().slice(0, 80) || 'default';
   if (clientMessageId) {
@@ -305,7 +349,7 @@ function scheduleAutomation(automation, trigger, now, dependencies = {}) {
       workspace: automation.workspace,
       isolation: automation.isolation,
       debate: automation.flowMode,
-      clientMessageId,
+      clientMessageId: clientMessageId || (eventId ? `event:${eventId}` : ''),
       clientMessageScope: idempotencyScope,
       tenantId: automation.tenantId,
       ownerId: automation.ownerId,
@@ -333,14 +377,20 @@ function scheduleAutomation(automation, trigger, now, dependencies = {}) {
   automation.lastError = '';
   automation.retryDueAt = null;
   automation.runCount = (automation.runCount || 0) + 1;
-  automation.nextRunAt = nextRunFor(automation.schedule, now);
-  historyEntry(automation, task.id, trigger, 'scheduled', now);
+  if (trigger === 'event') {
+    automation.nextRunAt = nextRunFor(automation.schedule, now);
+    eventHistoryEntry(automation, task.id, 'scheduled', now);
+  } else {
+    automation.nextRunAt = nextRunFor(automation.schedule, now);
+    historyEntry(automation, task.id, trigger, 'scheduled', now);
+  }
   store.addTaskEvent(task.id, {
     type: 'automation.scheduled',
     data: {
       automationId: automation.id,
       automationName: automation.name,
       trigger,
+      eventId: eventId || null,
     },
   });
   automation.updatedAt = now;
@@ -352,6 +402,149 @@ export function runAutomationNow(id, dependencies = {}) {
   const automation = getAutomation(id);
   if (!automation) return { ok: false, reason: '自动化不存在' };
   return scheduleAutomation(automation, 'manual', Date.now(), dependencies);
+}
+
+export function waitForAutomationEvent(id, { eventId = '', now = Date.now() } = {}) {
+  const automation = getAutomation(id);
+  if (!automation) return { ok: false, reason: '自动化不存在' };
+  if (automation.eventWait && ['waiting', 'woken'].includes(automation.eventWait.status)) {
+    return {
+      ok: false,
+      reason: '自动化已有未完成的事件等待',
+      eventWait: automation.eventWait,
+    };
+  }
+  automation.eventWait = normalizeEventWait(
+    {
+      status: 'waiting',
+      eventId: cleanText(eventId, 200),
+      requestedAt: now,
+      wokenAt: null,
+      cancelledAt: null,
+      completedAt: null,
+      taskId: '',
+      runKey: '',
+      processedEventIds: automation.eventWait?.processedEventIds || [],
+      updatedAt: now,
+    },
+    null,
+    now,
+  );
+  automation.lastStatus = 'event-waiting';
+  automation.lastError = '';
+  automation.updatedAt = now;
+  saveAutomations();
+  return { ok: true, eventWait: automation.eventWait };
+}
+
+export function cancelAutomationWait(id, { now = Date.now() } = {}) {
+  const automation = getAutomation(id);
+  if (!automation) return { ok: false, reason: '自动化不存在' };
+  if (!automation.eventWait || !['waiting', 'woken'].includes(automation.eventWait.status)) {
+    return { ok: false, reason: '当前没有可取消的事件等待' };
+  }
+  automation.eventWait = normalizeEventWait(
+    {
+      ...automation.eventWait,
+      status: 'cancelled',
+      cancelledAt: now,
+      updatedAt: now,
+    },
+    automation.eventWait,
+    now,
+  );
+  automation.lastStatus = automation.enabled ? 'idle' : 'paused';
+  automation.lastError = '';
+  automation.updatedAt = now;
+  saveAutomations();
+  return { ok: true, eventWait: automation.eventWait };
+}
+
+export function wakeAutomationEvent(
+  id,
+  { eventId = '', now = Date.now(), dependencies = {} } = {},
+) {
+  const automation = getAutomation(id);
+  if (!automation) return { ok: false, reason: '自动化不存在' };
+  const normalizedEventId = cleanText(eventId, 200);
+  if (!normalizedEventId) return { ok: false, reason: '缺少 eventId' };
+  const wait = automation.eventWait;
+  if (!wait) return { ok: false, reason: '自动化未进入事件等待' };
+  if (wait.status === 'cancelled') return { ok: false, reason: '事件等待已取消' };
+  if (wait.status === 'completed') return { ok: false, reason: '事件等待已完成' };
+  if (
+    wait.status === 'waiting' &&
+    wait.eventId &&
+    wait.eventId !== normalizedEventId
+  ) {
+    return { ok: false, reason: 'eventId 与等待中的事件不匹配' };
+  }
+  if (wait.processedEventIds?.includes(normalizedEventId)) {
+    return { ok: true, duplicate: true, task: wait.taskId ? store.getTask(wait.taskId) : null };
+  }
+  if (wait.status === 'woken') {
+    return {
+      ok: true,
+      duplicate: true,
+      task: wait.taskId ? store.getTask(wait.taskId) : null,
+    };
+  }
+
+  const runKey = `event:${normalizedEventId}`;
+  const claim = store.claimAutomation(automation.id, { runKey });
+  if (!claim) return { ok: false, reason: '自动化已被其他实例处理' };
+  try {
+    const latest = getAutomation(id);
+    if (!latest) return { ok: false, reason: '自动化不存在' };
+    const latestWait = latest.eventWait;
+    if (!latestWait) return { ok: false, reason: '自动化未进入事件等待' };
+    if (latestWait.status === 'cancelled') return { ok: false, reason: '事件等待已取消' };
+    if (latestWait.status === 'completed') return { ok: false, reason: '事件等待已完成' };
+    if (latestWait.processedEventIds?.includes(normalizedEventId)) {
+      return {
+        ok: true,
+        duplicate: true,
+        task: latestWait.taskId ? store.getTask(latestWait.taskId) : null,
+      };
+    }
+    if (latestWait.status === 'woken') {
+      return {
+        ok: true,
+        duplicate: true,
+        task: latestWait.taskId ? store.getTask(latestWait.taskId) : null,
+      };
+    }
+    if (latestWait.eventId && latestWait.eventId !== normalizedEventId) {
+      return { ok: false, reason: 'eventId 与等待中的事件不匹配' };
+    }
+    const result = scheduleAutomation(automation, 'event', now, {
+      ...dependencies,
+      eventId: normalizedEventId,
+    });
+    if (!result.ok) {
+      store.releaseAutomationClaim(automation.id);
+      return result;
+    }
+    automation.eventWait = normalizeEventWait(
+      {
+        ...wait,
+        status: 'woken',
+        eventId: normalizedEventId,
+        wokenAt: now,
+        taskId: result.task.id,
+        runKey,
+        processedEventIds: [...(wait.processedEventIds || []), normalizedEventId],
+        updatedAt: now,
+      },
+      wait,
+      now,
+    );
+    automation.updatedAt = now;
+    saveAutomations();
+    return { ...result, eventWait: automation.eventWait };
+  } finally {
+    store.releaseAutomationClaim(automation.id);
+  }
 }
 
 function updateHistory(automation, taskId, patch) {
@@ -378,6 +571,38 @@ function updateHistory(automation, taskId, patch) {
 export function reconcileAutomationRuns({ now = Date.now() } = {}) {
   let changed = false;
   for (const automation of automationListInternal()) {
+    const eventWait = automation.eventWait;
+    if (
+      eventWait?.status === 'woken' &&
+      eventWait.taskId &&
+      eventWait.completedAt == null
+    ) {
+      const task = store.getTask(eventWait.taskId);
+      if (task && taskTerminalStatus(task.status)) {
+        const finishedAt = task.finishedAt || task.endedAt || now;
+        eventWait.status = 'completed';
+        eventWait.completedAt = finishedAt;
+        eventWait.updatedAt = now;
+        if (task.status === 'done') {
+          eventHistoryEntry(automation, task.id, 'done', now, {
+            startedAt: eventWait.wokenAt,
+            finishedAt,
+          });
+        } else {
+          const error =
+            task.error?.message ||
+            task.quality?.reason ||
+            (task.status === 'stopped' ? '任务已停止' : `任务结束状态：${task.status}`);
+          eventHistoryEntry(automation, task.id, 'failed', now, {
+            startedAt: eventWait.wokenAt,
+            finishedAt,
+            error: cleanText(error, 1000),
+          });
+        }
+        automation.updatedAt = now;
+        changed = true;
+      }
+    }
     if (!automation.lastTaskId || !['scheduled', 'running', 'waiting'].includes(automation.lastStatus)) {
       continue;
     }
@@ -438,6 +663,12 @@ export async function tickAutomations({ now = Date.now(), dependencies = {} } = 
     const started = [];
     for (const automation of automationListInternal()) {
       if (!automation.enabled) continue;
+      if (
+        automation.eventWait &&
+        ['waiting', 'woken'].includes(automation.eventWait.status)
+      ) {
+        continue;
+      }
       if (automation.lastTaskId && isScheduled(automation.lastTaskId)) continue;
       if (automation.retryDueAt && automation.retryDueAt <= now) {
         const claim = store.claimAutomation(automation.id, {

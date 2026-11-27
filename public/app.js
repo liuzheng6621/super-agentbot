@@ -2756,6 +2756,8 @@ const AUTOMATION_STATUS_LABEL = {
   scheduled: "已排队",
   running: "运行中",
   waiting: "等待上一轮",
+  "event-waiting": "等待事件",
+  woken: "事件已唤醒",
   done: "已完成",
   failed: "失败",
   "retry-waiting": "等待重试",
@@ -2775,6 +2777,19 @@ function fmtDateTime(ts) {
 }
 
 function automationNextRunText(automation) {
+  const wait = automation.eventWait;
+  if (wait?.status === "waiting") {
+    return `等待事件${wait.eventId ? ` ${wait.eventId}` : ""} · ${fmtDateTime(wait.requestedAt)}`;
+  }
+  if (wait?.status === "woken") {
+    return `事件已唤醒 ${wait.eventId || ""} · ${fmtDateTime(wait.wokenAt)}`;
+  }
+  if (wait?.status === "cancelled") {
+    return `事件等待已取消 · ${fmtDateTime(wait.cancelledAt)}`;
+  }
+  if (wait?.status === "completed") {
+    return `事件已完成 · ${fmtDateTime(wait.completedAt)}`;
+  }
   if (!automation.enabled) return "已暂停自动触发";
   if (automation.retryDueAt) return `重试 ${fmtDateTime(automation.retryDueAt)}`;
   if (automation.nextRunAt) return `下次 ${fmtDateTime(automation.nextRunAt)}`;
@@ -2816,6 +2831,19 @@ function renderAutomations() {
           <p>${escapeHtml(schedule)} · ${escapeHtml(automationNextRunText(automation))}${
             automation.lastError ? ` · ${escapeHtml(automation.lastError)}` : ""
           }</p>
+          ${
+            automation.eventWait
+              ? `<p class="automation-event-wait" data-wait-status="${escapeHtml(
+                  automation.eventWait.status,
+                )}">事件等待：${escapeHtml(
+                  AUTOMATION_STATUS_LABEL[
+                    automation.eventWait.status === "waiting"
+                      ? "event-waiting"
+                      : automation.eventWait.status
+                  ] || automation.eventWait.status,
+                )}${automation.eventWait.eventId ? ` · ${escapeHtml(automation.eventWait.eventId)}` : ""}</p>`
+              : ""
+          }
         </div>
         <span class="automation-row-state" data-status="${escapeHtml(status)}">${escapeHtml(
           AUTOMATION_STATUS_LABEL[status] || status,
@@ -2823,6 +2851,13 @@ function renderAutomations() {
         <div class="automation-row-actions">
           <button type="button" class="btn btn-ghost sm" data-automation-action="edit">编辑</button>
           <button type="button" class="btn btn-ghost sm" data-automation-action="run">立即运行</button>
+          <button type="button" class="btn btn-ghost sm" data-automation-action="wait">等待事件</button>
+          ${
+            automation.eventWait &&
+            ["waiting", "woken"].includes(automation.eventWait.status)
+              ? '<button type="button" class="btn btn-ghost sm" data-automation-action="cancel-wait">取消等待</button>'
+              : ""
+          }
           <button type="button" class="btn btn-ghost sm" data-automation-action="toggle">${
             automation.enabled ? "暂停" : "启用"
           }</button>
@@ -2935,6 +2970,31 @@ async function runAutomationFromUi(id) {
     await api(`/api/automations/${encodeURIComponent(id)}/run`, { method: "POST", body: {} });
     await refreshAutomations();
     toast("自动化任务已进入队列", "ok");
+  } catch (err) {
+    toast(err.message, "err");
+  }
+}
+
+async function waitAutomationFromUi(id) {
+  const eventId = window.prompt("eventId（可空，表示等待任意下一个事件）", "");
+  if (eventId === null) return;
+  try {
+    await api(`/api/automations/${encodeURIComponent(id)}/wait`, {
+      method: "POST",
+      body: { eventId: eventId.trim() },
+    });
+    await refreshAutomations();
+    toast("Automation 已进入事件等待，重启后仍会保留", "ok");
+  } catch (err) {
+    toast(err.message, "err");
+  }
+}
+
+async function cancelAutomationWaitFromUi(id) {
+  try {
+    await api(`/api/automations/${encodeURIComponent(id)}/wait`, { method: "DELETE" });
+    await refreshAutomations();
+    toast("事件等待已取消", "ok");
   } catch (err) {
     toast(err.message, "err");
   }
@@ -4584,6 +4644,8 @@ function bind() {
     const action = button.dataset.automationAction;
     if (action === "edit") fillAutomationForm(automation);
     else if (action === "run") runAutomationFromUi(automation.id);
+    else if (action === "wait") waitAutomationFromUi(automation.id);
+    else if (action === "cancel-wait") cancelAutomationWaitFromUi(automation.id);
     else if (action === "toggle") toggleAutomationFromUi(automation.id, !automation.enabled);
     else if (action === "delete") deleteAutomationFromUi(automation.id);
   });

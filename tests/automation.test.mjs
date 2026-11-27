@@ -12,12 +12,15 @@ const {
   automationSnapshot,
   createAutomation,
   getAutomation,
+  cancelAutomationWait,
   normalizeSchedule,
   reconcileAutomationRuns,
   removeAutomation,
   runAutomationNow,
   tickAutomations,
   updateAutomation,
+  waitForAutomationEvent,
+  wakeAutomationEvent,
 } = await import('../server/automation.mjs');
 
 function clearAutomations() {
@@ -274,6 +277,151 @@ test('idempotency expires after the 24 hour window', () => {
   );
   assert.equal(inside.id, first.id);
   assert.equal(expired, null);
+});
+
+test('durable await_event survives reload and deduplicates a wake event', () => {
+  clearAutomations();
+  const automation = createAutomation({
+    name: 'Durable event wait',
+    goal: 'Handle one external event',
+    enabled: false,
+    schedule: { kind: 'interval', everyMinutes: 60 },
+  });
+  const waiting = waitForAutomationEvent(automation.id, {
+    eventId: 'evt-1',
+    now: 1000,
+  });
+  assert.equal(waiting.ok, true);
+  assert.equal(getAutomation(automation.id).eventWait.status, 'waiting');
+  assert.equal(getAutomation(automation.id).eventWait.eventId, 'evt-1');
+
+  store.flush();
+  const saved = JSON.parse(fs.readFileSync(path.join(temp, 'db.json'), 'utf8'));
+  assert.equal(saved.settings.automations[0].eventWait.status, 'waiting');
+
+  let creates = 0;
+  let schedules = 0;
+  const dependencies = {
+    createTask(input) {
+      creates += 1;
+      return store.createTask(input);
+    },
+    scheduleTask() {
+      schedules += 1;
+      return { accepted: true };
+    },
+  };
+  const first = wakeAutomationEvent(automation.id, {
+    eventId: 'evt-1',
+    now: 2000,
+    dependencies,
+  });
+  const replay = wakeAutomationEvent(automation.id, {
+    eventId: 'evt-1',
+    now: 2100,
+    dependencies,
+  });
+  assert.equal(first.ok, true);
+  assert.equal(replay.duplicate, true);
+  assert.equal(creates, 1);
+  assert.equal(schedules, 1);
+  assert.equal(getAutomation(automation.id).eventWait.status, 'woken');
+  assert.equal(getAutomation(automation.id).history.at(-1).trigger, 'event');
+  assert.equal(getAutomation(automation.id).eventWait.runKey, 'event:evt-1');
+});
+
+test('cancelled waits ignore later events and waiting automations do not schedule periodically', async () => {
+  clearAutomations();
+  const automation = createAutomation({
+    name: 'Cancelled event wait',
+    goal: 'Must not run after cancellation',
+    schedule: { kind: 'interval', everyMinutes: 1 },
+  });
+  automation.nextRunAt = 0;
+  waitForAutomationEvent(automation.id, { eventId: 'evt-cancel', now: 1000 });
+  const cancelled = cancelAutomationWait(automation.id, { now: 1100 });
+  assert.equal(cancelled.ok, true);
+  assert.equal(getAutomation(automation.id).eventWait.status, 'cancelled');
+
+  const tick = await tickAutomations({
+    now: 1200,
+    dependencies: {
+      createTask() {
+        throw new Error('cancelled wait must not create a task');
+      },
+      scheduleTask() {
+        throw new Error('cancelled wait must not schedule a task');
+      },
+    },
+  });
+  assert.equal(tick.started.length, 0);
+  const wake = wakeAutomationEvent(automation.id, {
+    eventId: 'evt-cancel',
+    now: 1300,
+    dependencies: {
+      createTask() {
+        throw new Error('cancelled event must not create a task');
+      },
+      scheduleTask() {
+        throw new Error('cancelled event must not schedule a task');
+      },
+    },
+  });
+  assert.equal(wake.ok, false);
+  assert.match(wake.reason, /取消/);
+});
+
+test('woken event task completion reconciles the durable wait to completed', () => {
+  clearAutomations();
+  const automation = createAutomation({
+    name: 'Event completion',
+    goal: 'Complete an event run',
+    enabled: false,
+    schedule: { kind: 'interval', everyMinutes: 60 },
+  });
+  waitForAutomationEvent(automation.id, { eventId: 'evt-complete', now: 1000 });
+  const result = wakeAutomationEvent(automation.id, {
+    eventId: 'evt-complete',
+    now: 2000,
+    dependencies: {
+      createTask(input) {
+        return store.createTask(input);
+      },
+      scheduleTask() {
+        return { accepted: true };
+      },
+    },
+  });
+  assert.equal(result.ok, true);
+  store.updateTask(result.task.id, {
+    status: 'done',
+    finishedAt: 3000,
+  });
+  assert.equal(reconcileAutomationRuns({ now: 3100 }), true);
+  assert.equal(getAutomation(automation.id).eventWait.status, 'completed');
+  assert.equal(getAutomation(automation.id).eventWait.completedAt, 3000);
+});
+
+test('event wait rejects mismatched events and remains visible after reload', () => {
+  clearAutomations();
+  const automation = createAutomation({
+    name: 'Visible event wait',
+    goal: 'Expose event wait state',
+    enabled: false,
+    schedule: { kind: 'interval', everyMinutes: 60 },
+  });
+  waitForAutomationEvent(automation.id, { eventId: 'expected-event', now: 1000 });
+  const mismatch = wakeAutomationEvent(automation.id, {
+    eventId: 'other-event',
+    now: 1100,
+  });
+  assert.equal(mismatch.ok, false);
+  assert.match(mismatch.reason, /不匹配/);
+  store.flush();
+
+  const summary = automationSnapshot().find((item) => item.id === automation.id);
+  assert.equal(summary.eventWait.status, 'waiting');
+  assert.equal(summary.eventWait.eventId, 'expected-event');
 });
 
 test('task creation checks the persisted idempotency key before allocating a workspace', () => {
