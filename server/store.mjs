@@ -5,6 +5,11 @@ import { spawnSync } from 'node:child_process';
 import { estimateTokens } from './tokens.mjs';
 import { spillText, spillValue } from './fs.mjs';
 import {
+  defaultTimeouts,
+  normalizeTimeoutOverrides,
+  resolveTimeouts,
+} from './timeouts.mjs';
+import {
   createMessageEnvelope,
   createPlanSnapshot,
   ensureMessageEnvelope,
@@ -556,6 +561,7 @@ function emptyDb() {
       debateParticipants: 5,
       debatePoolSeats: 1,
       debateConcurrency: 2,
+      timeouts: defaultTimeouts(),
       automations: [],
       mcpServers: [],
       approvals: [],
@@ -797,6 +803,7 @@ class Store {
             providerCapabilitiesMigrated: true,
           },
         };
+        this.db.settings.timeouts = resolveTimeouts({ settings: this.db.settings });
         for (const task of this.db.tasks) {
           this._baseTaskHashes.set(task.id, cryptoHash(JSON.stringify(task)));
         }
@@ -866,6 +873,7 @@ class Store {
             recovered = true;
           }
           a.workspacePolicy = workspacePolicy;
+          a.timeouts = normalizeTimeoutOverrides(a.timeouts);
         }
         for (const t of this.db.tasks) {
           if (!t.tenantId) {
@@ -1559,6 +1567,7 @@ class Store {
       'maxConcurrency',
       'workspacePolicy',
       'executionPolicy',
+      'timeouts',
     ].filter((field) => changedFields.has(field));
     for (const agent of this.db.agents) {
       if (agent.profileId !== id) continue;
@@ -1731,6 +1740,7 @@ class Store {
       model: normalizeAgentModel(effectivePatch.model),
       maxConcurrency: normalizeAgentConcurrency(effectivePatch.maxConcurrency),
       workspacePolicy: normalizeAgentWorkspacePolicy(effectivePatch.workspacePolicy),
+      timeouts: normalizeTimeoutOverrides(effectivePatch.timeouts),
       builtin: false,
       health: patch.health || null,
       // 同一角色默认只有一个主执行席位，额外接入的 CLI 进入工具池。
@@ -1805,6 +1815,9 @@ class Store {
         patch.workspacePolicy,
         agent.workspacePolicy,
       );
+    }
+    if (patch.timeouts !== undefined) {
+      agent.timeouts = normalizeTimeoutOverrides(patch.timeouts);
     }
     // 先把旧 cli 存下来再合并，否则 Object.assign 已经把 agent.cli 覆盖成新对象了
     if (patch.cli) agent.cli = { ...prevCli, ...patch.cli };
@@ -2139,6 +2152,12 @@ class Store {
       s.maxAutoReplans = clamp(patch.maxAutoReplans, 0, 1, s.maxAutoReplans);
     if (patch.maxStepAttempts !== undefined)
       s.maxStepAttempts = clamp(patch.maxStepAttempts, 1, 3, s.maxStepAttempts);
+    if (patch.timeouts !== undefined) {
+      s.timeouts = {
+        ...defaultTimeouts(),
+        ...normalizeTimeoutOverrides(patch.timeouts),
+      };
+    }
     if (patch.simSpeed !== undefined)
       s.simSpeed = clamp(patch.simSpeed, 1, 20, s.simSpeed);
     if (patch.defaultMode !== undefined && ['auto', 'cli', 'sim'].includes(patch.defaultMode))

@@ -1,8 +1,8 @@
 import fs from 'node:fs';
 import os from 'node:os';
-import path from 'node:path';
 import { store, ROLE_ORDER } from './store.mjs';
 import { probeClis, spawnCli } from './adapters.mjs';
+import { commandBaseName } from './command-key.mjs';
 
 /** 体检只要求最短回复，避免为了探活消耗一整轮模型输出 */
 export const HEALTH_PROMPT = 'Reply with exactly: OK';
@@ -29,10 +29,7 @@ const BUILTIN_NAMES = new Set(['Nova', 'Forge', 'Kilo', 'Probe', 'Lens']);
 
 /** 命令名归一化：绝对路径 / .cmd / .exe 都折成同一个 key，避免同一工具重复占位 */
 export function baseName(cmd) {
-  return path
-    .basename(String(cmd || ''))
-    .replace(/\.(cmd|bat|exe|ps1)$/i, '')
-    .toLowerCase();
+  return commandBaseName(cmd);
 }
 
 /** 内置演示席位：新数据带 builtin 标记，老数据靠虚构名字兜底 */

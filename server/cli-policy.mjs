@@ -1,4 +1,4 @@
-import path from 'node:path';
+import { commandKey } from './command-key.mjs';
 
 export const EXECUTION_POLICY_IDS = Object.freeze(['inherit', 'strict']);
 
@@ -89,12 +89,7 @@ export function normalizeExecutionPolicy(value) {
   return EXECUTION_POLICY_IDS.includes(id) ? id : 'inherit';
 }
 
-export function commandKey(command) {
-  return path
-    .basename(String(command || '').trim().replace(/^["']|["']$/g, ''))
-    .replace(/\.(exe|cmd|bat|ps1)$/i, '')
-    .toLowerCase();
-}
+export { commandKey };
 
 export function toolCapabilities(tools = []) {
   const list = Array.isArray(tools)

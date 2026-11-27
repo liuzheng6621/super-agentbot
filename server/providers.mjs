@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import path from 'node:path';
+import { normalizeTimeoutOverrides } from './timeouts.mjs';
+import { commandKey } from './command-key.mjs';
 
 export const DEFAULT_PROVIDER_ID = 'local-default';
 export const PROVIDER_KINDS = ['cli-native', 'openai-compatible'];
@@ -54,11 +55,7 @@ function maskEnv(env) {
 }
 
 export function cliCommandKey(command) {
-  const base = path
-    .basename(String(command || '').trim().replace(/^["']|["']$/g, ''))
-    .replace(/\.(exe|cmd|bat|ps1)$/i, '')
-    .toLowerCase();
-  return /^[a-z0-9][a-z0-9_-]{0,63}$/.test(base) ? base : '';
+  return commandKey(command);
 }
 
 function cleanCliBindings(value, fallback = {}) {
@@ -123,6 +120,7 @@ export function normalizeProvider(input = {}, fallback = {}) {
     env: preserveMaskedEnv(source.env, fallback.env),
     capabilities: stringList(source.capabilities),
     cliBindings: cleanCliBindings(source.cliBindings, fallback.cliBindings),
+    timeouts: normalizeTimeoutOverrides(source.timeouts),
     maxConcurrency: integer(source.maxConcurrency, 1, 16, 2),
     enabled: source.enabled !== false,
     builtin: source.builtin === true || fallback.builtin === true,

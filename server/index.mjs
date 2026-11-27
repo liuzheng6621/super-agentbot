@@ -24,10 +24,12 @@ import {
   isRunning,
   replanTask,
   workMsOf,
+  timeoutAuditFor,
 } from './orchestrator.mjs';
 import { probeClis, spawnCli, clearResolveCache } from './adapters.mjs';
 import { redactProvider } from './providers.mjs';
 import { redactAgentProfile } from './profiles.mjs';
+import { timeoutCatalog } from './timeouts.mjs';
 import { adoptInstalledClis, rebalanceTeam } from './adopt.mjs';
 import { ensureRealTeam, refreshTeam, judgeHealth } from './team.mjs';
 import { toolGateway } from './tool-gateway.mjs';
@@ -161,6 +163,7 @@ function agentView(agent) {
   return {
     ...agent,
     cliPolicy: resolveCliPolicy(agent),
+    timeouts: timeoutAuditFor(agent),
   };
 }
 
@@ -566,6 +569,7 @@ const server = http.createServer(async (req, res) => {
         toolCatalog: TOOL_CATALOG,
         roleTools: ROLE_TOOLS,
         executionPolicies: executionPolicyCatalog(),
+        timeoutCatalog: timeoutCatalog(),
         activeTaskId: active?.id || null,
         activeTask: active && includeActiveTask ? taskDetail(active) : null,
         overview: crossTaskOverview({ tenantId: principalTenant(principal) }),
@@ -654,6 +658,7 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, {
         tools: toolGateway.descriptors(),
         executionPolicies: executionPolicyCatalog(),
+        timeoutCatalog: timeoutCatalog(),
       });
     }
     if (pathname === '/api/cli-policy' && method === 'GET') {

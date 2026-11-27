@@ -11,6 +11,8 @@ import { estimateTokens } from './tokens.mjs';
 import { toolGateway } from './tool-gateway.mjs';
 import { providerRoute, withProviderProfile } from './providers.mjs';
 import { policySummary, resolveCliPolicy } from './cli-policy.mjs';
+import { commandKey } from './command-key.mjs';
+import { timeoutFor, timeoutSummary } from './timeouts.mjs';
 import {
   cancelQueuedTask,
   configureScheduler,
@@ -60,6 +62,34 @@ export const CLI_TIMEOUTS = Object.freeze({
   step: 900000,
   qualityGate: 300000,
 });
+
+/** Resolve phase budgets through settings → Provider → Agent/Profile. */
+export function timeoutsForAgent(agent) {
+  const provider = agent?.provider || (agent ? store.providerForAgent(agent) : null);
+  const sources = { provider, settings: store.db.settings };
+  return {
+    proposal: timeoutFor(agent, 'proposal', sources),
+    critique: timeoutFor(agent, 'critique', sources),
+    decision: timeoutFor(agent, 'decision', sources),
+    step: timeoutFor(agent, 'step', sources),
+    qualityGate: timeoutFor(agent, 'qualityGate', sources),
+  };
+}
+
+export function timeoutAuditFor(agent) {
+  const resolved = timeoutsForAgent(agent);
+  return { ...resolved, summary: timeoutSummary(resolved) };
+}
+
+function timeoutMeta(agent, kind) {
+  return {
+    timeoutKind: kind,
+    timeoutMs: timeoutFor(agent, kind, {
+      provider: agent?.provider || (agent ? store.providerForAgent(agent) : null),
+      settings: store.db.settings,
+    }),
+  };
+}
 
 /**
  * 席位缺席时的兜底顺序按角色分别排：评审员永远不落到实现者身上，
@@ -1133,6 +1163,8 @@ async function cliMessage(
     policySandbox: finalPolicyData.sandbox,
     policyBoundary: finalPolicyData.boundary,
     policyReason: finalPolicyData.reason,
+    timeoutKind: timeoutMeta(agent, kind).timeoutKind,
+    timeoutMs: timeout,
   });
 
   // 收集 CLI 新增/修改的文件：先按 size + 纳秒 mtime 粗筛，命中项再算内容版本。
@@ -1975,7 +2007,10 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
         index,
         speed,
         signal,
-        timeout: CLI_TIMEOUTS.proposal,
+        timeout: timeoutFor(agent, 'proposal', {
+          provider: store.providerForAgent(agent),
+          settings: store.db.settings,
+        }),
       }),
     );
   });
@@ -2007,7 +2042,10 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
         proposals: valid,
         speed,
         signal,
-        timeout: CLI_TIMEOUTS.critique,
+        timeout: timeoutFor(agent, 'critique', {
+          provider: store.providerForAgent(agent),
+          settings: store.db.settings,
+        }),
       }),
     ),
   );
@@ -2077,7 +2115,10 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
           {
             kind: 'decision',
             signal,
-            timeout: CLI_TIMEOUTS.decision,
+            timeout: timeoutFor(judge, 'decision', {
+              provider: store.providerForAgent(judge),
+              settings: store.db.settings,
+            }),
             completeWhen: isCompleteDecisionText,
             settleMs: 5000,
             message: { debate: { phase: 'decision', winnerId: winner.id } },
@@ -2123,7 +2164,10 @@ async function runStep(task, agent, { step, kind, prompt, signal, speed, simOutp
     const res = await cliMessage(task, agent, prompt, {
       kind,
       signal,
-      timeout: CLI_TIMEOUTS.step,
+      timeout: timeoutFor(agent, 'step', {
+        provider: store.providerForAgent(agent),
+        settings: store.db.settings,
+      }),
       causeBy: step?.id ? `step:${step.id}` : 'summary',
       stepId: step?.id || '',
       completeWhen: step
@@ -2232,18 +2276,11 @@ export function stepAgentCandidates(step, preferred = null) {
     if (role !== 'reviewer') return true;
     return agent.seat !== false && reviewerRoles.has(agent.role);
   };
-  const commandKey = (agent) => {
-    const command = String(agent?.cli?.command || '').trim().replace(/^["']|["']$/g, '');
-    if (!command) return '';
-    return path
-      .basename(command)
-      .replace(/\.(exe|cmd|bat|ps1)$/i, '')
-      .toLowerCase();
-  };
+  const commandKeyOf = (agent) => commandKey(agent?.cli?.command);
   const push = (agent) => {
     if (!eligible(agent) || ordered.some((item) => item.id === agent.id)) return;
     if (agent.mode === 'cli') {
-      const key = commandKey(agent);
+      const key = commandKeyOf(agent);
       if (key && seenCommands.has(key)) return;
       if (key) seenCommands.add(key);
     }
@@ -2271,7 +2308,6 @@ export function stepAgentCandidates(step, preferred = null) {
   return ordered;
 }
 
-const TEST_TIMEOUT = CLI_TIMEOUTS.qualityGate;
 const PLACEHOLDER_TEST = /no test specified/i;
 
 function commandText(command, args = []) {
@@ -2345,8 +2381,8 @@ export function detectTestCommand(task) {
       if (names.some((n) => /\.(test|spec)\.(m?js|cjs)$/.test(n))) {
         return {
           command: process.execPath,
-          args: ['--test', 'tests/'],
-          label: 'node --test tests/',
+          args: ['--test', 'tests/**/*.test.{js,mjs,cjs}'],
+          label: 'node --test tests/**/*.test.{js,mjs,cjs}',
           source: 'tests/ 目录',
         };
       }
@@ -2369,6 +2405,11 @@ export async function runQualityGate(task, step, signal) {
   const coder = implementation && store.getAgent(implementation.agentId);
   const tester = testDesign && store.getAgent(testDesign.agentId);
   const cliMode = !!current.external || coder?.mode === 'cli' || tester?.mode === 'cli';
+  const timeoutAgent = coder || tester || pickAgent('tester') || pickAgent('reviewer');
+  const timeout = timeoutFor(timeoutAgent, 'qualityGate', {
+    provider: timeoutAgent ? store.providerForAgent(timeoutAgent) : null,
+    settings: store.db.settings,
+  });
 
   // 真实 CLI 任务同样要跑工作区里真实存在的测试入口，不再一律 skipped
   const detected = detectTestCommand(current);
@@ -2378,6 +2419,7 @@ export async function runQualityGate(task, step, signal) {
       reason:
         '工作区里没找到可执行的测试入口（package.json scripts.test / Makefile / pytest 配置 / tests/），不能把本轮质量门判为通过',
       cli: cliMode,
+      timeout,
       checkedAt: Date.now(),
       round,
     };
@@ -2392,13 +2434,14 @@ export async function runQualityGate(task, step, signal) {
       command,
       label: detected.label,
       source: detected.source,
+      timeout,
       round,
     },
   });
   const startedAt = Date.now();
   const res = await spawnCli({ cli: { command: detected.command, args: detected.args } }, '', {
     cwd: current.workspace,
-    timeout: TEST_TIMEOUT,
+    timeout,
     signal,
   });
   throwIfAborted(signal);
@@ -2411,6 +2454,7 @@ export async function runQualityGate(task, step, signal) {
     label: detected.label,
     args: detected.args,
     source: detected.source,
+    timeout,
     cli: cliMode,
     code: res.code,
     timedOut,

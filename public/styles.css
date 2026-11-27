@@ -3776,6 +3776,24 @@ kbd {
   color: var(--muted);
 }
 
+.timeout-grid-compact {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.timeout-grid-compact > label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.timeout-grid-compact input {
+  min-width: 0;
+}
+
 .flow-preset {
   display: flex;
   align-items: center;
@@ -4165,6 +4183,9 @@ kbd {
 
 @media (max-width: 900px) {
   .flow-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .timeout-grid-compact {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
   .flow-node {

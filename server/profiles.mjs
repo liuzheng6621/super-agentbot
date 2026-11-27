@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { normalizeExecutionPolicy } from './cli-policy.mjs';
 import { DEFAULT_PROVIDER_ID } from './providers.mjs';
+import { normalizeTimeoutOverrides } from './timeouts.mjs';
 
 const PROFILE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/;
 const WORKSPACE_MODES = new Set(['shared', 'private']);
@@ -85,6 +86,7 @@ export function normalizeAgentProfile(
     maxConcurrency: integer(source.maxConcurrency, 1, 16, 1),
     workspacePolicy: workspacePolicy(source.workspacePolicy, fallback.workspacePolicy),
     executionPolicy: normalizeExecutionPolicy(source.executionPolicy),
+    timeouts: normalizeTimeoutOverrides(source.timeouts),
     builtin: source.builtin === true || fallback.builtin === true,
     createdAt: Number(source.createdAt) || Date.now(),
     updatedAt: Number(source.updatedAt) || Date.now(),
@@ -111,6 +113,7 @@ export function redactAgentProfile(profile, options = {}) {
     maxConcurrency: normalized.maxConcurrency,
     workspacePolicy: normalized.workspacePolicy,
     executionPolicy: normalized.executionPolicy,
+    timeouts: normalized.timeouts,
     builtin: normalized.builtin,
     createdAt: normalized.createdAt,
     updatedAt: normalized.updatedAt,
@@ -134,6 +137,7 @@ export function profileToAgentPatch(profile, options = {}) {
     maxConcurrency: normalized.maxConcurrency,
     workspacePolicy: normalized.workspacePolicy,
     executionPolicy: normalized.executionPolicy,
+    timeouts: normalized.timeouts,
   };
 }
 
@@ -155,6 +159,7 @@ export function agentToProfile(agent, options = {}) {
       maxConcurrency: agent?.maxConcurrency,
       workspacePolicy: agent?.workspacePolicy,
       executionPolicy: agent?.executionPolicy,
+      timeouts: agent?.timeouts,
     },
     {},
     options,

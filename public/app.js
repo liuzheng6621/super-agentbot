@@ -2572,7 +2572,38 @@ function currentFlowSettings() {
     maxConcurrency: Number(s.maxConcurrency) || 2,
     maxRepairRounds: Number(s.maxRepairRounds ?? 1),
     maxStepAttempts: Number(s.maxStepAttempts) || 2,
+    timeouts: { ...(s.timeouts || {}) },
   };
+}
+
+const TIMEOUT_FIELDS = [
+  ["setTimeoutProposal", "proposal"],
+  ["setTimeoutCritique", "critique"],
+  ["setTimeoutDecision", "decision"],
+  ["setTimeoutStep", "step"],
+  ["setTimeoutQualityGate", "qualityGate"],
+];
+
+function timeoutMillisecondsFromForm(form, prefix = "timeout") {
+  const output = {};
+  for (const [, key] of TIMEOUT_FIELDS) {
+    const fieldName = `${prefix}${key[0].toUpperCase()}${key.slice(1)}`;
+    const value = Number(form.elements.namedItem(fieldName)?.value);
+    if (Number.isFinite(value) && value > 0) output[key] = Math.round(value * 1000);
+  }
+  return output;
+}
+
+function fillTimeoutFields(values = {}, form = null) {
+  for (const [inputId, key] of TIMEOUT_FIELDS) {
+    const fieldName = `timeout${key[0].toUpperCase()}${key.slice(1)}`;
+    const element = form ? form.elements.namedItem(fieldName) : $(`#${inputId}`);
+    if (!element) continue;
+    const milliseconds = Number(values?.[key]);
+    element.value = Number.isFinite(milliseconds) && milliseconds > 0
+      ? String(Math.round(milliseconds / 1000))
+      : "";
+  }
 }
 
 function fillFlowForm(values) {
@@ -2586,11 +2617,13 @@ function fillFlowForm(values) {
     el.value = String(values[key] ?? fallback);
   }
   $("#setDebateEnabled").checked = values.debateEnabled !== false;
+  fillTimeoutFields(values.timeouts);
 }
 
 function readFlowForm() {
   const out = { debateEnabled: $("#setDebateEnabled").checked };
   for (const [id, key] of FLOW_NUM_FIELDS) out[key] = Number($(`#${id}`).value);
+  out.timeouts = timeoutMillisecondsFromForm($("#flowModal"));
   return out;
 }
 
@@ -3700,6 +3733,7 @@ function fillProviderForm(provider = null) {
     : "";
   f("maxConcurrency").value = provider?.maxConcurrency || 2;
   f("enabled").checked = provider?.enabled !== false;
+  fillTimeoutFields(provider?.timeouts, form);
   $("#providerFormHint").textContent = provider ? `正在编辑 ${provider.name}` : "新 Profile";
 }
 
@@ -3756,6 +3790,7 @@ function fillAgentFromProfile(profileId) {
   f("workspaceMode").value = profile.workspacePolicy?.mode || "shared";
   f("workspaceCrossTask").checked = profile.workspacePolicy?.crossTask === true;
   f("executionPolicy").value = profile.executionPolicy === "strict" ? "strict" : "inherit";
+  fillTimeoutFields(profile.timeouts, form);
   renderAgentToolChoices(profile.tools, profile.role);
   renderAgentPolicyPreview();
 }
@@ -3841,6 +3876,7 @@ async function saveProvider() {
       .map((item) => item.trim())
       .filter(Boolean),
     cliBindings,
+    timeouts: timeoutMillisecondsFromForm(form),
     maxConcurrency: Number(fd.get("maxConcurrency")) || 2,
     enabled: fd.get("enabled") === "on",
   };
@@ -3982,6 +4018,7 @@ function openAgentModal(agent = null, preset = null) {
     f("maxConcurrency").value = agent.maxConcurrency || 1;
     f("workspaceMode").value = agent.workspacePolicy?.mode || "shared";
     f("workspaceCrossTask").checked = agent.workspacePolicy?.crossTask === true;
+    fillTimeoutFields(agent.timeouts, form);
   } else if (preset) {
     f("name").value = preset.name || "";
     f("mode").value = "cli";
@@ -3992,6 +4029,7 @@ function openAgentModal(agent = null, preset = null) {
     f("fallbackProviderIds").value = "";
     f("skills").value = (preset.skills || []).join(", ");
     f("seat").checked = false;
+    fillTimeoutFields({}, form);
   }
 
   renderProviderChoices(agent?.providerId || "local-default");
@@ -4187,6 +4225,7 @@ function bind() {
         .filter(Boolean),
       seat: fd.get("seat") === "on",
       tools: fd.getAll("tools").map(String),
+      timeouts: timeoutMillisecondsFromForm(e.target),
       cli: { command, args: argsStr ? argsStr.split(/\s+/) : [] },
     };
     try {

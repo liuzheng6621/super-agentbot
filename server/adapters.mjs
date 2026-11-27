@@ -2,6 +2,7 @@ import { spawn, spawnSync, execFile } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { prepareCliExecution } from './cli-policy.mjs';
+import { commandBaseName } from './command-key.mjs';
 
 /* ------------------------------------------------------------------ */
 /* 模拟适配器：把文本按块吐出，制造真实流式观感                         */
@@ -52,18 +53,11 @@ function quoteArg(arg) {
 }
 
 function isGeminiCommand(command) {
-  const base = path
-    .basename(String(command || '').trim())
-    .replace(/\.(exe|cmd|bat|ps1)$/i, '')
-    .toLowerCase();
-  return base === 'gemini';
+  return commandBaseName(command) === 'gemini';
 }
 
 function isTraeCommand(command) {
-  const base = path
-    .basename(String(command || '').trim())
-    .replace(/\.(exe|cmd|bat|ps1)$/i, '')
-    .toLowerCase();
+  const base = commandBaseName(command);
   return base === 'trae-cli' || base === 'trae';
 }
 

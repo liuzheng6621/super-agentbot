@@ -89,7 +89,7 @@ test('测试入口探测按 npm / Makefile / pytest 优先级执行', () => {
   assert.equal(detectTestCommand(workspace({ 'go.mod': 'module x\n' })).command, 'go');
 
   const nodeTests = detectTestCommand(workspace({ 'tests/a.test.js': '' }));
-  assert.deepEqual(nodeTests.args, ['--test', 'tests/']);
+  assert.deepEqual(nodeTests.args, ['--test', 'tests/**/*.test.{js,mjs,cjs}']);
   assert.equal(nodeTests.command, process.execPath);
 
   assert.equal(detectTestCommand(workspace({ 'README.md': '# 空' })), null, '什么都没有就必须返回 null');

@@ -633,6 +633,17 @@
               <p class="policy-preview" id="agentPolicyPreview" data-status="inherit"></p>
               <p class="hint">命令会在任务工作区目录中执行，写入的文件会自动收录为产物。</p>
             </div>
+            <div class="field">
+              <span>阶段超时覆盖（秒）<em>留空继承 Provider 与全局设置</em></span>
+              <div class="timeout-grid timeout-grid-compact">
+                <label><span>提案</span><input name="timeoutProposal" type="number" min="30" max="3600" /></label>
+                <label><span>质询</span><input name="timeoutCritique" type="number" min="30" max="3600" /></label>
+                <label><span>裁决</span><input name="timeoutDecision" type="number" min="30" max="3600" /></label>
+                <label><span>工序</span><input name="timeoutStep" type="number" min="30" max="7200" /></label>
+                <label><span>质量门</span><input name="timeoutQualityGate" type="number" min="30" max="3600" /></label>
+              </div>
+              <p class="hint" id="agentTimeoutEffective"></p>
+            </div>
           </div>
           <footer class="modal-foot">
             <button type="button" class="btn btn-ghost danger" id="agentDelete" hidden>移出团队</button>
@@ -711,6 +722,26 @@
               </label>
             </div>
 
+            <h4 class="flow-sec">阶段超时（秒）</h4>
+            <div class="flow-grid timeout-grid">
+              <label class="field"><span>方案提案<em>每个成员的提案阶段</em></span>
+                <input id="setTimeoutProposal" type="number" min="30" max="3600" step="1" />
+              </label>
+              <label class="field"><span>交叉质询<em>方案互评阶段</em></span>
+                <input id="setTimeoutCritique" type="number" min="30" max="3600" step="1" />
+              </label>
+              <label class="field"><span>方案裁决<em>最终选型阶段</em></span>
+                <input id="setTimeoutDecision" type="number" min="30" max="3600" step="1" />
+              </label>
+              <label class="field"><span>工序执行<em>单次 CLI 工序</em></span>
+                <input id="setTimeoutStep" type="number" min="30" max="7200" step="1" />
+              </label>
+              <label class="field"><span>质量门<em>真实测试命令</em></span>
+                <input id="setTimeoutQualityGate" type="number" min="30" max="3600" step="1" />
+              </label>
+            </div>
+            <p class="hint">成员/Profile 只保存显式覆盖项；留空或清除后继续继承 Provider 与全局预算。</p>
+
             <div class="flow-preset">
               <span>快速预设</span>
               <button class="btn btn-ghost sm" data-preset="fast">快速</button>
@@ -781,6 +812,16 @@
                 <span>CLI 参数模板<em>JSON，键为命令名</em></span>
                 <textarea name="cliBindings" rows="6" spellcheck="false" placeholder='{"codex":{"args":["exec","-c","model={{model}}","{{prompt}}"],"env":{"OPENAI_BASE_URL":"{{baseUrl}}","OPENAI_API_KEY":"{{apiKey}}"}}}'></textarea>
               </label>
+              <div class="field">
+                <span>阶段超时覆盖（秒）<em>留空继承全局设置</em></span>
+                <div class="timeout-grid timeout-grid-compact">
+                  <label><span>提案</span><input name="timeoutProposal" type="number" min="30" max="3600" /></label>
+                  <label><span>质询</span><input name="timeoutCritique" type="number" min="30" max="3600" /></label>
+                  <label><span>裁决</span><input name="timeoutDecision" type="number" min="30" max="3600" /></label>
+                  <label><span>工序</span><input name="timeoutStep" type="number" min="30" max="7200" /></label>
+                  <label><span>质量门</span><input name="timeoutQualityGate" type="number" min="30" max="3600" /></label>
+                </div>
+              </div>
               <label class="flow-row">
                 <span class="fr-main">启用 Profile<b>停用后，绑定它的任务会在队列中等待</b></span>
                 <input type="checkbox" name="enabled" class="switch" checked />
