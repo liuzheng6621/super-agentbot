@@ -2,6 +2,7 @@
 
 > 更新日期：2026-11-27
 > 状态：M3 / M4 / M5 已完成；本轮 P1-9、P1-10 与五项 P2 能力已完成
+> 当前文档基线：`3ec33cd 3.11 extract test entry detection`
 > 来源：OpenBot 上游仓库（https://github.com/OpenHands/OpenBot）+ AgentForge 现有路线图（`agent-platform-roadmap.md`）
 > 说明：本计划只吸收机制与契约，不移植 OpenBot 的 Electron / Bun / Cloudflare 架构。
 
@@ -129,6 +130,8 @@ AgentForge 继续保留零依赖、零构建、可直接运行的优点，并通
 | 附件读图 | 声明视觉能力；校验 PNG / JPEG / WebP / GIF 类型、体积、尺寸和像素；只持久化内容寻址引用 | `tests/attachments.test.mjs` |
 | 上下文压缩 | 阈值自动触发、来源范围去重、摘要质量、历史、原文保留和按来源回放 | `tests/context-budget.test.mjs` |
 | Automation durable `await_event` | 持久等待、eventId 匹配、幂等唤醒、取消、完成对账、租约互斥、API 与 UI 可见 | `tests/automation.test.mjs`、`tests/http-security.test.mjs` |
+| 测试入口结构提取 | `server/test-entry.mjs` 已承接测试文件枚举和命令生成，`orchestrator.mjs` 保留兼容导出 | `tests/quality.test.mjs` |
+| 文件夹选择器浏览器验收 | 真实 Edge/CDP 覆盖当前构建；缺少浏览器时显式跳过 | `tests/folder-picker.test.mjs` |
 
 ## 后续 backlog
 

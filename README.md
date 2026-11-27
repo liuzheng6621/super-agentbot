@@ -43,7 +43,7 @@
 - **Tool Gateway 第一层**：平台 API 统一校验工具白名单、执行主体和工作区边界，并记录 `tool.call.start` / `tool.call.end` / `tool.policy.denied`。
 - **CLI 执行策略网关**：`strict` 模式把工具白名单映射到 Codex / DSH / Claude 的原生沙箱或工具白名单；无法强制的组合在启动前拒绝，并记录 `cli.policy.*`。
 - **多视图工作区控制台**：文件、执行轨迹、计划版本、协作消息、工具审计、DAG、回放、总览与 Diff 在同一工作区中查看。
-- **文件夹开工**：可从本机目录选择器选择已有项目，或使用 Git 隔离工作树并行开工。
+- **文件夹开工**：可从本机目录选择器选择已有项目，或使用 Git 隔离工作树并行开工；当前构建已用真实浏览器验收目录进入、返回、中文与空格路径，缺少 Edge 时显式跳过浏览器用例。
 - **M3 平台边界**：owner / operator / agent / system 主体与 Token 作用域、Provider 用量账本、可审计上下文压缩、历史检索、`clientMessageId` 幂等、只读 MCP 网关和一次性命令审批。
 - **M4 工作区能力**：可复用 Agent Profile、默认不跨任务的工作区池、读后写版本守卫、事务回滚、DAG 图、时间回放和跨任务总览。
 - **M5 生产化**：按租户过滤任务 / Automation / 审批并执行任务配额、OTLP trace 导出、`db.json` 文件锁与任务 / Automation 租约、目录懒加载和 `/api/state` cursor 分页。
@@ -404,6 +404,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 │   ├── orchestrator.mjs  流水线编排、质量门、上下文组装、产物落盘
 │   ├── scheduler.mjs     全局任务队列、Provider 配额与 Agent 租约
 │   ├── providers.mjs     Provider Profile、密钥引用解析与执行环境
+│   ├── test-entry.mjs    测试入口探测、真实测试文件枚举与命令生成
 │   ├── cli-policy.mjs    工具能力推导、CLI 沙箱映射与严格策略预检
 │   ├── store.mjs         状态、席位、增量持久化、多实例锁 / 租约、事件总线、trace 与恢复
 │   ├── security.mjs      Token、CORS、监听边界与安全摘要
@@ -459,6 +460,7 @@ npm test
 - **CLI 严格策略是原生能力映射，不是内核级代理**：`strict` 只放行 Codex / DSH / Claude 能明确表达的组合，并覆盖参数里的危险开关；`inherit` 仍允许 CLI 使用自身工具。真正的网络代理和跨进程系统调用拦截仍待后续。
 - **网关由 Provider Profile 决定**：项目不依赖 Magpie 或任何内置兼容网关；Provider Profile、密钥引用、CLI 参数模板、自动回退和 CLI 严格策略已落地。
 - **调度粒度仍是任务级**：全局任务并发、Provider 配额和显式 Agent 租约已生效；Provider 配额按绑定该 Provider 的活跃任务计数，不按每次 CLI 调用计数。磁盘配额和任务优先级仍在路线图中。
+- **agent-web 尚未接入**：`E:\SKIl.1\agent-web` 仅作为开发期验收参考，固定提交适配器与 10 个验收案例仍在 [fix-plan.md](docs/fix-plan.md) 第 7 节 backlog 中，不进入生产依赖。
 
 ## Roadmap
 

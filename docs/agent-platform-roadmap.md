@@ -206,6 +206,8 @@ Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile �
 | 全局 Scheduler | 第一层已完成 | 任务并发上限、Provider 配额、排队位置、等待原因、Agent 租约和取消排队 |
 | CLI 执行策略 | 第一层已完成 | `inherit / strict`；工具白名单推导沙箱；Codex / DSH / Claude 能力矩阵；不可强制时拒绝；策略事件与消息元数据 |
 | Shell 沙箱 | 已完成固定命令路径 | 固定命令白名单、operator 审批、一次性执行、超时和进程树回收；任意 shell 仍关闭 |
+| 测试入口提取 | 已完成第一步 | `server/test-entry.mjs` 负责真实测试文件枚举与命令生成；`orchestrator.mjs` 保留兼容导出 |
+| 文件夹选择器浏览器验收 | 已完成 | 真实 Edge/CDP 验证目录进入、返回、中文与空格路径；缺少 Edge 时显式跳过 |
 
 ## M1 首批增量（2026-11-27）
 
@@ -269,6 +271,7 @@ M3 不包含：自由 shell、Agent 自审批、MCP 写工具、Provider fill-fi
 | --- | --- | --- | --- |
 | P2 | 完整账号 / RBAC / SSO | 已有 Token 主体、作用域、租户过滤和任务配额 | 需要用户身份、角色权限、SSO 和按用户计费时再做 |
 | P2 | 外部数据库 / 分布式队列 | 当前是 JSON + 文件锁 + 租约，多实例可共享同一数据目录 | SQLite 或队列引入前先做架构决策，保持零依赖承诺清楚 |
+| P2 | agent-web 开发期验收适配器 | 尚未接入；外部 checkout 与固定提交已记录在 `fix-plan.md` 第 7 节 | 先作为可选测试工具，不复制源码、不进入生产依赖 |
 
 ## 后续 backlog
 

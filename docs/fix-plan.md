@@ -2,7 +2,7 @@
 
 > 核查日期：2026-11-27
 > 核查对象：`E:\SKIl.1\bot` 当前工作树
-> 核查基线：`fe29451 P1-6 add CI syntax and test matrix`
+> 文档同步基线：`3ec33cd 3.11 extract test entry detection`
 > 本文性质：修复与验收文档；每项状态以“当前状态”和对应提交 / 测试为准
 
 ## 1. 目的与边界
@@ -256,7 +256,7 @@ node --test tests/**/*.test.{js,mjs,cjs}
 
 **环境限制**：无 Edge 或无法启动 CDP 时该浏览器用例显式跳过，并提示设置 `AGENTFORGE_EDGE_PATH`；API 错误路径仍会执行。桌面壳使用同一套前端与服务，但本轮未做 Windows 桌面窗口自动化，因此“桌面端不可见”的旧截图仍不能作为根因证据。
 
-### 3.11 P2：结构债务
+### 3.11 P2：结构债务（逐步提取中）
 
 当前主要文件规模：
 
@@ -269,13 +269,13 @@ node --test tests/**/*.test.{js,mjs,cjs}
 | `server/workspace.mjs` | 1118 |
 | `server/tool-gateway.mjs` | 607 |
 
-建议按稳定职责拆，不做一次性重写：
+当前已开始按稳定职责拆，不做一次性重写。`server/test-entry.mjs` 已从 `server/orchestrator.mjs` 提取，保留原导出兼容；后续继续按小步提交：
 
 - `orchestrator`：run controller、step runner、debate、quality gate、review、plan。
 - `store`：持久化、租户、任务查询、租约、迁移。
 - 前端：state、SSE、任务视图、工作区、辩论、组件、样式分层。
 
-每一步拆分必须保持公开导出兼容，并以当前 `npm test` 全绿加手工冒烟为准，不在文档中固定测试数量。
+每一步拆分必须保持公开导出兼容，并以当前 `npm test` 全绿加手工冒烟为准，不在文档中固定测试数量。`server/store.mjs` 暂不拆分：持久化、多实例锁和 dirty 窗口的边界风险高，当前以单文件按职责分区为准。
 
 ### 3.12 P2：其他旧账
 
@@ -285,7 +285,8 @@ node --test tests/**/*.test.{js,mjs,cjs}
 | 版本号 | `package.json` 仍为 `1.0.0` | 发布前补 CHANGELOG 与语义版本 |
 | 任意 shell | 仍关闭 | 保持关闭；只扩展固定命令和审批 |
 | 内核级隔离 | 未实现 | 不把 strict 原生沙箱宣传成完整进程隔离 |
-| 真实 CLI 覆盖 | 以模拟和单测为主 | 增加最小真实 CLI 矩阵，见第 6 节 |
+| 真实 CLI 覆盖 | 质量门、固定命令和团队体检已有真实子进程夹具；完整 CLI 交付矩阵仍缺 | 增加最小真实 CLI 矩阵，见第 6 节 |
+| 团队体检临时工作区 | 已修复 `cwd/path` 缺失，并用 `tests/team.test.mjs` 验证真实体检命令 | 继续扩展到 `.cmd/.bat` 与真实 Provider |
 | 工作区配额与清理 | 未实现 | 跨任务池开启前补磁盘上限和回收策略 |
 | 超大目录树 | 已懒加载 | 仍需大仓库性能和增量索引验证 |
 
