@@ -33,10 +33,37 @@ import {
   WorkspaceError,
   workspaceInfo,
 } from './workspace.mjs';
+import {
+  authenticateApi,
+  clientAddress,
+  corsDecision,
+  corsHeaders,
+  resolveSecurityConfig,
+  securitySummary,
+  validateListenSecurity,
+} from './security.mjs';
+import {
+  automationRunnerSnapshot,
+  automationSnapshot,
+  createAutomation,
+  getAutomation,
+  removeAutomation,
+  runAutomationNow,
+  startAutomationRunner,
+  stopAutomationRunner,
+  updateAutomation,
+} from './automation.mjs';
 
 const PORT = Number(process.env.PORT || 8787);
 // 本地桌面场景只监听回环；被托管平台注入 PORT 时（容器 / 云沙箱）需要对外绑定
 const HOST = process.env.HOST || (process.env.PORT ? '0.0.0.0' : '127.0.0.1');
+const SECURITY = resolveSecurityConfig(process.env);
+const LISTEN_SECURITY = validateListenSecurity({ host: HOST, config: SECURITY });
+if (!LISTEN_SECURITY.ok) {
+  console.error(`  ✗ ${LISTEN_SECURITY.error}`);
+  process.exit(2);
+}
+if (LISTEN_SECURITY.warning) console.warn(`  !  ${LISTEN_SECURITY.warning}`);
 const PUBLIC_DIR = path.join(ROOT, 'public');
 
 const MIME = {
@@ -176,9 +203,24 @@ const server = http.createServer(async (req, res) => {
   }
 
   {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    const cors = corsDecision(req, SECURITY);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+    for (const [key, value] of Object.entries(corsHeaders(cors))) res.setHeader(key, value);
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-AgentForge-Token');
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,DELETE,OPTIONS');
+    if (!cors.allowed) {
+      store.recordSecurityEvent({
+        type: 'cors.denied',
+        method,
+        path: pathname,
+        remoteAddress: clientAddress(req),
+        origin: cors.origin,
+        reason: '来源不在允许列表',
+      });
+      return json(res, 403, { error: '来源不被允许' });
+    }
     if (method === 'OPTIONS') {
       res.writeHead(204);
       return res.end();
@@ -186,6 +228,28 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
+    const isHook = /^\/api\/hooks\/[\w-]+$/.test(pathname);
+    const isPublicHealth = pathname === '/api/health';
+    if (!isHook && !isPublicHealth) {
+      const auth = authenticateApi(req, url, SECURITY);
+      if (!auth.ok) {
+        store.recordSecurityEvent({
+          type: 'api.auth.denied',
+          method,
+          path: pathname,
+          remoteAddress: clientAddress(req),
+          origin: req.headers.origin || '',
+          reason: auth.reason,
+          tokenSource: auth.source,
+        });
+        return json(res, 401, {
+          error: auth.reason,
+          code: 'api-token-required',
+          authRequired: true,
+        });
+      }
+    }
+
     /* ---- SSE ---- */
     if (pathname === '/api/stream' && method === 'GET') {
       res.writeHead(200, {
@@ -221,11 +285,64 @@ const server = http.createServer(async (req, res) => {
         tasks,
         settings: { ...store.db.settings },
         scheduler: schedulerSnapshot(),
+        automations: automationSnapshot(),
+        automationRunner: automationRunnerSnapshot(),
+        security: {
+          ...securitySummary({ host: HOST, config: SECURITY }),
+          audit: (store.db.settings.securityAudit || []).slice(-20).reverse(),
+        },
         toolCatalog: TOOL_CATALOG,
         roleTools: ROLE_TOOLS,
         executionPolicies: executionPolicyCatalog(),
         activeTask: active ? taskDetail(active) : null,
       });
+    }
+
+    if (pathname === '/api/security' && method === 'GET') {
+      return json(res, 200, {
+        security: securitySummary({ host: HOST, config: SECURITY }),
+        audit: (store.db.settings.securityAudit || []).slice(-100).reverse(),
+      });
+    }
+
+    /* ---- Automation ---- */
+    if (pathname === '/api/automations' && method === 'GET') {
+      return json(res, 200, {
+        automations: automationSnapshot(),
+        runner: automationRunnerSnapshot(),
+      });
+    }
+    if (pathname === '/api/automations' && method === 'POST') {
+      const body = await readBody(req);
+      try {
+        return json(res, 201, { automation: createAutomation(body) });
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    const automationMatch = pathname.match(/^\/api\/automations\/([\w-]+)(\/run)?$/);
+    if (automationMatch) {
+      const automationId = automationMatch[1];
+      const automation = getAutomation(automationId);
+      if (!automation) return json(res, 404, { error: '自动化不存在' });
+      if (automationMatch[2] && method === 'POST') {
+        const result = runAutomationNow(automationId);
+        return json(res, result.ok ? 202 : 409, result);
+      }
+      if (method === 'PATCH') {
+        const body = await readBody(req);
+        try {
+          return json(res, 200, { automation: updateAutomation(automationId, body) });
+        } catch (err) {
+          return json(res, 400, { error: err.message });
+        }
+      }
+      if (method === 'DELETE') {
+        return json(res, 200, { ok: removeAutomation(automationId) });
+      }
+      if (method === 'GET') {
+        return json(res, 200, { automation });
+      }
     }
 
     /* ---- 智能体 ---- */
@@ -672,6 +789,8 @@ const server = http.createServer(async (req, res) => {
         agents: store.agents.length,
         tasks: store.tasks.length,
         scheduler: schedulerSnapshot(),
+        automationRunner: automationRunnerSnapshot(),
+        security: securitySummary({ host: HOST, config: SECURITY }),
         uptime: process.uptime(),
       });
     }
@@ -744,6 +863,7 @@ let shuttingDown = false;
 function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
+  stopAutomationRunner();
   for (const res of clients) res.end();
   clients.clear();
   server.close(() => {
@@ -776,18 +896,24 @@ server.listen(PORT, HOST, () => {
   console.log('  AgentForge · 多智能体开发协作台');
   console.log(`  ➜  http://${HOST}:${PORT}`);
   console.log(`  ➜  工作区: ${path.join(DATA_DIR, 'workspaces')}`);
+  console.log(
+    `  ➜  API 鉴权: ${SECURITY.tokenEnabled ? 'Bearer Token 已启用' : '仅回环或显式无鉴权模式'}`,
+  );
   console.log('');
+  startAutomationRunner();
   // 后台把内置演示席位换成体检通过的真实 CLI；体检较慢，不阻塞服务可用
-  setTimeout(() => {
-    ensureRealTeam()
-      .then((r) => {
-        if (r.changed) {
-          console.log(`  ➜  真实席位: ${r.seats.map((s) => `${s.role}→${s.name}`).join('、')}`);
-          console.log(`  ➜  ${r.reason}`);
-        } else {
-          console.log(`  ➜  团队: ${r.reason}`);
-        }
-      })
-      .catch((err) => console.warn('  !  组建真实团队失败: ' + err.message));
-  }, 200);
+  if (process.env.AGENTFORGE_SKIP_TEAM_BOOTSTRAP !== '1') {
+    setTimeout(() => {
+      ensureRealTeam()
+        .then((r) => {
+          if (r.changed) {
+            console.log(`  ➜  真实席位: ${r.seats.map((s) => `${s.role}→${s.name}`).join('、')}`);
+            console.log(`  ➜  ${r.reason}`);
+          } else {
+            console.log(`  ➜  团队: ${r.reason}`);
+          }
+        })
+        .catch((err) => console.warn('  !  组建真实团队失败: ' + err.message));
+    }, 200);
+  }
 });

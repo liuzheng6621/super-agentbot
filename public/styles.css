@@ -3844,6 +3844,134 @@ kbd {
   gap: 6px;
 }
 
+.automation-modal {
+  width: min(720px, calc(100vw - 30px));
+}
+
+.automation-list {
+  display: grid;
+  gap: 8px;
+  max-height: 34vh;
+  overflow-y: auto;
+}
+
+.automation-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 10px;
+  border: 2px solid var(--edge);
+  background: var(--sunken);
+}
+
+.automation-row-main {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.automation-row-main b {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.automation-row-main p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.automation-row-state {
+  align-self: start;
+  padding: 3px 6px;
+  border: 1px solid var(--edge);
+  font-family: var(--f-pixel);
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+.automation-row-state[data-status="done"],
+.automation-row-state[data-status="idle"] {
+  background: var(--leaf);
+  color: var(--edge);
+}
+
+.automation-row-state[data-status="scheduled"],
+.automation-row-state[data-status="running"] {
+  background: #cce8ff;
+  color: #174b73;
+}
+
+.automation-row-state[data-status="waiting"],
+.automation-row-state[data-status="retry-waiting"] {
+  background: #fff0bf;
+  color: #6f4b00;
+}
+
+.automation-row-state[data-status="failed"],
+.automation-row-state[data-status="stopped"] {
+  background: #ffd7c9;
+  color: #8d2c1b;
+}
+
+.automation-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  grid-column: 1 / -1;
+  gap: 5px;
+}
+
+.automation-history {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 3px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--edge);
+}
+
+.automation-history span {
+  overflow: hidden;
+  color: var(--muted);
+  font-family: var(--f-code);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.automation-form {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 2px dashed var(--edge);
+}
+
+.automation-form textarea {
+  min-height: 70px;
+  resize: vertical;
+}
+
+.automation-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.auth-modal {
+  width: min(420px, calc(100vw - 30px));
+}
+
+.auth-lock {
+  font-family: var(--f-pixel);
+  font-size: 10px;
+  color: var(--muted);
+}
+
 @media (max-width: 520px) {
   .provider-form .field-row {
     flex-direction: column;
@@ -3864,6 +3992,28 @@ kbd {
   }
 
   .provider-form-actions .btn {
+    flex: 1;
+  }
+
+  .automation-modal .field-row {
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .automation-modal .field-row .field {
+    flex: none;
+    width: 100%;
+  }
+
+  .automation-form-actions {
+    flex-wrap: wrap;
+  }
+
+  .automation-form-actions .flow-save-hint {
+    flex-basis: 100%;
+  }
+
+  .automation-form-actions .btn {
     flex: 1;
   }
 }

@@ -9,7 +9,7 @@
 [![Node](https://img.shields.io/badge/node-%E2%89%A520.11-3c873a?logo=node.js&logoColor=white)](https://nodejs.org)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-blue)
 ![Build](https://img.shields.io/badge/build-none-lightgrey)
-![Tests](https://img.shields.io/badge/tests-92%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-101%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4)
 
@@ -23,13 +23,17 @@
 
 ## 当前版本
 
-本轮把“多智能体协作”从固定流水线推进到可追踪、可重规划、可审计的第一层平台：
+本轮把“多智能体协作”从固定流水线推进到可追踪、可重规划、可审计的第一层平台，并补上可部署的单实例团队服务基线：
 
 - **真实质量门**：CLI 与模拟任务都执行工作区测试入口；没有入口、执行失败或超时都不能交付，并记录真实命令、退出码、耗时与输出。
 - **项目技能注入**：从工作区、源工作区与用户级 `.agents/skills/*/SKILL.md` 装载技能，按触发词或 Agent 显式标签激活，注入提案、质询、裁决、工序、收口与聊天 prompt；激活记录会出现在 `/api/state`、任务详情和界面上下文中。
 - **运行记录导出**：`GET /api/tasks/:id/export?format=markdown|html` 导出质量门、计划、技能激活、协作消息、事件、产物与讨论记录，敏感值会脱敏。
 - **结构化评审结论**：评审必须输出扁平 JSON `VERDICT`，缺失、损坏或与 Blocker 矛盾的结论都不能放行；Blocker / Should 数量会进入工序记录和界面。
 - **独立评审**：评审候选只允许 `reviewer / tester / architect`，实现者不会被悄悄拉来审自己；自审按真实 `reviewerId / implementerId` 判定并写入任务事件。
+- **服务安全边界**：默认回环地址可零配置启动；绑定到局域网或其他非回环地址时强制要求 `AGENTFORGE_API_TOKEN`，也可显式接受无鉴权风险。支持 Bearer、`X-AgentForge-Token`、浏览器 SSE 查询令牌、同源 / CORS 白名单和拒绝审计。
+- **统一 trace / span**：任务事件自动带 `traceId / spanId / parentSpanId / kind / runId`，运行根 span 写入任务详情；界面、`/api/state`、任务详情和 Markdown / HTML 导出都可追踪一次运行。
+- **Automation / 定时任务**：支持周期与每日计划、启停、立即运行、最近历史、失败重试、重叠运行阻止和启动恢复；调度器只在本进程内运行，不伪装成分布式队列。
+- **重启恢复**：服务重启时把遗留的 queued / running 任务标为中断并写入 `run.recovered` 事件；已发出的 Automation 结果会重新对齐，不留下幽灵排队任务。
 - **增量持久化**：流式消息在 200ms dirty 窗口内合并落盘，只重新序列化变化任务；进程正常退出前会 flush 未完成窗口。
 - **CLI 解析缓存**：命令解析走进程级缓存，PATH 变化时由探测/刷新接口显式失效，减少热路径同步调用。
 - **计划版本**：初版、返工和手动重规划都会生成不可变快照，已完成工序不会被重规划抹掉；自动重规划最多一次，避免无限重试。
@@ -90,7 +94,7 @@
 **工程**
 
 - 📦 **零依赖、零构建** — 纯 Node.js + 原生 ESM，`node server/index.mjs` 就起来，前端不打包、不装包管理器。
-- ✅ **92 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、真实质量门、结构化评审、项目技能、运行记录导出、独立评审、持久化 dirty 窗口、可执行文件解析缓存、上下文预算、工作区文件闭环、Git 隔离、工具策略、CLI 强制沙箱映射、计划版本、消息路由、Tool Gateway 审计、Provider Profile、CLI 参数模板、Provider 自动回退、全局调度队列、Agent 租约、真实工时统计、输出完整性判定与退出码分类。
+- ✅ **101 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、真实质量门、结构化评审、项目技能、运行记录导出、独立评审、持久化 dirty 窗口、可执行文件解析缓存、上下文预算、工作区文件闭环、Git 隔离、工具策略、CLI 强制沙箱映射、计划版本、消息路由、Tool Gateway 审计、Provider Profile、CLI 参数模板、Provider 自动回退、全局调度队列、Agent 租约、真实工时统计、输出完整性判定、服务 Token / CORS、trace 与 Automation 恢复。
 
 ## 快速开始
 
@@ -283,12 +287,18 @@ Git 隔离支持两种模式：
 
 ## HTTP API
 
-所有接口都在 `http://127.0.0.1:8787` 下，JSON in / JSON out，无需鉴权（默认只监听本机回环）。
+所有接口都在 `http://127.0.0.1:8787` 下，JSON in / JSON out。默认只监听本机回环，因此本地零配置即可使用；绑定非回环地址时必须设置至少 16 个字符的 `AGENTFORGE_API_TOKEN`，或显式设置 `AGENTFORGE_ALLOW_INSECURE_REMOTE=1` 接受风险。
+
+启用服务 Token 后，普通 API 请求使用 `Authorization: Bearer <token>` 或 `X-AgentForge-Token: <token>`；浏览器 SSE 可用 `/api/stream?token=<token>`。`/api/health` 保持公开，Bot Hook 继续使用自己的 `settings.hookToken`。这里的 Token 是**共享服务边界**，不是用户身份、账号体系或租户隔离。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/api/state` | 全量状态（团队 / Provider / 任务 / 设置 / Scheduler / 当前任务） |
 | `GET` | `/api/scheduler` | 全局队列、运行任务、Provider 配额和 Agent 租约 |
+| `GET` | `/api/security` | 服务安全摘要与最近拒绝 / 访问审计 |
+| `GET` `POST` | `/api/automations` | Automation 列表 / 创建定时任务 |
+| `GET` `PATCH` `DELETE` | `/api/automations/:id` | 查看、修改、暂停 / 恢复或删除 Automation |
+| `POST` | `/api/automations/:id/run` | 立即触发一次 Automation |
 | `GET` `POST` | `/api/providers` | Provider Profile 列表 / 新增 |
 | `PATCH` `DELETE` | `/api/providers/:id` | 修改 / 删除 Profile（`local-default` 不可删除） |
 | `GET` | `/api/tools` | 工具目录、输入 Schema、执行策略与 CLI 适配能力 |
@@ -344,9 +354,13 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `PORT` | `8787` | HTTP 端口（被占用时会打印明确提示并以退出码 2 退出，不会静默失败） |
-| `HOST` | `127.0.0.1` | 监听地址；局域网共享设 `0.0.0.0` |
+| `HOST` | `127.0.0.1` | 监听地址；局域网共享设 `0.0.0.0` 并配置服务 Token |
 | `AGENTFORGE_DATA_DIR` | `<repo>/data` | 数据目录，测试与多套数据隔离时用 |
 | `AGENTFORGE_MODEL` | `trae-cn/glm-5.3-flash` | 全局模型名兜底；Agent 绑定的 Provider Profile 可覆盖模型和 Base URL |
+| `AGENTFORGE_API_TOKEN` | 空 | 共享服务 Token，至少 16 个字符；非回环监听时必需 |
+| `AGENTFORGE_CORS_ORIGINS` | 空 | 逗号分隔的额外允许来源；同源请求始终允许，`*` 不会自动变成放开 |
+| `AGENTFORGE_ALLOW_INSECURE_REMOTE` | `0` | 显式设为 `1` 才允许无 Token 的非回环监听，仅用于受控实验环境 |
+| `AGENTFORGE_SKIP_TEAM_BOOTSTRAP` | `0` | 设为 `1` 时跳过启动时自动体检组队，便于部署、测试和外部编排 |
 
 工作流参数（讨论开关与规模、工序并发、全局任务并发、返工轮次）在界面 ⚙ 里改，落 `data/db.json` 的 `settings`。Provider Profile 在左栏「Provider 配置」或 `/api/providers` 管理；`apiKeyRef` 只保存环境变量名，真实值由服务进程环境提供。`cliBindings` 按命令名保存参数模板，可用 `{{model}}`、`{{baseUrl}}`、`{{apiKey}}`、`{{providerId}}`、`{{providerName}}` 和 `{{env:NAME}}`；Agent 的 `fallbackProviderIds` 决定备用顺序。
 
@@ -360,7 +374,9 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 │   ├── scheduler.mjs     全局任务队列、Provider 配额与 Agent 租约
 │   ├── providers.mjs     Provider Profile、密钥引用解析与执行环境
 │   ├── cli-policy.mjs    工具能力推导、CLI 沙箱映射与严格策略预检
-│   ├── store.mjs         状态、席位、持久化、事件总线
+│   ├── store.mjs         状态、席位、持久化、事件总线、trace 与恢复
+│   ├── security.mjs      Token、CORS、监听边界与安全摘要
+│   ├── automation.mjs    定时任务、重试、历史与启动恢复
 │   ├── collaboration.mjs 计划版本、消息信封与路由差异
 │   ├── tool-gateway.mjs  工具白名单、主体校验与调用审计
 │   ├── workspace.mjs     工作区树、读写、搜索、回收站、Diff、路径边界
@@ -381,7 +397,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 │   ├── screenshot.png
 │   ├── design-io-image-context.md
 │   └── agent-platform-roadmap.md
-├── tests/                15 个测试文件、92 个测试
+├── tests/                19 个测试文件、101 个测试
 ├── 安装到桌面.bat
 ├── 卸载桌面快捷方式.bat
 └── data/                 运行时数据（gitignore）
@@ -393,11 +409,12 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 npm test
 ```
 
-92 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、结构化评审结论与字段校验、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `no-test-entry` 判定、真实 CLI 任务同样执行质量门、独立评审与自审身份判定、目录快照复用、上游瞬时故障（ECONNRESET / 429 / socket hang up）只重试一次且不掩盖真实失败、上下文预算（段序稳定性、中文 token 估算、原子写版本、spill 可还原）、工作区文件闭环与路径/敏感文件边界、Agent 工具策略、CLI 强制沙箱映射与拒绝事件、计划版本与已完成工序保留、消息路由、Tool Gateway 权限与审计、Provider Profile 持久化与迁移、CLI 参数模板渲染、Provider 路由与真实子进程回退、全局任务并发、Provider 配额、Agent 租约与排队取消、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计（只累加结束过的工序，不拿墙钟冒充）、输出完整性判定（半截提案 / 缺段质询 / 空步骤都会判不合格）、提案宽松解析（`A=7`、`B：8分`、`方案 C 7/10`）、退出码分类（超时 / 已停止 / 命令缺失 / 策略拒绝 / `0xC0000142`）与参数拼装、dirty 窗口合并落盘、退出前 flush、可执行文件解析缓存、项目技能发现与边界保护、运行记录导出与脱敏。
+101 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、结构化评审结论与字段校验、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `no-test-entry` 判定、真实 CLI 任务同样执行质量门、独立评审与自审身份判定、目录快照复用、上游瞬时故障（ECONNRESET / 429 / socket hang up）只重试一次且不掩盖真实失败、上下文预算（段序稳定性、中文 token 估算、原子写版本、spill 可还原）、工作区文件闭环与路径/敏感文件边界、Agent 工具策略、CLI 强制沙箱映射与拒绝事件、计划版本与已完成工序保留、消息路由、Tool Gateway 权限与审计、Provider Profile 持久化与迁移、CLI 参数模板渲染、Provider 路由与真实子进程回退、全局任务并发、Provider 配额、Agent 租约与排队取消、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计（只累加结束过的工序，不拿墙钟冒充）、输出完整性判定（半截提案 / 缺段质询 / 空步骤都会判不合格）、提案宽松解析（`A=7`、`B：8分`、`方案 C 7/10`）、退出码分类（超时 / 已停止 / 命令缺失 / 策略拒绝 / `0xC0000142`）与参数拼装、dirty 窗口合并落盘、退出前 flush、可执行文件解析缓存、项目技能发现与边界保护、运行记录导出与脱敏、服务 Token / CORS / 安全审计、trace / span 链路、Automation 调度与重试、重启任务恢复。
 
 ## 已知边界
 
-- **单机单进程**：状态存 JSON 文件，适合本地个人与内网演示；要多实例请替换 `store.mjs` 的持久化实现。
+- **单机单进程**：状态存 JSON 文件，适合本地开发和小团队内网单实例；Automation 与 Scheduler 都只在当前进程内运行。要多实例，需要先替换持久化、队列和锁实现。
+- **共享服务 Token，不是用户身份**：所有持有 Token 的调用者拥有同一套服务权限；没有账号、RBAC、SSO、按用户审计或租户隔离。面向团队的正式部署需要在这些边界上继续补齐，不能把当前 Token 当作多租户安全模型。
 - **`kimi` 只适合单行任务**：`-p` 与 `--auto` 互斥，只能走 argv，多行 prompt 会被 `cmd.exe` 截断。
 - **`trae-cli` 的行为取决于模型**：工具齐全（bash / 编辑 / 顺序思考），但某些模型只肯调顺序思考而不落盘——这是模型行为，不是配置问题。
 - **模拟模式**：一个可用 CLI 都没有时才会启用，产出仍是可运行的代码（`tests/*.test.js` 能直接 `node` 执行），但成员会明确标注 `SIM 演示`。
@@ -425,11 +442,17 @@ npm test
 - [x] 项目技能装载、触发与提示词注入（MVP）
 - [x] 运行记录 Markdown / HTML 导出
 - [x] 结构化评审 `VERDICT` 与 fail-closed 解析
+- [x] 服务安全边界（回环零配置、非回环 Token、CORS 与安全审计）
+- [x] trace / span 事件契约、任务详情与导出可见
+- [x] Automation（周期 / 每日、暂停恢复、立即运行、历史、重试）
+- [x] 服务重启恢复（中断任务、`run.recovered`、Automation 对账）
 - [ ] 工作区池、磁盘配额与任务优先级
 - [ ] 跨任务工作区总览、DAG 图与时间回放
 - [ ] 附件与读图（把截图交给视觉模型看 UI）
 - [ ] 读后写守卫（改动未经读取的文件时要求先读，防盲改）
 - [ ] 正规压缩（长任务的摘要式上下文压缩）
+- [ ] 用户账号、RBAC、按租户隔离与配额
+- [ ] OTLP / OpenTelemetry 导出
 - [ ] 多实例持久化后端
 
 ## 常见问题
@@ -468,7 +491,7 @@ gemini -p "Reply with exactly: OK" --skip-trust
 <details>
 <summary><b>能局域网多人用吗？</b></summary>
 
-`HOST=0.0.0.0 npm start` 即可，但注意它**没有鉴权**，只适合可信内网。多实例共享状态需要替换 `store.mjs` 的持久化实现。
+先设置至少 16 个字符的 `AGENTFORGE_API_TOKEN`，再运行 `HOST=0.0.0.0 npm start`。首次在浏览器打开时输入同一个 Token，之后可通过 Bearer 或 `X-AgentForge-Token` 调用 API。没有 Token 时服务会拒绝启动；`AGENTFORGE_ALLOW_INSECURE_REMOTE=1` 只用于临时受控实验。当前仍没有用户账号、RBAC 或多租户隔离，多实例共享状态也需要替换 `store.mjs` 的持久化实现。
 </details>
 
 <details>

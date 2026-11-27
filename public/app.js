@@ -15,6 +15,9 @@ const S = {
   task: null,
   settings: {},
   scheduler: null,
+  automations: [],
+  automationRunner: null,
+  security: null,
   probe: [],
   dir: "",
   worktree: false,
@@ -38,6 +41,41 @@ const S = {
 
 /* ---------------- 工具 ---------------- */
 
+const AUTH_TOKEN_KEY = "agentforge:apiToken";
+
+function authToken() {
+  try {
+    return sessionStorage.getItem(AUTH_TOKEN_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function setAuthToken(token) {
+  try {
+    if (token) sessionStorage.setItem(AUTH_TOKEN_KEY, token);
+    else sessionStorage.removeItem(AUTH_TOKEN_KEY);
+  } catch {
+    /* sessionStorage may be unavailable in hardened browser modes */
+  }
+}
+
+function openAuthModal(message = "") {
+  const modal = $("#authModal");
+  if (!modal) return;
+  const input = $("#authTokenInput");
+  if (input) input.value = authToken();
+  const hint = $("#authHint");
+  if (hint && message) hint.textContent = message;
+  if (!modal.open) modal.showModal();
+  setTimeout(() => input?.focus(), 20);
+}
+
+function closeAuthModal() {
+  const modal = $("#authModal");
+  if (modal?.open) modal.close();
+}
+
 function toast(text, type = "") {
   const node = document.createElement("div");
   node.className = `toast ${type}`;
@@ -52,7 +90,12 @@ function toast(text, type = "") {
 }
 
 function escapeHtml(s) {
-  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 const initials = (name = "?") => (name.replace(/[^\w\u4e00-\u9fa5]/g, "").slice(0, 2) || "AI").toUpperCase();
@@ -73,20 +116,36 @@ const fmtMs = (ms) => {
 
 const pad2 = (n) => String(n).padStart(2, "0");
 
+function authHeaders(base = {}) {
+  const headers = { ...base };
+  const token = authToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
 async function api(path, options = {}) {
+  const { headers: suppliedHeaders = {}, body, ...rest } = options;
+  const headers = authHeaders({ "Content-Type": "application/json", ...suppliedHeaders });
   const res = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-    body: options.body ? JSON.stringify(options.body) : undefined,
+    ...rest,
+    headers,
+    body: body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body),
   });
   if (!res.ok) {
     let msg = res.statusText;
+    let payload = null;
     try {
-      msg = (await res.json()).error || msg;
+      payload = await res.json();
+      msg = payload.error || msg;
     } catch {
       /* ignore */
     }
-    throw new Error(msg);
+    const error = new Error(msg);
+    error.status = res.status;
+    error.payload = payload;
+    error.authRequired = res.status === 401 && payload?.authRequired;
+    if (error.authRequired) openAuthModal(payload?.error || "需要 API Token");
+    throw error;
   }
   return res.json();
 }
@@ -95,9 +154,9 @@ async function downloadTaskTranscript(format = "markdown") {
   const taskId = S.task?.id;
   if (!taskId) return;
   try {
-    const res = await fetch(
-      `/api/tasks/${taskId}/export?format=${encodeURIComponent(format)}`,
-    );
+    const res = await fetch(`/api/tasks/${taskId}/export?format=${encodeURIComponent(format)}`, {
+      headers: authHeaders(),
+    });
     if (!res.ok) {
       const detail = await res.json().catch(() => ({}));
       throw new Error(detail.error || `导出失败（${res.status}）`);
@@ -1267,10 +1326,13 @@ function workspaceConsoleSearchHtml() {
 
 function workspaceConsoleEventHtml(event) {
   const label = WORKSPACE_EVENT_LABEL[event.type] || event.type;
+  const trace = event.traceId
+    ? `${String(event.traceId).slice(0, 8)}/${String(event.spanId || "").slice(0, 8)}`
+    : "";
   return `<div class="wc-event">
     <b>${escapeHtml(label)}</b>
     <span>${escapeHtml(workspaceEventSummary(event) || "—")}</span>
-    <em>${fmtTime(event.at)}</em>
+    <em>${trace ? `TRACE ${escapeHtml(trace)} · ` : ""}${fmtTime(event.at)}</em>
   </div>`;
 }
 
@@ -1383,6 +1445,9 @@ function workspaceConsoleSummaryHtml() {
     <div class="wc-summary-card"><b>STATUS</b><p>${escapeHtml(STATUS_TEXT[task.status] || task.status)}</p></div>
     <div class="wc-summary-card"><b>PROGRESS</b><p>${done}/${(task.plan || []).length} 工序完成</p></div>
     <div class="wc-summary-card"><b>QUALITY</b><p>${escapeHtml(task.quality?.status || "pending")}</p></div>
+    <div class="wc-summary-card"><b>TRACE</b><p title="${escapeHtml(task.trace?.traceId || "")}">${escapeHtml(
+      task.trace?.traceId ? String(task.trace.traceId).slice(0, 12) : "not started",
+    )}</p></div>
     <div class="wc-summary-card"><b>ACTIVITY</b><p>${changes.length} 个变更 · ${events.length} 个事件</p></div>
     <div class="wc-summary-card"><b>TOKENS</b><p>${Number(stats.tokens || 0).toLocaleString()}</p></div>`;
 }
@@ -2213,6 +2278,235 @@ function setFlowMode(mode) {
 
 /* ---------------- 渲染总入口 ---------------- */
 
+/* ---------------- 定时任务 ---------------- */
+
+const AUTOMATION_STATUS_LABEL = {
+  idle: "待运行",
+  paused: "已暂停",
+  scheduled: "已排队",
+  running: "运行中",
+  waiting: "等待上一轮",
+  done: "已完成",
+  failed: "失败",
+  "retry-waiting": "等待重试",
+  stopped: "已停止",
+};
+
+function fmtDateTime(ts) {
+  if (!ts) return "—";
+  const date = new Date(Number(ts));
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString([], {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function automationNextRunText(automation) {
+  if (!automation.enabled) return "已暂停自动触发";
+  if (automation.retryDueAt) return `重试 ${fmtDateTime(automation.retryDueAt)}`;
+  if (automation.nextRunAt) return `下次 ${fmtDateTime(automation.nextRunAt)}`;
+  return "等待调度";
+}
+
+function renderAutomations() {
+  const list = $("#automationList");
+  if (!list) return;
+  const runner = S.automationRunner || {};
+  const hint = $("#automationHint");
+  if (hint) {
+    hint.textContent = `定时创建真实协作任务。调度器${
+      runner.running ? "运行中" : "未运行"
+    }，${runner.enabled || 0}/${runner.total || 0} 个启用。上一轮未结束时不会重叠启动。`;
+  }
+  if (!S.automations.length) {
+    list.innerHTML = '<p class="hint">还没有定时任务。填写下方表单后保存即可创建。</p>';
+    return;
+  }
+  list.innerHTML = S.automations
+    .map((automation) => {
+      const status = automation.enabled ? automation.lastStatus || "idle" : "paused";
+      const schedule = automation.scheduleText || "未配置调度";
+      const history = (automation.history || [])
+        .map(
+          (entry) =>
+            `<span>${fmtDateTime(entry.startedAt || entry.finishedAt)} · ${escapeHtml(
+              AUTOMATION_STATUS_LABEL[entry.status] || entry.status || "未知",
+            )}${entry.taskId ? ` · ${escapeHtml(entry.taskId.slice(0, 8))}` : ""}${
+              entry.error ? ` · ${escapeHtml(entry.error)}` : ""
+            }</span>`,
+        )
+        .join("");
+      return `<article class="automation-row" data-automation-id="${escapeHtml(automation.id)}">
+        <div class="automation-row-main">
+          <b>${escapeHtml(automation.name || "未命名自动化")}</b>
+          <p>${escapeHtml(automation.goal || "")}</p>
+          <p>${escapeHtml(schedule)} · ${escapeHtml(automationNextRunText(automation))}${
+            automation.lastError ? ` · ${escapeHtml(automation.lastError)}` : ""
+          }</p>
+        </div>
+        <span class="automation-row-state" data-status="${escapeHtml(status)}">${escapeHtml(
+          AUTOMATION_STATUS_LABEL[status] || status,
+        )}</span>
+        <div class="automation-row-actions">
+          <button type="button" class="btn btn-ghost sm" data-automation-action="edit">编辑</button>
+          <button type="button" class="btn btn-ghost sm" data-automation-action="run">立即运行</button>
+          <button type="button" class="btn btn-ghost sm" data-automation-action="toggle">${
+            automation.enabled ? "暂停" : "启用"
+          }</button>
+          <button type="button" class="btn btn-ghost sm" data-automation-action="delete">删除</button>
+        </div>
+        ${history ? `<div class="automation-history">${history}</div>` : ""}
+      </article>`;
+    })
+    .join("");
+}
+
+function syncAutomationScheduleFields() {
+  const kind = $("#automationScheduleKind")?.value || "interval";
+  const interval = $("#automationIntervalField");
+  const daily = $("#automationDailyField");
+  if (interval) interval.hidden = kind !== "interval";
+  if (daily) daily.hidden = kind !== "daily";
+}
+
+function resetAutomationForm() {
+  const form = $("#automationForm");
+  if (!form) return;
+  form.reset();
+  const id = form.elements.namedItem("id");
+  if (id) id.value = "";
+  $("#automationFormHint").textContent = "";
+  syncAutomationScheduleFields();
+}
+
+function fillAutomationForm(automation) {
+  const form = $("#automationForm");
+  if (!form || !automation) return;
+  const fields = form.elements;
+  fields.namedItem("id").value = automation.id || "";
+  fields.namedItem("name").value = automation.name || "";
+  fields.namedItem("goal").value = automation.goal || "";
+  fields.namedItem("enabled").checked = automation.enabled !== false;
+  fields.namedItem("workspace").value = automation.workspace || "";
+  fields.namedItem("isolation").value = automation.isolation === "worktree" ? "worktree" : "direct";
+  fields.namedItem("flowMode").value = automation.flowMode || "";
+  fields.namedItem("retryLimit").value = String(automation.retryLimit || 0);
+  fields.namedItem("retryDelayMinutes").value = String(automation.retryDelayMinutes || 5);
+  const schedule = automation.schedule || {};
+  fields.namedItem("scheduleKind").value = schedule.kind === "daily" ? "daily" : "interval";
+  fields.namedItem("everyMinutes").value = String(schedule.everyMinutes || 60);
+  fields.namedItem("dailyTime").value = schedule.time || "09:00";
+  $("#automationFormHint").textContent = `正在编辑 ${automation.name || automation.id}`;
+  syncAutomationScheduleFields();
+  form.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function readAutomationForm() {
+  const form = $("#automationForm");
+  const fields = form.elements;
+  const kind = String(fields.namedItem("scheduleKind").value || "interval");
+  return {
+    id: String(fields.namedItem("id").value || ""),
+    name: String(fields.namedItem("name").value || "").trim(),
+    goal: String(fields.namedItem("goal").value || "").trim(),
+    enabled: fields.namedItem("enabled").checked,
+    workspace: String(fields.namedItem("workspace").value || "").trim(),
+    isolation: String(fields.namedItem("isolation").value || "direct"),
+    flowMode: String(fields.namedItem("flowMode").value || "") || null,
+    retryLimit: Number(fields.namedItem("retryLimit").value || 0),
+    retryDelayMinutes: Number(fields.namedItem("retryDelayMinutes").value || 5),
+    schedule:
+      kind === "daily"
+        ? { kind, time: String(fields.namedItem("dailyTime").value || "09:00") }
+        : { kind, everyMinutes: Number(fields.namedItem("everyMinutes").value || 60) },
+  };
+}
+
+async function refreshAutomations() {
+  const data = await api("/api/automations");
+  S.automations = data.automations || [];
+  S.automationRunner = data.runner || null;
+  renderAutomations();
+}
+
+async function saveAutomationFromForm(event) {
+  event.preventDefault();
+  const payload = readAutomationForm();
+  if (!payload.goal) {
+    toast("自动化目标不能为空", "err");
+    return;
+  }
+  const id = payload.id;
+  delete payload.id;
+  const button = $("#automationSave");
+  button.disabled = true;
+  $("#automationFormHint").textContent = "保存中…";
+  try {
+    await api(id ? `/api/automations/${encodeURIComponent(id)}` : "/api/automations", {
+      method: id ? "PATCH" : "POST",
+      body: payload,
+    });
+    resetAutomationForm();
+    await refreshAutomations();
+    toast(id ? "自动化已更新" : "自动化已创建", "ok");
+  } catch (err) {
+    $("#automationFormHint").textContent = `保存失败：${err.message}`;
+    toast(`保存失败：${err.message}`, "err");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function runAutomationFromUi(id) {
+  try {
+    await api(`/api/automations/${encodeURIComponent(id)}/run`, { method: "POST", body: {} });
+    await refreshAutomations();
+    toast("自动化任务已进入队列", "ok");
+  } catch (err) {
+    toast(err.message, "err");
+  }
+}
+
+async function toggleAutomationFromUi(id, enabled) {
+  try {
+    await api(`/api/automations/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: { enabled },
+    });
+    await refreshAutomations();
+    toast(enabled ? "自动化已启用" : "自动化已暂停", "ok");
+  } catch (err) {
+    toast(err.message, "err");
+  }
+}
+
+async function deleteAutomationFromUi(id) {
+  const automation = S.automations.find((item) => item.id === id);
+  if (!window.confirm(`删除自动化「${automation?.name || id}」？`)) return;
+  try {
+    await api(`/api/automations/${encodeURIComponent(id)}`, { method: "DELETE" });
+    resetAutomationForm();
+    await refreshAutomations();
+    toast("自动化已删除", "ok");
+  } catch (err) {
+    toast(err.message, "err");
+  }
+}
+
+async function openAutomationModal() {
+  resetAutomationForm();
+  renderAutomations();
+  $("#automationModal").showModal();
+  try {
+    await refreshAutomations();
+  } catch (err) {
+    toast(`读取自动化失败：${err.message}`, "err");
+  }
+}
+
 function renderAll() {
   renderAgents();
   renderTasks();
@@ -2224,6 +2518,7 @@ function renderAll() {
   renderWorkspace();
   renderStats();
   renderContext();
+  renderAutomations();
   renderFlow();
 }
 
@@ -2332,8 +2627,13 @@ function autosize(el) {
 
 /* ---------------- 事件流 ---------------- */
 
+let eventSource = null;
+
 function connect() {
-  const es = new EventSource("/api/stream");
+  if (eventSource) eventSource.close();
+  const token = authToken();
+  const es = new EventSource(`/api/stream${token ? `?token=${encodeURIComponent(token)}` : ""}`);
+  eventSource = es;
   es.onopen = () => {
     $("#connState").textContent = "已连接 · LIVE";
     $("#connDot").classList.add("on");
@@ -2426,6 +2726,17 @@ function handleEvent(ev) {
     case "settings.changed": {
       S.settings = ev.settings || {};
       renderFlowModeControls();
+      break;
+    }
+    case "automations.changed": {
+      S.automations = ev.automations || [];
+      renderAutomations();
+      break;
+    }
+    case "security.audit": {
+      if (S.security) {
+        S.security.audit = [ev.event, ...(S.security.audit || [])].slice(0, 20);
+      }
       break;
     }
     case "message.start": {
@@ -3078,7 +3389,8 @@ function bindQuit() {
   btn.addEventListener("click", async () => {
     if (!window.confirm("退出 AGENTFORGE？")) return;
     try {
-      await fetch("/api/shutdown", { method: "POST" });
+      const res = await fetch("/api/shutdown", { method: "POST", headers: authHeaders() });
+      if (res.status === 401) openAuthModal("退出服务需要 API Token");
     } catch {
       /* 服务已经在退出的路上 */
     }
@@ -3356,6 +3668,35 @@ function bind() {
   $("#providerModal").addEventListener("click", (e) => {
     if (e.target === e.currentTarget) e.currentTarget.close();
   });
+  $("#automationBtn").addEventListener("click", openAutomationModal);
+  $("#automationModalClose").addEventListener("click", () => $("#automationModal").close());
+  $("#automationForm").addEventListener("submit", saveAutomationFromForm);
+  $("#automationReset").addEventListener("click", resetAutomationForm);
+  $("#automationScheduleKind").addEventListener("change", syncAutomationScheduleFields);
+  $("#automationList").addEventListener("click", (e) => {
+    const button = e.target.closest("[data-automation-action]");
+    const row = e.target.closest("[data-automation-id]");
+    if (!button || !row) return;
+    const automation = S.automations.find((item) => item.id === row.dataset.automationId);
+    if (!automation) return;
+    const action = button.dataset.automationAction;
+    if (action === "edit") fillAutomationForm(automation);
+    else if (action === "run") runAutomationFromUi(automation.id);
+    else if (action === "toggle") toggleAutomationFromUi(automation.id, !automation.enabled);
+    else if (action === "delete") deleteAutomationFromUi(automation.id);
+  });
+  $("#automationModal").addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) e.currentTarget.close();
+  });
+  $("#authSave").addEventListener("click", () => {
+    const token = String($("#authTokenInput").value || "").trim();
+    setAuthToken(token);
+    $("#authSaveHint").textContent = "正在连接…";
+    window.location.reload();
+  });
+  $("#authTokenInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("#authSave").click();
+  });
 
   /* 面板 */
   $("#tabs").addEventListener("click", (e) => {
@@ -3568,6 +3909,9 @@ async function boot() {
     S.tasks = state.tasks;
     S.settings = state.settings || {};
     S.scheduler = state.scheduler || null;
+    S.automations = state.automations || [];
+    S.automationRunner = state.automationRunner || null;
+    S.security = state.security || null;
     if (state.activeTask) S.task = state.activeTask;
     S.openStep = "";
     renderFlowModeControls();
@@ -3580,6 +3924,11 @@ async function boot() {
     if (hashTab === "settings") openFlowSettings();
     else switchTab(["context", "debate", "plan", "workspace", "files", "stats"].includes(hashTab) ? hashTab : S.tab);
   } catch (err) {
+    if (err.authRequired) {
+      $("#connState").textContent = "需要 API Token";
+      openAuthModal(err.message);
+      return;
+    }
     $("#connState").textContent = "服务未启动";
     toast(`无法连接后端：${err.message}`, "err");
   }

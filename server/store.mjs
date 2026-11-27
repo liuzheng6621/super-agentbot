@@ -219,6 +219,8 @@ function normalizePlanStep(step = {}, fallbackId = 'step-1', used = new Set(), r
     delete saved.selfReview;
     delete saved.reviewerId;
     delete saved.implementerId;
+    delete saved.traceSpanId;
+    delete saved.traceParentSpanId;
     delete saved.resultText;
     delete saved.outputRole;
     delete saved.outputName;
@@ -278,6 +280,8 @@ function emptyDb() {
       debateParticipants: 5,
       debatePoolSeats: 1,
       debateConcurrency: 2,
+      automations: [],
+      securityAudit: [],
     },
   };
 }
@@ -399,6 +403,39 @@ function removeWorktree(task) {
   }
 }
 
+function traceKindFor(type) {
+  const value = String(type || '');
+  if (value.startsWith('run.')) return 'run';
+  if (value.startsWith('tool.') || value.startsWith('cli.')) return 'tool';
+  if (value.startsWith('quality.')) return 'quality';
+  if (value.startsWith('review.')) return 'review';
+  if (value.startsWith('skill.')) return 'skill';
+  if (value.startsWith('message.')) return 'message';
+  if (value.startsWith('plan.')) return 'plan';
+  if (value.startsWith('file.') || value.startsWith('fs.')) return 'file';
+  if (value.startsWith('automation.')) return 'automation';
+  if (value.startsWith('scheduler.')) return 'scheduler';
+  return 'event';
+}
+
+function ensureTaskTrace(task, runId, spanId, at) {
+  const traceId = String(runId || task.id);
+  if (!task.trace || typeof task.trace !== 'object' || task.trace.traceId !== traceId) {
+    task.trace = {
+      version: 1,
+      traceId,
+      runId: runId || null,
+      rootSpanId: spanId,
+      startedAt: at,
+      endedAt: null,
+      updatedAt: at,
+    };
+  } else {
+    task.trace.updatedAt = at;
+  }
+  return task.trace;
+}
+
 class Store {
   constructor() {
     this.db = emptyDb();
@@ -469,6 +506,8 @@ class Store {
             providerCapabilitiesMigrated: true,
           },
         };
+        if (!Array.isArray(this.db.settings.automations)) this.db.settings.automations = [];
+        if (!Array.isArray(this.db.settings.securityAudit)) this.db.settings.securityAudit = [];
         // 运行状态不跨进程保留
         normalizeSeats(this.db.agents);
         let recovered = !capabilitiesMigrated;
@@ -504,10 +543,37 @@ class Store {
         }
         for (const t of this.db.tasks) {
           if (t.status === 'running' || t.status === 'stopping' || t.status === 'queued') {
+            const previousStatus = t.status;
+            const recoveredAt = Date.now();
+            const recoveryReason = '服务重启时运行中的任务已中断，可从任务详情重新运行';
             t.status = 'stopped';
-            t.endedAt ||= Date.now();
+            t.endedAt ||= recoveredAt;
             t.queuePosition = null;
-            t.waitingReason ||= '服务重启时排队任务已中断';
+            t.waitingReason ||= recoveryReason;
+            t.recovery = {
+              previousStatus,
+              status: 'interrupted',
+              at: recoveredAt,
+              reason: recoveryReason,
+            };
+            if (!Array.isArray(t.events)) t.events = [];
+            t.events.push({
+              id: randomUUID(),
+              at: recoveredAt,
+              runId: t.runId || null,
+              traceId: t.runId || t.id,
+              spanId: randomUUID(),
+              parentSpanId: null,
+              kind: 'run',
+              type: 'run.recovered',
+              agentId: '',
+              stepId: '',
+              data: {
+                previousStatus,
+                status: 'stopped',
+                reason: recoveryReason,
+              },
+            });
             recovered = true;
           }
           for (const s of t.plan || []) {
@@ -1007,6 +1073,8 @@ class Store {
       messages: [],
       artifacts: [],
       runId: null,
+      trace: null,
+      recovery: null,
       repairRound: 0,
       planVersion: 0,
       planVersions: [],
@@ -1051,6 +1119,8 @@ class Store {
       executionMs: Number(task.executionMs) || 0,
       scheduler: task.scheduler || null,
       runId: task.runId || null,
+      trace: task.trace ? { ...task.trace } : null,
+      recovery: task.recovery ? { ...task.recovery } : null,
       repairRound: task.repairRound || 0,
       planVersion: task.planVersion || 0,
       planVersions: (task.planVersions || []).length,
@@ -1097,6 +1167,28 @@ class Store {
     this.save({ settings: true });
     this.broadcast({ type: 'settings.changed', settings: { ...s } });
     return { ...s };
+  }
+
+  recordSecurityEvent(event = {}) {
+    if (!Array.isArray(this.db.settings.securityAudit)) this.db.settings.securityAudit = [];
+    const entry = {
+      id: randomUUID(),
+      at: Date.now(),
+      type: String(event.type || 'security.event').slice(0, 80),
+      method: String(event.method || '').slice(0, 12),
+      path: String(event.path || '').slice(0, 500),
+      remoteAddress: String(event.remoteAddress || '').slice(0, 120),
+      origin: String(event.origin || '').slice(0, 500),
+      reason: String(event.reason || '').slice(0, 500),
+      tokenSource: String(event.tokenSource || '').slice(0, 20),
+    };
+    this.db.settings.securityAudit.push(entry);
+    if (this.db.settings.securityAudit.length > 100) {
+      this.db.settings.securityAudit.splice(0, this.db.settings.securityAudit.length - 100);
+    }
+    this.save({ settings: true });
+    this.broadcast({ type: 'security.audit', event: entry });
+    return entry;
   }
 
   updateTask(id, patch, event = 'task.updated') {
@@ -1453,18 +1545,53 @@ class Store {
     const task = this.getTask(taskId);
     if (!task) return null;
     if (!Array.isArray(task.events)) task.events = [];
+    const at = Number(event.at) || Date.now();
+    const type = String(event.type || 'event').slice(0, 120);
+    const runId = String(event.runId || task.runId || '') || null;
+    const spanId =
+      String(event.spanId || '').replace(/[^\w-]/g, '').slice(0, 80) || randomUUID();
+    const trace = ensureTaskTrace(task, runId, spanId, at);
+    const stepId = String(event.stepId || '');
+    let parentSpanId;
+    if (Object.prototype.hasOwnProperty.call(event, 'parentSpanId')) {
+      parentSpanId = event.parentSpanId
+        ? String(event.parentSpanId).replace(/[^\w-]/g, '').slice(0, 80)
+        : null;
+    } else if (type === 'run.start' || spanId === trace.rootSpanId) {
+      parentSpanId = null;
+    } else if (stepId) {
+      const step = (task.plan || []).find((item) => item.id === stepId);
+      if (step) {
+        if (!step.traceSpanId) step.traceSpanId = randomUUID();
+        step.traceParentSpanId ||= trace.rootSpanId;
+        parentSpanId = step.traceSpanId;
+      } else {
+        parentSpanId = trace.rootSpanId;
+      }
+    } else {
+      parentSpanId = trace.rootSpanId;
+    }
     const saved = {
       id: randomUUID(),
-      at: Date.now(),
-      runId: task.runId || null,
-      agentId: '',
-      stepId: '',
-      type: 'event',
       ...event,
+      at,
+      runId,
+      traceId: String(event.traceId || trace.traceId),
+      spanId,
+      parentSpanId,
+      kind: String(event.kind || traceKindFor(type)),
+      agentId: '',
+      stepId,
+      type,
     };
+    saved.agentId = String(event.agentId || '');
     task.events.push(saved);
     if (task.events.length > MAX_TASK_EVENTS) {
       task.events.splice(0, task.events.length - MAX_TASK_EVENTS);
+    }
+    if (type === 'run.end' || type === 'run.error') {
+      trace.endedAt = at;
+      trace.updatedAt = at;
     }
     this.broadcast({
       type: 'task.event',
@@ -1630,6 +1757,21 @@ function transcriptJson(value) {
   return redactTranscriptText(JSON.stringify(value ?? null, null, 2));
 }
 
+function transcriptEvent(event) {
+  return {
+    at: event.at,
+    type: event.type,
+    kind: event.kind,
+    runId: event.runId,
+    traceId: event.traceId,
+    spanId: event.spanId,
+    parentSpanId: event.parentSpanId,
+    agentId: event.agentId,
+    stepId: event.stepId,
+    data: event.data ?? null,
+  };
+}
+
 function transcriptHtmlEscape(value) {
   return redactTranscriptText(value)
     .replace(/&/g, '&amp;')
@@ -1655,6 +1797,7 @@ function transcriptMarkdownBody(task) {
     `- 状态: \`${task.status || 'unknown'}\``,
     `- 模式: \`${task.mode || 'unknown'}\` / \`${task.flowMode || 'auto'}\``,
     `- Run ID: \`${task.runId || '—'}\``,
+    `- Trace ID: \`${task.trace?.traceId || task.runId || '—'}\``,
     `- 工作区: \`${task.workspace || '—'}\``,
     `- 创建: ${transcriptTime(task.createdAt)}`,
     `- 结束: ${transcriptTime(task.finishedAt || task.endedAt)}`,
@@ -1718,7 +1861,7 @@ function transcriptMarkdownBody(task) {
           .slice(-240)
           .map(
             (event) =>
-              `### ${transcriptTime(event.at)} · ${event.type || 'event'}\n\n\`\`\`json\n${transcriptJson(event.data ?? event)}\n\`\`\``,
+              `### ${transcriptTime(event.at)} · ${event.type || 'event'}\n\n\`\`\`json\n${transcriptJson(transcriptEvent(event))}\n\`\`\``,
           )
           .join('\n\n')
       : '暂无事件。',
@@ -1779,7 +1922,7 @@ function transcriptHtmlBody(task) {
     .slice(-240)
     .map(
       (event) =>
-        `<details><summary>${h(transcriptTime(event.at))} · ${h(event.type || 'event')}</summary><pre>${h(transcriptJson(event.data ?? event))}</pre></details>`,
+        `<details><summary>${h(transcriptTime(event.at))} · ${h(event.type || 'event')}</summary><pre>${h(transcriptJson(transcriptEvent(event)))}</pre></details>`,
     )
     .join('');
   const skillItems = skillActivations
@@ -1807,7 +1950,7 @@ details{margin:8px 0}code{background:#edf0f2;padding:1px 4px}.meta{color:#5c6975
 </head>
 <body>
 <h1>${h(task.title || 'AgentForge 运行记录')}</h1>
-<p class="meta">任务 ${h(task.id)} · 状态 ${h(task.status || 'unknown')} · ${h(transcriptTime(task.createdAt))}</p>
+<p class="meta">任务 ${h(task.id)} · 状态 ${h(task.status || 'unknown')} · Trace ${h(task.trace?.traceId || task.runId || '—')} · ${h(transcriptTime(task.createdAt))}</p>
 <p><strong>目标：</strong>${h(task.goal || '—')}</p>
 <section><h2>质量门</h2><p>状态 <code>${h(quality.status || 'pending')}</code> · 命令 <code>${h(quality.command || '—')}</code> · 退出码 <code>${h(quality.code ?? '—')}</code> · 耗时 ${h(quality.elapsed ?? '—')} ms</p>
 <p>评审身份：${h(quality.reviewerName || quality.reviewerId || '—')} → ${h(quality.implementerName || quality.implementerId || '—')} · 自审：${quality.selfReview ? '是' : '否'}</p>

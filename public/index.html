@@ -57,6 +57,7 @@
             <button class="link-btn" id="rebalanceBtn">智能分工</button>
             <button class="link-btn" id="realTeamBtn">体检并换真实席位</button>
             <button class="link-btn" id="providerBtn">Provider 配置</button>
+            <button class="link-btn" id="automationBtn">Automation 定时任务</button>
           </section>
 
           <section class="rail-section grow">
@@ -709,6 +710,116 @@
               </div>
             </form>
           </div>
+        </div>
+      </dialog>
+
+      <dialog class="modal automation-modal" id="automationModal">
+        <div class="modal-inner">
+          <header class="modal-head">
+            <h3>Automation 定时任务</h3>
+            <button type="button" class="icon-btn" id="automationModalClose" aria-label="关闭">×</button>
+          </header>
+          <div class="modal-body">
+            <p class="hint" id="automationHint">
+              定时创建真实协作任务。上一轮未结束时不会重叠启动；失败可按配置重试，历史保留最近 20 次。
+            </p>
+            <div class="automation-list" id="automationList"></div>
+            <form class="automation-form" id="automationForm">
+              <input type="hidden" name="id" />
+              <div class="field-row">
+                <label class="field">
+                  <span>名称</span>
+                  <input name="name" placeholder="例如 每日回归" maxlength="80" />
+                </label>
+                <label class="field narrow">
+                  <span>启用</span>
+                  <input name="enabled" type="checkbox" class="switch" checked />
+                </label>
+              </div>
+              <label class="field">
+                <span>目标</span>
+                <textarea name="goal" rows="3" placeholder="例如：检查昨天的变更并运行回归测试" required></textarea>
+              </label>
+              <div class="field-row">
+                <label class="field">
+                  <span>调度类型</span>
+                  <select name="scheduleKind" id="automationScheduleKind">
+                    <option value="interval">按间隔</option>
+                    <option value="daily">每天固定时间</option>
+                  </select>
+                </label>
+                <label class="field" id="automationIntervalField">
+                  <span>间隔分钟</span>
+                  <input name="everyMinutes" type="number" min="1" max="10080" value="60" />
+                </label>
+                <label class="field" id="automationDailyField" hidden>
+                  <span>执行时间</span>
+                  <input name="dailyTime" type="time" value="09:00" />
+                </label>
+              </div>
+              <div class="field-row">
+                <label class="field">
+                  <span>工作目录<em>留空则自动新建</em></span>
+                  <input name="workspace" placeholder="例如 C:\work\project" />
+                </label>
+                <label class="field">
+                  <span>隔离方式</span>
+                  <select name="isolation">
+                    <option value="direct">直接工作区</option>
+                    <option value="worktree">Git 隔离工作树</option>
+                  </select>
+                </label>
+              </div>
+              <div class="field-row">
+                <label class="field">
+                  <span>开工方式</span>
+                  <select name="flowMode">
+                    <option value="">跟随全局</option>
+                    <option value="debate">先讨论</option>
+                    <option value="direct">直接开工</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>失败重试次数</span>
+                  <select name="retryLimit">
+                    <option value="0">不重试</option>
+                    <option value="1">1 次</option>
+                    <option value="2">2 次</option>
+                    <option value="3">3 次</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>重试间隔分钟</span>
+                  <input name="retryDelayMinutes" type="number" min="1" max="60" value="5" />
+                </label>
+              </div>
+              <div class="automation-form-actions">
+                <span class="flow-save-hint" id="automationFormHint"></span>
+                <button type="button" class="btn btn-ghost sm" id="automationReset">清空</button>
+                <button type="submit" class="btn btn-primary sm" id="automationSave">保存自动化</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </dialog>
+
+      <dialog class="modal auth-modal" id="authModal">
+        <div class="modal-inner">
+          <header class="modal-head">
+            <h3>API 鉴权</h3>
+            <span class="auth-lock">TOKEN</span>
+          </header>
+          <div class="modal-body">
+            <p class="hint" id="authHint">服务启用了 API Token，请输入后才能访问控制台。</p>
+            <label class="field">
+              <span>API Token</span>
+              <input id="authTokenInput" type="password" autocomplete="current-password" placeholder="Bearer Token" />
+            </label>
+          </div>
+          <footer class="modal-foot">
+            <span class="flow-save-hint" id="authSaveHint"></span>
+            <button type="button" class="btn btn-primary" id="authSave">连接</button>
+          </footer>
         </div>
       </dialog>
 
