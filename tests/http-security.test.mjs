@@ -138,3 +138,80 @@ test('HTTP API enforces token, CORS and persisted automation routes end to end',
     }
   }
 });
+
+test('HTTP API rejects agent tokens from operator endpoints and audits the principal', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-scope-'));
+  const port = await availablePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const agentToken = ['agentforge', 'scope', 'agent', '0123456789'].join('-');
+  const child = spawn(process.execPath, ['server/index.mjs'], {
+    cwd: path.resolve('.'),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: '127.0.0.1',
+      AGENTFORGE_DATA_DIR: temp,
+      AGENTFORGE_OPERATOR_TOKEN: TOKEN,
+      AGENTFORGE_AGENT_TOKENS: JSON.stringify([
+        { token: agentToken, id: 'worker-1', name: 'Worker One' },
+      ]),
+      AGENTFORGE_SKIP_TEAM_BOOTSTRAP: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+
+  try {
+    await waitForHealth(baseUrl, child);
+    const allowed = await fetch(`${baseUrl}/api/state`, {
+      headers: {
+        Authorization: `Bearer ${agentToken}`,
+        'X-Request-Id': 'scope-read-1',
+      },
+    });
+    assert.equal(allowed.status, 200);
+
+    const denied = await fetch(`${baseUrl}/api/probe`, {
+      headers: {
+        Authorization: `Bearer ${agentToken}`,
+        'X-Request-Id': 'scope-probe-1',
+      },
+    });
+    assert.equal(denied.status, 403);
+    const deniedBody = await denied.json();
+    assert.equal(deniedBody.code, 'api-scope-required');
+    assert.equal(deniedBody.requiredScope, 'operator:admin');
+
+    const state = await fetch(`${baseUrl}/api/state`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    }).then((response) => response.json());
+    const audit = state.security.audit.find((entry) => entry.requestId === 'scope-probe-1');
+    assert.ok(audit);
+    assert.equal(audit.actorId, 'worker-1');
+    assert.equal(audit.actorKind, 'agent');
+    assert.equal(audit.tokenScope, 'operator:admin');
+    assert.equal(audit.remoteAddress, '127.0.0.1');
+  } catch (err) {
+    throw new Error(`${err.message}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  } finally {
+    if (child.exitCode === null) child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+      setTimeout(resolve, 2000).unref();
+    });
+    try {
+      fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
+    } catch {
+      /* Windows can hold the data directory briefly. */
+    }
+  }
+});

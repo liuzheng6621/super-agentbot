@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   authenticateApi,
+  authorizeApi,
   corsDecision,
   corsHeaders,
   parseAllowedOrigins,
@@ -56,6 +57,53 @@ test('API token accepts bearer and dedicated header without weakening query hand
   );
   assert.equal(securityInternals.secureEqual(TOKEN, TOKEN), true);
   assert.equal(securityInternals.secureEqual(TOKEN, `${TOKEN}x`), false);
+});
+
+test('API principals enforce scopes and reviewer tooling stays agent-safe', () => {
+  const agentToken = ['agentforge', 'agent', 'token', '0123456789'].join('-');
+  const operatorToken = ['agentforge', 'operator', 'token', '0123456789'].join('-');
+  const config = resolveSecurityConfig({
+    AGENTFORGE_API_TOKEN: TOKEN,
+    AGENTFORGE_OPERATOR_TOKEN: operatorToken,
+    AGENTFORGE_AGENT_TOKENS: JSON.stringify([
+      { token: agentToken, id: 'agent-1', name: 'Readonly Agent' },
+    ]),
+  });
+  const agentAuth = authenticateApi(
+    { headers: { authorization: `Bearer ${agentToken}` } },
+    new URL('http://localhost/api/state'),
+    config,
+  );
+  assert.equal(agentAuth.ok, true);
+  assert.equal(agentAuth.principal.kind, 'agent');
+  assert.equal(authorizeApi(agentAuth.principal, 'GET', '/api/state').ok, true);
+  assert.equal(authorizeApi(agentAuth.principal, 'POST', '/api/probe').ok, false);
+  assert.equal(authorizeApi(agentAuth.principal, 'POST', '/api/shutdown').ok, false);
+
+  const operatorAuth = authenticateApi(
+    { headers: { authorization: `Bearer ${operatorToken}` } },
+    new URL('http://localhost/api/state'),
+    config,
+  );
+  assert.equal(operatorAuth.principal.kind, 'operator');
+  assert.equal(authorizeApi(operatorAuth.principal, 'POST', '/api/probe').ok, false);
+
+  const ownerAuth = authenticateApi(
+    { headers: { authorization: `Bearer ${TOKEN}` } },
+    new URL('http://localhost/api/state'),
+    config,
+  );
+  assert.equal(ownerAuth.principal.kind, 'owner');
+  assert.equal(authorizeApi(ownerAuth.principal, 'POST', '/api/probe').ok, true);
+
+  const local = authenticateApi(
+    { headers: {} },
+    new URL('http://localhost/api/state'),
+    resolveSecurityConfig({}),
+  );
+  assert.equal(local.ok, true);
+  assert.equal(local.principal.kind, 'owner');
+  assert.equal(authorizeApi(local.principal, 'POST', '/api/shutdown').ok, true);
 });
 
 test('CORS defaults to same-origin and supports an explicit allow list', () => {

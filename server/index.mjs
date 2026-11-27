@@ -1,6 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import {
   store,
   ROOT,
@@ -35,6 +36,7 @@ import {
 } from './workspace.mjs';
 import {
   authenticateApi,
+  authorizeApi,
   clientAddress,
   corsDecision,
   corsHeaders,
@@ -197,6 +199,7 @@ const server = http.createServer(async (req, res) => {
   }
   const { pathname, searchParams } = url;
   const method = req.method || 'GET';
+  const requestId = String(req.headers['x-request-id'] || crypto.randomUUID());
 
   if (!pathname.startsWith('/api/')) {
     return serveStatic(req, res, pathname);
@@ -215,6 +218,7 @@ const server = http.createServer(async (req, res) => {
         type: 'cors.denied',
         method,
         path: pathname,
+        requestId,
         remoteAddress: clientAddress(req),
         origin: cors.origin,
         reason: '来源不在允许列表',
@@ -230,6 +234,7 @@ const server = http.createServer(async (req, res) => {
   try {
     const isHook = /^\/api\/hooks\/[\w-]+$/.test(pathname);
     const isPublicHealth = pathname === '/api/health';
+    let principal = null;
     if (!isHook && !isPublicHealth) {
       const auth = authenticateApi(req, url, SECURITY);
       if (!auth.ok) {
@@ -237,6 +242,7 @@ const server = http.createServer(async (req, res) => {
           type: 'api.auth.denied',
           method,
           path: pathname,
+          requestId,
           remoteAddress: clientAddress(req),
           origin: req.headers.origin || '',
           reason: auth.reason,
@@ -246,6 +252,28 @@ const server = http.createServer(async (req, res) => {
           error: auth.reason,
           code: 'api-token-required',
           authRequired: true,
+        });
+      }
+      principal = auth.principal;
+      const authorization = authorizeApi(principal, method, pathname);
+      if (!authorization.ok) {
+        store.recordSecurityEvent({
+          type: 'api.scope.denied',
+          method,
+          path: pathname,
+          requestId,
+          remoteAddress: clientAddress(req),
+          origin: req.headers.origin || '',
+          reason: authorization.reason,
+          actorId: principal.id,
+          actorKind: principal.kind,
+          tokenScope: authorization.scope,
+          tokenSource: principal.source,
+        });
+        return json(res, 403, {
+          error: authorization.reason,
+          code: 'api-scope-required',
+          requiredScope: authorization.scope,
         });
       }
     }
@@ -642,6 +670,7 @@ const server = http.createServer(async (req, res) => {
           operation: 'files',
           args: { op: 'files' },
           agentId: searchParams.get('agentId') || '',
+          principal,
           source: searchParams.get('agentId') ? 'api.agent' : 'api.owner',
           audit: !!searchParams.get('agentId'),
         });
@@ -654,6 +683,7 @@ const server = http.createServer(async (req, res) => {
           operation: 'tree',
           args: { op: 'tree' },
           agentId: searchParams.get('agentId') || '',
+          principal,
           source: searchParams.get('agentId') ? 'api.agent' : 'api.owner',
           audit: !!searchParams.get('agentId'),
         });
@@ -666,6 +696,7 @@ const server = http.createServer(async (req, res) => {
           operation: 'search',
           args: { op: 'search', query: searchParams.get('q') || '' },
           agentId: searchParams.get('agentId') || '',
+          principal,
           source: searchParams.get('agentId') ? 'api.agent' : 'api.owner',
           audit: !!searchParams.get('agentId'),
         });
@@ -679,6 +710,7 @@ const server = http.createServer(async (req, res) => {
           operation: 'events',
           args: { op: 'events', limit },
           agentId: searchParams.get('agentId') || '',
+          principal,
           source: searchParams.get('agentId') ? 'api.agent' : 'api.owner',
           audit: !!searchParams.get('agentId'),
         });
@@ -691,6 +723,7 @@ const server = http.createServer(async (req, res) => {
           operation: 'changes',
           args: { op: 'changes' },
           agentId: searchParams.get('agentId') || '',
+          principal,
           source: searchParams.get('agentId') ? 'api.agent' : 'api.owner',
           audit: !!searchParams.get('agentId'),
         });
@@ -703,6 +736,7 @@ const server = http.createServer(async (req, res) => {
           operation: 'diff',
           args: { op: 'diff', path: searchParams.get('path') || '' },
           agentId: searchParams.get('agentId') || '',
+          principal,
           source: searchParams.get('agentId') ? 'api.agent' : 'api.owner',
           audit: !!searchParams.get('agentId'),
         });
@@ -732,6 +766,7 @@ const server = http.createServer(async (req, res) => {
           operation: op,
           args,
           agentId: typeof body.agentId === 'string' ? body.agentId : '',
+          principal,
           stepId: typeof body.stepId === 'string' ? body.stepId : '',
           source: body.agentId ? 'api.agent' : 'api.owner',
         });
@@ -745,6 +780,7 @@ const server = http.createServer(async (req, res) => {
           operation: 'file',
           args: { op: 'file', path: rel },
           agentId: searchParams.get('agentId') || '',
+          principal,
           source: searchParams.get('agentId') ? 'api.agent' : 'api.owner',
           audit: !!searchParams.get('agentId'),
         });
