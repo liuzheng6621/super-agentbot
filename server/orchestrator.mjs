@@ -14,6 +14,7 @@ import { policySummary, resolveCliPolicy } from './cli-policy.mjs';
 import {
   cancelQueuedTask,
   configureScheduler,
+  ensureTaskLease,
   enqueueTask,
   isQueued,
   isScheduled,
@@ -2693,6 +2694,23 @@ export function stopTask(taskId) {
 export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
   const task = store.getTask(taskId);
   if (!task || running.has(taskId)) return false;
+  let ownsLease = false;
+  try {
+    ensureTaskLease(taskId);
+    ownsLease = true;
+  } catch (err) {
+    if (err?.code !== 'TASK_LEASE_UNAVAILABLE') throw err;
+    store.updateTask(
+      taskId,
+      {
+        status: 'queued',
+        waitingReason: '任务已被其他实例占用',
+        queuePosition: null,
+      },
+      'task.status',
+    );
+    return false;
+  }
 
   const runId = randomUUID();
   const controller = new AbortController();
@@ -2979,6 +2997,7 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
     }
     return false;
   } finally {
+    if (ownsLease) store.releaseTaskLease(taskId);
     const current = running.get(taskId);
     if (current?.runId === runId) running.delete(taskId);
   }

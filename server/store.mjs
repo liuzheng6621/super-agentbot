@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { estimateTokens } from './tokens.mjs';
 import {
@@ -44,6 +44,135 @@ const MAX_PLAN_VERSIONS = 40;
 const MAX_SKILL_ACTIVATIONS = 40;
 const SAVE_WINDOW_MS = 200;
 const MAX_MCP_SERVERS = 32;
+const LOCK_FILE = path.join(DATA_DIR, '.db.lock');
+const LEASE_FILE = path.join(DATA_DIR, '.leases.json');
+const LOCK_TIMEOUT_MS = 5000;
+const LOCK_STALE_MS = 15000;
+const DEFAULT_TASK_LEASE_MS = 30000;
+const DEFAULT_AUTOMATION_CLAIM_MS = 15 * 60 * 1000;
+
+const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
+
+function sleepSync(ms) {
+  Atomics.wait(sleepBuffer, 0, 0, ms);
+}
+
+function readJsonFile(file, fallback = null) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return fallback;
+  }
+}
+
+function writeTextAtomic(file, value) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+  fs.writeFileSync(tmp, value, 'utf8');
+  try {
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      /* Best effort cleanup; the original file remains authoritative. */
+    }
+    throw err;
+  }
+}
+
+function writeJsonAtomic(file, value) {
+  writeTextAtomic(file, JSON.stringify(value));
+}
+
+function processIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === 'EPERM';
+  }
+}
+
+function cryptoHash(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function acquireFileLockSync({ timeoutMs = LOCK_TIMEOUT_MS, staleMs = LOCK_STALE_MS } = {}) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const started = Date.now();
+  const token = randomUUID();
+  while (true) {
+    try {
+      const fd = fs.openSync(LOCK_FILE, 'wx');
+      try {
+        fs.writeFileSync(
+          fd,
+          JSON.stringify({ pid: process.pid, token, createdAt: Date.now() }),
+          'utf8',
+        );
+      } finally {
+        fs.closeSync(fd);
+      }
+      return token;
+    } catch (err) {
+      if (err?.code !== 'EEXIST') throw err;
+      const holder = readJsonFile(LOCK_FILE, null);
+      let fileAge = Number.POSITIVE_INFINITY;
+      try {
+        fileAge = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
+      } catch {
+        /* The holder may have released the lock between open and stat. */
+      }
+      const age = holder ? Date.now() - Number(holder.createdAt || 0) : fileAge;
+      const stale = holder
+        ? age > staleMs || !processIsAlive(Number(holder.pid))
+        : fileAge > 1000;
+      if (stale) {
+        try {
+          fs.rmSync(LOCK_FILE, { force: true });
+        } catch {
+          /* Another process may be replacing it. */
+        }
+        continue;
+      }
+      if (Date.now() - started >= timeoutMs) {
+        const timeout = new Error('持久化文件锁等待超时');
+        timeout.code = 'STORE_LOCK_TIMEOUT';
+        throw timeout;
+      }
+      sleepSync(25);
+    }
+  }
+}
+
+function releaseFileLockSync(token) {
+  const holder = readJsonFile(LOCK_FILE, null);
+  if (holder?.token !== token) return;
+  try {
+    fs.rmSync(LOCK_FILE, { force: true });
+  } catch {
+    /* A stale lock can be reclaimed by the next writer. */
+  }
+}
+
+function taskLeaseIsLive(lease, now = Date.now()) {
+  return !!lease && Number(lease.expiresAt) > now && processIsAlive(Number(lease.pid));
+}
+
+function pruneExpiredLeases(data, now = Date.now()) {
+  const result = data && typeof data === 'object' ? data : {};
+  result.tasks ||= {};
+  result.automations ||= {};
+  for (const [id, lease] of Object.entries(result.tasks)) {
+    if (!taskLeaseIsLive(lease, now)) delete result.tasks[id];
+  }
+  for (const [id, claim] of Object.entries(result.automations)) {
+    if (!taskLeaseIsLive(claim, now)) delete result.automations[id];
+  }
+  return result;
+}
 
 export const ROLE_ORDER = ['planner', 'architect', 'coder', 'tester', 'reviewer'];
 export const ROLE_LABEL = {
@@ -584,10 +713,14 @@ function ensureTaskTrace(task, runId, spanId, at) {
 
 class Store {
   constructor() {
+    this.instanceId =
+      String(process.env.AGENTFORGE_INSTANCE_ID || '').trim() || randomUUID();
     this.db = emptyDb();
     this.listeners = new Set();
     this._saveTimer = null;
     this._lastSerialized = null;
+    this._baseTaskHashes = new Map();
+    this._storageConflicts = [];
     this._serialized = {
       agents: null,
       profiles: null,
@@ -602,6 +735,7 @@ class Store {
       providers: false,
       tasks: new Set(),
       tasksAll: false,
+      tasksRemoved: new Set(),
       settings: false,
     };
     this.persistenceStats = {
@@ -611,6 +745,9 @@ class Store {
       writes: 0,
       taskSerializations: 0,
       fullSerializations: 0,
+      conflicts: 0,
+      leaseAcquires: 0,
+      leaseRenewals: 0,
     };
     this._load();
     process.once('exit', () => this.flush());
@@ -621,6 +758,7 @@ class Store {
       fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
       if (fs.existsSync(DB_FILE)) {
         const raw = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+        this._lastSerialized = JSON.stringify(this._parseDiskDb(raw));
         const defaults = defaultProviders();
         const capabilitiesMigrated = raw.settings?.providerCapabilitiesMigrated === true;
         const providers = (Array.isArray(raw.providers) && raw.providers.length
@@ -655,6 +793,9 @@ class Store {
             providerCapabilitiesMigrated: true,
           },
         };
+        for (const task of this.db.tasks) {
+          this._baseTaskHashes.set(task.id, cryptoHash(JSON.stringify(task)));
+        }
         if (!Array.isArray(this.db.settings.automations)) this.db.settings.automations = [];
         if (!Array.isArray(this.db.settings.mcpServers)) this.db.settings.mcpServers = [];
         if (!Array.isArray(this.db.settings.approvals)) this.db.settings.approvals = [];
@@ -738,10 +879,16 @@ class Store {
             compaction: null,
             ...(t.contextState || {}),
           };
-          if (t.status === 'running' || t.status === 'stopping' || t.status === 'queued') {
+          const lease = this.taskLease(t.id, { renew: false });
+          if (
+            (t.status === 'running' || t.status === 'stopping' || t.status === 'queued') &&
+            (!lease || lease.instanceId === this.instanceId)
+          ) {
             const previousStatus = t.status;
             const recoveredAt = Date.now();
-            const recoveryReason = '服务重启时运行中的任务已中断，可从任务详情重新运行';
+            const recoveryReason = lease
+              ? '服务重启时本实例运行中的任务已中断，可从任务详情重新运行'
+              : '运行中任务没有有效实例租约，已按中断恢复';
             t.status = 'stopped';
             t.endedAt ||= recoveredAt;
             t.queuePosition = null;
@@ -773,6 +920,9 @@ class Store {
             recovered = true;
           }
           for (const s of t.plan || []) {
+            if (t.status !== 'stopped' && ['running', 'retrying', 'queued'].includes(s.status)) {
+              continue;
+            }
             if (s.status === 'running' || s.status === 'retrying' || s.status === 'queued') {
               s.status = 'stopped';
               s.note ||= '服务重启时中断';
@@ -859,6 +1009,9 @@ class Store {
           if (id) this._dirty.tasks.add(String(id));
         }
       }
+      for (const id of dirty.tasksRemoved || []) {
+        if (id) this._dirty.tasksRemoved.add(String(id));
+      }
     }
     if (!touched) this._dirty.all = true;
   }
@@ -871,6 +1024,7 @@ class Store {
       providers: false,
       tasks: new Set(),
       tasksAll: false,
+      tasksRemoved: new Set(),
       settings: false,
     };
   }
@@ -878,6 +1032,277 @@ class Store {
   _serializeTask(task) {
     this.persistenceStats.taskSerializations += 1;
     return JSON.stringify(task);
+  }
+
+  _parseDiskDb(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    return {
+      agents: Array.isArray(raw.agents) ? raw.agents : [],
+      profiles: Array.isArray(raw.profiles) ? raw.profiles : [],
+      providers: Array.isArray(raw.providers) ? raw.providers : [],
+      tasks: Array.isArray(raw.tasks) ? raw.tasks : [],
+      settings: raw.settings && typeof raw.settings === 'object' ? raw.settings : {},
+    };
+  }
+
+  _buildMergedDb() {
+    const disk = this._parseDiskDb(readJsonFile(DB_FILE, null));
+    const dirtyAll = this._dirty.all || this._dirty.tasksAll;
+    const merged = disk
+      ? {
+          agents: dirtyAll || this._dirty.agents ? this.db.agents : disk.agents,
+          profiles: dirtyAll || this._dirty.profiles ? this.db.profiles : disk.profiles,
+          providers: dirtyAll || this._dirty.providers ? this.db.providers : disk.providers,
+          settings: dirtyAll || this._dirty.settings ? this.db.settings : disk.settings,
+          tasks: [],
+        }
+      : {
+          agents: this.db.agents,
+          profiles: this.db.profiles,
+          providers: this.db.providers,
+          settings: this.db.settings,
+          tasks: [],
+        };
+
+    const localTasks = new Map(this.db.tasks.map((task) => [task.id, task]));
+    const diskTaskIds = new Set();
+    for (const diskTask of disk?.tasks || []) {
+      diskTaskIds.add(diskTask.id);
+      if (!dirtyAll && !this._dirty.tasks.has(diskTask.id)) {
+        merged.tasks.push(diskTask);
+        continue;
+      }
+      const local = localTasks.get(diskTask.id);
+      if (!local) {
+        if (!this._dirty.tasksRemoved.has(diskTask.id)) merged.tasks.push(diskTask);
+        continue;
+      }
+      const baseHash = this._baseTaskHashes.get(diskTask.id);
+      const diskHash = cryptoHash(JSON.stringify(diskTask));
+      const localHash = cryptoHash(JSON.stringify(local));
+      if (baseHash && diskHash !== baseHash && localHash === baseHash) {
+        merged.tasks.push(diskTask);
+        continue;
+      }
+      if (baseHash && diskHash !== baseHash && localHash !== baseHash && localHash !== diskHash) {
+        this.persistenceStats.conflicts += 1;
+        this._storageConflicts.push({
+          taskId: diskTask.id,
+          at: Date.now(),
+          diskHash,
+          baseHash,
+        });
+        this._storageConflicts = this._storageConflicts.slice(-50);
+        const error = new Error(`任务 ${diskTask.id} 已被其他实例修改，拒绝静默覆盖`);
+        error.code = 'STORE_CONFLICT';
+        error.taskId = diskTask.id;
+        throw error;
+      }
+      merged.tasks.push(local);
+    }
+    for (const local of this.db.tasks) {
+      if (!diskTaskIds.has(local.id) && (dirtyAll || this._dirty.tasks.has(local.id))) {
+        merged.tasks.push(local);
+      }
+    }
+    for (const id of this._dirty.tasksRemoved) {
+      merged.tasks = merged.tasks.filter((task) => task.id !== id);
+    }
+    return merged;
+  }
+
+  _readLeasesLocked() {
+    const leases = pruneExpiredLeases(
+      readJsonFile(LEASE_FILE, { version: 1, tasks: {}, automations: {} }),
+    );
+    leases.version = 1;
+    return leases;
+  }
+
+  _writeLeasesLocked(leases) {
+    writeJsonAtomic(LEASE_FILE, pruneExpiredLeases(leases));
+  }
+
+  _leaseSnapshotUnlocked() {
+    const leases = this._readLeasesLocked();
+    return {
+      tasks: Object.values(leases.tasks).map((lease) => ({
+        taskId: lease.taskId,
+        instanceId: lease.instanceId,
+        pid: lease.pid,
+        expiresAt: lease.expiresAt,
+        owned: lease.instanceId === this.instanceId,
+      })),
+      automations: Object.values(leases.automations).map((claim) => ({
+        automationId: claim.automationId,
+        instanceId: claim.instanceId,
+        pid: claim.pid,
+        runKey: claim.runKey || '',
+        expiresAt: claim.expiresAt,
+        owned: claim.instanceId === this.instanceId,
+      })),
+    };
+  }
+
+  _withLeaseLock(fn) {
+    const lockToken = acquireFileLockSync();
+    try {
+      const leases = this._readLeasesLocked();
+      return fn(leases);
+    } finally {
+      releaseFileLockSync(lockToken);
+    }
+  }
+
+  taskLease(taskId, { renew = true, ttlMs = DEFAULT_TASK_LEASE_MS } = {}) {
+    const id = String(taskId || '');
+    if (!id) return null;
+    return this._withLeaseLock((leases) => {
+      const now = Date.now();
+      const existing = leases.tasks[id];
+      if (taskLeaseIsLive(existing, now)) {
+        if (renew && existing.instanceId === this.instanceId) {
+          existing.expiresAt = now + Math.max(1000, Number(ttlMs) || DEFAULT_TASK_LEASE_MS);
+          existing.updatedAt = now;
+          this._writeLeasesLocked(leases);
+          this.persistenceStats.leaseRenewals += 1;
+        }
+        return { ...existing, owned: existing.instanceId === this.instanceId };
+      }
+      if (!renew) return null;
+      const lease = {
+        taskId: id,
+        instanceId: this.instanceId,
+        pid: process.pid,
+        acquiredAt: now,
+        updatedAt: now,
+        expiresAt: now + Math.max(1000, Number(ttlMs) || DEFAULT_TASK_LEASE_MS),
+      };
+      leases.tasks[id] = lease;
+      this._writeLeasesLocked(leases);
+      this.persistenceStats.leaseAcquires += 1;
+      return { ...lease, owned: true };
+    });
+  }
+
+  acquireTaskLease(taskId, options = {}) {
+    const lease = this.taskLease(taskId, { ...options, renew: true });
+    return lease?.owned ? lease : null;
+  }
+
+  renewTaskLease(taskId, options = {}) {
+    const existing = this.taskLease(taskId, { ...options, renew: false });
+    if (!existing || existing.instanceId !== this.instanceId) return null;
+    return this.taskLease(taskId, { ...options, renew: true });
+  }
+
+  releaseTaskLease(taskId) {
+    const id = String(taskId || '');
+    if (!id) return false;
+    return this._withLeaseLock((leases) => {
+      const lease = leases.tasks[id];
+      if (!lease || lease.instanceId !== this.instanceId) return false;
+      delete leases.tasks[id];
+      this._writeLeasesLocked(leases);
+      return true;
+    });
+  }
+
+  releaseAllLeases() {
+    return this._withLeaseLock((leases) => {
+      let released = 0;
+      for (const [id, lease] of Object.entries(leases.tasks)) {
+        if (lease.instanceId !== this.instanceId) continue;
+        delete leases.tasks[id];
+        released += 1;
+      }
+      for (const [id, claim] of Object.entries(leases.automations)) {
+        if (claim.instanceId !== this.instanceId) continue;
+        delete leases.automations[id];
+        released += 1;
+      }
+      if (released) this._writeLeasesLocked(leases);
+      return released;
+    });
+  }
+
+  claimAutomation(id, { ttlMs = DEFAULT_AUTOMATION_CLAIM_MS, runKey = '', renew = false } = {}) {
+    const automationId = String(id || '');
+    if (!automationId) return null;
+    return this._withLeaseLock((leases) => {
+      const now = Date.now();
+      const existing = leases.automations[automationId];
+      if (taskLeaseIsLive(existing, now)) {
+        if (existing.instanceId !== this.instanceId || !renew) {
+          return existing.instanceId === this.instanceId
+            ? { ...existing, owned: true }
+            : null;
+        }
+        existing.runKey = String(runKey || existing.runKey || '');
+        existing.updatedAt = now;
+        existing.expiresAt = now + Math.max(1000, Number(ttlMs) || DEFAULT_AUTOMATION_CLAIM_MS);
+        this._writeLeasesLocked(leases);
+        return { ...existing, owned: true };
+      }
+      const claim = {
+        automationId,
+        instanceId: this.instanceId,
+        pid: process.pid,
+        runKey: String(runKey || ''),
+        acquiredAt: now,
+        updatedAt: now,
+        expiresAt: now + Math.max(1000, Number(ttlMs) || DEFAULT_AUTOMATION_CLAIM_MS),
+      };
+      leases.automations[automationId] = claim;
+      this._writeLeasesLocked(leases);
+      return { ...claim, owned: true };
+    });
+  }
+
+  automationClaimIsOwned(id) {
+    const automationId = String(id || '');
+    if (!automationId) return false;
+    return this._withLeaseLock((leases) => {
+      const claim = leases.automations[automationId];
+      return !!claim && claim.instanceId === this.instanceId && taskLeaseIsLive(claim);
+    });
+  }
+
+  releaseAutomationClaim(id) {
+    const automationId = String(id || '');
+    if (!automationId) return false;
+    return this._withLeaseLock((leases) => {
+      const claim = leases.automations[automationId];
+      if (!claim || claim.instanceId !== this.instanceId) return false;
+      delete leases.automations[automationId];
+      this._writeLeasesLocked(leases);
+      return true;
+    });
+  }
+
+  leaseSnapshot() {
+    const lockToken = acquireFileLockSync();
+    try {
+      return this._leaseSnapshotUnlocked();
+    } finally {
+      releaseFileLockSync(lockToken);
+    }
+  }
+
+  storageSnapshot() {
+    const lockToken = acquireFileLockSync();
+    let leases;
+    try {
+      leases = this._leaseSnapshotUnlocked();
+    } finally {
+      releaseFileLockSync(lockToken);
+    }
+    return {
+      instanceId: this.instanceId,
+      persistence: { ...this.persistenceStats },
+      conflicts: this._storageConflicts.slice(-10).map((conflict) => ({ ...conflict })),
+      leases,
+    };
   }
 
   _buildSerializedDb() {
@@ -943,28 +1368,58 @@ class Store {
     this._saveTimer = setTimeout(() => this.flush(), SAVE_WINDOW_MS);
   }
 
-  /** 先写临时文件，再原子替换，避免退出瞬间截断 db.json。 */
-  flush() {
+  /** 在跨进程锁内合并磁盘状态，再原子替换 db.json。 */
+  flush({ throwOnConflict = false } = {}) {
     clearTimeout(this._saveTimer);
     this._saveTimer = null;
     this.persistenceStats.flushes += 1;
+    let lockToken = null;
     try {
-      if (this._lastSerialized === null) this._dirty.all = true;
-      const json = this._buildSerializedDb();
-      // 内容没变就别重写：恢复流程会无条件 flush 一次
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+      lockToken = acquireFileLockSync();
+      this._buildSerializedDb();
+      const merged = this._buildMergedDb();
+      const localTaskMap = new Map(this.db.tasks.map((task) => [task.id, task]));
+      const taskFragments = merged.tasks.map((task) => {
+        if (localTaskMap.get(task.id) === task) {
+          const fragment = this._serialized.tasks.get(task.id);
+          if (fragment !== undefined) return fragment;
+        }
+        return JSON.stringify(task);
+      });
+      const json = `{"agents":${JSON.stringify(merged.agents)},"profiles":${JSON.stringify(merged.profiles)},"providers":${JSON.stringify(merged.providers)},"tasks":[${taskFragments.join(',')}],"settings":${JSON.stringify(merged.settings)}}`;
       if (json === this._lastSerialized) {
+        this.db.agents = merged.agents;
+        this.db.profiles = merged.profiles;
+        this.db.providers = merged.providers;
+        this.db.settings = merged.settings;
+        this.db.tasks = merged.tasks;
+        this._lastSerialized = json;
         this._resetDirty();
         return;
       }
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-      const tmp = `${DB_FILE}.tmp`;
-      fs.writeFileSync(tmp, json, 'utf8');
-      fs.renameSync(tmp, DB_FILE);
+      writeTextAtomic(DB_FILE, json);
+      this.db.agents = merged.agents;
+      this.db.profiles = merged.profiles;
+      this.db.providers = merged.providers;
+      this.db.settings = merged.settings;
+      this.db.tasks = merged.tasks;
+      this._baseTaskHashes.clear();
+      for (const task of merged.tasks) {
+        this._baseTaskHashes.set(task.id, cryptoHash(JSON.stringify(task)));
+      }
       this._lastSerialized = json;
       this.persistenceStats.writes += 1;
       this._resetDirty();
     } catch (err) {
+      if (err?.code === 'STORE_CONFLICT') this.broadcast({
+        type: 'storage.conflict',
+        conflict: this._storageConflicts[this._storageConflicts.length - 1] || null,
+      });
       console.error('[store] 持久化失败:', err.message);
+      if (throwOnConflict) throw err;
+    } finally {
+      if (lockToken) releaseFileLockSync(lockToken);
     }
   }
 
@@ -1739,7 +2194,7 @@ class Store {
         /* 目录可能不存在 */
       }
     }
-    this.save({ tasks: [] });
+    this.save({ tasks: [], tasksRemoved: [id] });
     this.broadcast({ type: 'task.deleted', taskId: id });
     return true;
   }

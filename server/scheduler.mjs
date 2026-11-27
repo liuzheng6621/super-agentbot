@@ -15,6 +15,7 @@ const agentLeases = new Map();
 const agentWaiters = [];
 let executor = null;
 let dispatching = false;
+const LEASE_HEARTBEAT_MS = 10000;
 
 function unique(values) {
   return [...new Set((values || []).filter(Boolean))];
@@ -98,6 +99,7 @@ function waitingReason(entry) {
 }
 
 function canRun(entry) {
+  if (!entry.leaseOwned) return false;
   if (active.has(entry.taskId)) return false;
   if (active.size >= maxTaskConcurrency()) return false;
   for (const providerId of entry.providerIds) {
@@ -112,6 +114,36 @@ function canRun(entry) {
     if (current === 0 && lease.total >= agentLimit(agentId)) return false;
   }
   return true;
+}
+
+function renewEntryLease(entry) {
+  const lease = store.renewTaskLease(entry.taskId);
+  if (!lease) {
+    entry.leaseOwned = false;
+    entry.waitingReason = '任务租约已失效';
+    return false;
+  }
+  return true;
+}
+
+function startEntryLeaseHeartbeat(entry) {
+  if (entry.leaseTimer) return;
+  entry.leaseTimer = setInterval(() => {
+    renewEntryLease(entry);
+  }, LEASE_HEARTBEAT_MS);
+  entry.leaseTimer.unref?.();
+}
+
+function stopEntryLeaseHeartbeat(entry) {
+  if (!entry.leaseTimer) return;
+  clearInterval(entry.leaseTimer);
+  entry.leaseTimer = null;
+}
+
+function releaseEntryLease(entry) {
+  stopEntryLeaseHeartbeat(entry);
+  store.releaseTaskLease(entry.taskId);
+  entry.leaseOwned = false;
 }
 
 function refreshQueuePositions() {
@@ -171,6 +203,16 @@ export function configureScheduler({ execute } = {}) {
   queueMicrotask(() => dispatch());
 }
 
+export function ensureTaskLease(taskId) {
+  const lease = store.acquireTaskLease(taskId);
+  if (!lease) {
+    const error = new Error('任务已被其他实例占用');
+    error.code = 'TASK_LEASE_UNAVAILABLE';
+    throw error;
+  }
+  return lease;
+}
+
 export function enqueueTask(taskId, options = {}) {
   const task = store.getTask(taskId);
   if (!task) return { accepted: false, reason: '任务不存在' };
@@ -179,6 +221,10 @@ export function enqueueTask(taskId, options = {}) {
     const index = queue.findIndex((entry) => entry.taskId === taskId);
     return { accepted: false, reason: '任务已在队列中', position: index + 1 };
   }
+  const lease = store.acquireTaskLease(taskId);
+  if (!lease) {
+    return { accepted: false, reason: '任务已被其他实例占用' };
+  }
   const entry = {
     taskId,
     queuedAt: Date.now(),
@@ -186,7 +232,10 @@ export function enqueueTask(taskId, options = {}) {
     agentIds: taskAgentIds(task, options),
     options: { ...options },
     waitingReason: '',
+    leaseOwned: true,
+    leaseTimer: null,
   };
+  startEntryLeaseHeartbeat(entry);
   queue.push(entry);
   store.updateTask(
     taskId,
@@ -222,6 +271,7 @@ export function cancelQueuedTask(taskId) {
   const index = queue.findIndex((entry) => entry.taskId === taskId);
   if (index < 0) return false;
   const [entry] = queue.splice(index, 1);
+  releaseEntryLease(entry);
   store.updateTask(
     taskId,
     {
@@ -368,6 +418,25 @@ export function dispatch() {
       const index = queue.findIndex(canRun);
       if (index < 0) break;
       const [entry] = queue.splice(index, 1);
+      if (!renewEntryLease(entry)) {
+        releaseEntryLease(entry);
+        store.updateTask(
+          entry.taskId,
+          {
+            status: 'stopped',
+            endedAt: Date.now(),
+            finishedAt: Date.now(),
+            queuePosition: null,
+            waitingReason: '任务租约已失效，已取消调度',
+          },
+          'task.status',
+        );
+        store.addTaskEvent(entry.taskId, {
+          type: 'scheduler.lease.lost',
+          data: { reason: '任务租约已失效' },
+        });
+        continue;
+      }
       entry.startedAt = Date.now();
       active.set(entry.taskId, entry);
       acquireExplicitAgents(entry);
@@ -396,6 +465,7 @@ export function dispatch() {
         })
         .finally(() => {
           releaseExplicitAgents(entry);
+          releaseEntryLease(entry);
           active.delete(entry.taskId);
           notifyAgentWaiters();
           refreshQueuePositions();
@@ -410,6 +480,7 @@ export function dispatch() {
 
 /** Test and process-reset hook. */
 export function resetScheduler() {
+  for (const entry of [...queue, ...active.values()]) releaseEntryLease(entry);
   queue.length = 0;
   active.clear();
   agentLeases.clear();

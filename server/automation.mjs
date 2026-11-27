@@ -440,13 +440,23 @@ export async function tickAutomations({ now = Date.now(), dependencies = {} } = 
       if (!automation.enabled) continue;
       if (automation.lastTaskId && isScheduled(automation.lastTaskId)) continue;
       if (automation.retryDueAt && automation.retryDueAt <= now) {
+        const claim = store.claimAutomation(automation.id, {
+          runKey: `retry:${automation.retryDueAt}`,
+        });
+        if (!claim) continue;
         const result = scheduleAutomation(automation, 'retry', now, dependencies);
         if (result.ok) started.push({ id: automation.id, taskId: result.task.id, trigger: 'retry' });
+        else store.releaseAutomationClaim(automation.id);
         continue;
       }
       if (automation.nextRunAt && automation.nextRunAt <= now) {
+        const claim = store.claimAutomation(automation.id, {
+          runKey: `schedule:${automation.nextRunAt}`,
+        });
+        if (!claim) continue;
         const result = scheduleAutomation(automation, 'schedule', now, dependencies);
         if (result.ok) started.push({ id: automation.id, taskId: result.task.id, trigger: 'schedule' });
+        else store.releaseAutomationClaim(automation.id);
       }
     }
     return { skipped: false, started };

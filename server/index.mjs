@@ -410,6 +410,7 @@ const server = http.createServer(async (req, res) => {
         automations: visibleAutomations(principal),
         automationRunner: automationRunnerSnapshot(),
         otlp: otlpExporter.snapshot(),
+        storage: store.storageSnapshot(),
         security: {
           ...securitySummary({ host: HOST, config: SECURITY }),
           principal: {
@@ -1314,6 +1315,7 @@ const server = http.createServer(async (req, res) => {
         scheduler: schedulerSnapshot(),
         automationRunner: automationRunnerSnapshot(),
         otlp: otlpExporter.snapshot(),
+        storage: store.storageSnapshot(),
         security: securitySummary({ host: HOST, config: SECURITY }),
         uptime: process.uptime(),
       });
@@ -1388,6 +1390,7 @@ async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
   stopAutomationRunner();
+  store.releaseAllLeases();
   await otlpExporter.flush();
   for (const res of clients) res.end();
   clients.clear();
