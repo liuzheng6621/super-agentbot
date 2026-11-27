@@ -1,4 +1,4 @@
-import { store } from './store.mjs';
+import { normalizeTaskPriority, store } from './store.mjs';
 import { DEFAULT_PROVIDER_ID, providerRoute } from './providers.mjs';
 
 /**
@@ -15,10 +15,30 @@ const agentLeases = new Map();
 const agentWaiters = [];
 let executor = null;
 let dispatching = false;
+let queueSeq = 0;
 const LEASE_HEARTBEAT_MS = 10000;
+const PRIORITY_RANK = {
+  high: 3,
+  normal: 2,
+  low: 1,
+};
 
 function unique(values) {
   return [...new Set((values || []).filter(Boolean))];
+}
+
+function priorityRank(priority) {
+  return PRIORITY_RANK[normalizeTaskPriority(priority)];
+}
+
+function compareQueueEntries(left, right) {
+  const byPriority = priorityRank(right.priority) - priorityRank(left.priority);
+  if (byPriority) return byPriority;
+  return Number(left.queueSeq || 0) - Number(right.queueSeq || 0);
+}
+
+function sortQueue() {
+  queue.sort(compareQueueEntries);
 }
 
 function taskProviderIds(task, options = {}) {
@@ -227,6 +247,8 @@ export function enqueueTask(taskId, options = {}) {
   }
   const entry = {
     taskId,
+    queueSeq: ++queueSeq,
+    priority: normalizeTaskPriority(task.priority),
     queuedAt: Date.now(),
     providerIds: taskProviderIds(task, options),
     agentIds: taskAgentIds(task, options),
@@ -237,12 +259,14 @@ export function enqueueTask(taskId, options = {}) {
   };
   startEntryLeaseHeartbeat(entry);
   queue.push(entry);
+  sortQueue();
   store.updateTask(
     taskId,
     {
       status: 'queued',
+      priority: entry.priority,
       queuedAt: entry.queuedAt,
-      queuePosition: queue.length,
+      queuePosition: queue.findIndex((item) => item.taskId === taskId) + 1,
       waitingReason: '',
       startedAt: null,
       finishedAt: null,
@@ -252,6 +276,7 @@ export function enqueueTask(taskId, options = {}) {
         providerIds: entry.providerIds,
         agentIds: entry.agentIds,
         queuedAt: entry.queuedAt,
+        priority: entry.priority,
       },
     },
     'task.queue',
@@ -320,6 +345,7 @@ export function schedulerSnapshot() {
     queue: queue.map((entry, index) => ({
       taskId: entry.taskId,
       position: index + 1,
+      priority: entry.priority,
       queuedAt: entry.queuedAt,
       waitingReason: entry.waitingReason || waitingReason(entry),
       providerIds: [...entry.providerIds],
@@ -329,6 +355,7 @@ export function schedulerSnapshot() {
       taskId: entry.taskId,
       runId: store.getTask(entry.taskId)?.runId || null,
       startedAt: entry.startedAt,
+      priority: entry.priority,
       providerIds: [...entry.providerIds],
       agentIds: [...entry.agentIds],
     })),
@@ -487,6 +514,7 @@ export function resetScheduler() {
   agentWaiters.splice(0);
   executor = null;
   dispatching = false;
+  queueSeq = 0;
 }
 
 export { activeEntry };

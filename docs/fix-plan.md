@@ -288,7 +288,16 @@ node --test tests/**/*.test.{js,mjs,cjs}
 | 真实 CLI 覆盖 | 质量门、固定命令和团队体检已有真实子进程夹具；完整 CLI 交付矩阵仍缺 | 增加最小真实 CLI 矩阵，见第 6 节 |
 | 团队体检临时工作区 | 已修复 `cwd/path` 缺失，并用 `tests/team.test.mjs` 验证真实体检命令 | 继续扩展到 `.cmd/.bat` 与真实 Provider |
 | 工作区配额与清理 | 已实现平台产物配额、显式 413 拒绝、回收站保留期清理与任务用量投影 | 外部项目文件不计入配额；默认 `0 = 不限`，不静默删除业务文件 |
+| 任务优先级 | 已实现 `low / normal / high` 调度顺序、同优先级 FIFO、旧任务迁移和前端选择 | 只影响等待队列，不抢占已运行任务；Provider 级费用预算仍未实现 |
 | 超大目录树 | 已懒加载 | 仍需大仓库性能和增量索引验证 |
+
+### 3.13 P1-6 持久化结论
+
+**结论：不是每次全量写，本轮不改持久化实现。**
+
+`server/store.mjs` 已实现 200ms dirty 窗口、按 agents / profiles / providers / settings / tasks 记录脏区、只重新序列化变化任务、原子替换 `db.json`，并在 `process.exit`、`SIGINT`、`SIGTERM` 前 flush。`tests/persistence.test.mjs` 已验证 200 次 `appendMessage` 合并为一次写盘，且正常退出后数据完整可读。
+
+后续建议：如果出现超大单任务或高并发多实例写入，再单独评估按任务分文件或外部存储；本轮保持 `db.json` 结构兼容。
 
 ## 4. 工具调用能力评估
 

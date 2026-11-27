@@ -36,6 +36,7 @@
 - **上下文压缩与回放**：达到阈值可自动压缩，保留来源消息范围、摘要质量、历史记录和原文回放；压缩记录进入 `/api/state`，原始消息不删除。
 - **图片附件**：Provider Profile 需声明 `vision` 能力；只接收 PNG / JPEG / WebP / GIF，校验体积、尺寸和像素，按内容寻址保存，持久化数据不内联 base64 或本地绝对路径。
 - **重启恢复**：服务重启时把遗留的 queued / running 任务标为中断并写入 `run.recovered` 事件；已发出的 Automation 结果会重新对齐，不留下幽灵排队任务。
+- **任务优先级**：任务支持 `low / normal / high`，队列按优先级出队、同优先级保持 FIFO；选择器和任务列表会显示优先级，旧任务自动按 `normal` 迁移。
 - **增量持久化**：流式消息在 200ms dirty 窗口内合并落盘，只重新序列化变化任务；进程正常退出前会 flush 未完成窗口。
 - **CLI 解析缓存**：命令解析走进程级缓存，PATH 变化时由探测/刷新接口显式失效，减少热路径同步调用。
 - **计划版本**：初版、返工和手动重规划都会生成不可变快照，已完成工序不会被重规划抹掉；自动重规划最多一次，避免无限重试。
@@ -265,7 +266,7 @@ Git 隔离支持两种模式：
 
 同一进程内可以并行运行多个任务，每个任务使用独立工作区。全局 Scheduler 会限制同时运行的任务数，按 Provider 计算并发配额，并为显式声明的 Agent 获取租约；排队任务会显示队列位置和等待原因。Agent 可声明主 Provider 与备用 Provider，CLI 失败会在同一工序内回退并记录事件。
 
-工作区池默认关闭：Profile / Agent 显式设置 `workspacePolicy.crossTask=true` 后才可使用项目根下的 `Shared/` 或 `Agents/<agentId>/`；任务级 worktree 仍优先。跨任务池目录不会被任务删除回收，租约记录在工作区 `.agentforge/pool/leases.json`。平台产物支持 `workspaceQuotaBytes` 配额（默认 `0 = 不限`）和 `workspaceTrashRetentionDays` 回收站保留期；超额写入返回 `413 / workspace-quota-exceeded`，任务详情与 `/api/state` 暴露用量。任务优先级和 Provider 级费用预算仍未实现。
+工作区池默认关闭：Profile / Agent 显式设置 `workspacePolicy.crossTask=true` 后才可使用项目根下的 `Shared/` 或 `Agents/<agentId>/`；任务级 worktree 仍优先。跨任务池目录不会被任务删除回收，租约记录在工作区 `.agentforge/pool/leases.json`。平台产物支持 `workspaceQuotaBytes` 配额（默认 `0 = 不限`）和 `workspaceTrashRetentionDays` 回收站保留期；超额写入返回 `413 / workspace-quota-exceeded`，任务详情与 `/api/state` 暴露用量。任务支持 `low / normal / high` 优先级，调度队列按优先级出队、同优先级保持 FIFO；Provider 级费用预算仍未实现。
 
 ## 界面
 
@@ -459,7 +460,7 @@ npm test
 - **模拟模式**：一个可用 CLI 都没有时才会启用，产出仍是可运行的代码（`tests/*.test.js` 能直接 `node` 执行），但成员会明确标注 `SIM 演示`。
 - **CLI 严格策略是原生能力映射，不是内核级代理**：`strict` 只放行 Codex / DSH / Claude 能明确表达的组合，并覆盖参数里的危险开关；`inherit` 仍允许 CLI 使用自身工具。真正的网络代理和跨进程系统调用拦截仍待后续。
 - **网关由 Provider Profile 决定**：项目不依赖 Magpie 或任何内置兼容网关；Provider Profile、密钥引用、CLI 参数模板、自动回退和 CLI 严格策略已落地。
-- **调度粒度仍是任务级**：全局任务并发、Provider 配额和显式 Agent 租约已生效；Provider 配额按绑定该 Provider 的活跃任务计数，不按每次 CLI 调用计数。磁盘配额和任务优先级仍在路线图中。
+- **调度粒度仍是任务级**：全局任务并发、Provider 配额、显式 Agent 租约和任务优先级已生效；Provider 配额按绑定该 Provider 的活跃任务计数，不按每次 CLI 调用计数。
 - **agent-web 是可选开发期验收工具**：`E:\SKIl.1\agent-web` 固定提交 `fe543ea`，由 [tests/agent-web-compat.test.mjs](tests/agent-web-compat.test.mjs) 校验真实 HTTP 适配器与 10 个核心案例；不复制其源码，也不进入生产依赖。
 
 ## Roadmap
@@ -486,7 +487,7 @@ npm test
 - [x] trace / span 事件契约、任务详情与导出可见
 - [x] Automation（周期 / 每日、暂停恢复、立即运行、历史、重试）
 - [x] 服务重启恢复（中断任务、`run.recovered`、Automation 对账）
-- [ ] 任务优先级（磁盘配额已完成平台产物闭环）
+- [x] 任务优先级与磁盘配额（`low / normal / high` 队列、平台产物配额与回收站保留期）
 - [x] 跨任务工作区总览、DAG 图与时间回放
 - [x] 附件与读图（视觉能力声明、类型 / 体积 / 尺寸校验、内容寻址存储）
 - [x] 正规压缩（长任务的摘要式上下文压缩）

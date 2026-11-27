@@ -3648,6 +3648,10 @@ kbd {
   font-size: 10.5px;
 }
 
+.priority-mode .fm.active {
+  background: var(--yellow);
+}
+
 .hero-compose-foot .flow-mode {
   flex: none;
   margin-left: auto;

@@ -29,6 +29,7 @@ const S = {
   dir: "",
   worktree: false,
   flowMode: "debate",
+  priority: "normal",
   tab: "plan",
   atBottom: true,
   pending: new Map(),
@@ -532,7 +533,7 @@ function renderTasks() {
             t.waitingReason || "",
           )}">
             <span class="t-title">${escapeHtml(t.title)}</span>
-            <span class="t-meta"><span>${STATUS_TEXT[t.status] || t.status}${
+            <span class="t-meta"><span>${PRIORITY_TEXT[t.priority] || ""}</span><span>${STATUS_TEXT[t.status] || t.status}${
               t.status === "queued" && t.queuePosition ? ` #${t.queuePosition}` : ""
             }</span><span>${t.doneSteps}/${t.steps || 0}</span><span>${t.files}F</span></span>
             ${
@@ -556,6 +557,12 @@ function renderTasks() {
   renderHeroStats();
 }
 
+const PRIORITY_TEXT = {
+  high: "高",
+  normal: "普通",
+  low: "低",
+};
+
 const TASK_SUMMARY_FIELDS = [
   "id",
   "tenantId",
@@ -563,6 +570,7 @@ const TASK_SUMMARY_FIELDS = [
   "title",
   "goal",
   "mode",
+  "priority",
   "flowMode",
   "sourceWorkspace",
   "worktree",
@@ -2770,6 +2778,15 @@ function renderFlowModeControls() {
   }
 }
 
+function setPriority(priority) {
+  S.priority = ["high", "normal", "low"].includes(priority) ? priority : "normal";
+  $$("#composerPriority .fm").forEach((button) => {
+    const active = button.dataset.priority === S.priority;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", active ? "true" : "false");
+  });
+}
+
 function setFlowMode(mode) {
   S.flowMode = mode === "direct" ? "direct" : "debate";
   try {
@@ -3318,7 +3335,11 @@ async function createTask(goal) {
   }
   try {
     $("#heroStart").disabled = true;
-    const body = { goal: text, flowMode: S.flowMode === "direct" ? "direct" : "debate" };
+    const body = {
+      goal: text,
+      flowMode: S.flowMode === "direct" ? "direct" : "debate",
+      priority: S.priority,
+    };
     if (S.dir) body.workspace = S.dir;
     if (S.dir && S.worktree) body.isolation = "worktree";
     const { task } = await api("/api/tasks", { method: "POST", body });
@@ -4620,6 +4641,10 @@ function bind() {
     const btn = e.target.closest(".fm");
     if (btn) setFlowMode(btn.dataset.mode);
   });
+  $("#composerPriority").addEventListener("click", (e) => {
+    const btn = e.target.closest(".fm");
+    if (btn) setPriority(btn.dataset.priority);
+  });
   $("#flowSettingsBtn").addEventListener("click", openFlowSettings);
   $("#flowSave").addEventListener("click", saveFlowSettings);
   $("#flowModalClose").addEventListener("click", () => $("#flowModal").close());
@@ -4920,6 +4945,7 @@ async function boot() {
     /* ignore */
   }
   renderDirPick();
+  setPriority(S.priority);
 
   let night = false;
   try {

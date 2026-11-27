@@ -229,6 +229,7 @@ const TASK_SUMMARY_FIELDS = new Set([
   'title',
   'goal',
   'mode',
+  'priority',
   'flowMode',
   'sourceWorkspace',
   'worktree',
@@ -1199,6 +1200,7 @@ const server = http.createServer(async (req, res) => {
         task = store.createTask({
           goal,
           mode: body.mode === 'manual' ? 'manual' : 'auto',
+          priority: body.priority,
           workspace: typeof body.workspace === 'string' ? body.workspace : '',
           isolation: body.isolation === 'worktree' ? 'worktree' : 'direct',
           debate: body.flowMode === 'direct' || body.flowMode === 'debate' ? body.flowMode : null,

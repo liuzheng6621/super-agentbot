@@ -32,7 +32,7 @@ AgentForge 继续保留零依赖、零构建、可直接运行的优点，并通
 | Scheduler | 全局任务并发、Provider 配额、Agent 租约和排队原因可见 | Automation / Scheduler 仍是进程内调度，不是分布式队列 |
 | Automation | 周期 / 每日、CRUD、暂停恢复、重试、历史、启动恢复和 durable `await_event` | 事件等待持久化在 `settings.automations`；进程内调度器仍不是分布式队列 |
 | 服务安全 | owner / operator / agent / system 主体、Token 作用域、租户过滤、配额和审计 | 不是完整账号、RBAC、SSO 或按用户计费 |
-| 工作区 | 任务级 worktree / clone、显式工作区池、读后写版本守卫、事务回滚 | 跨任务池默认关闭；磁盘配额和任务优先级未实现 |
+| 工作区 | 任务级 worktree / clone、显式工作区池、读后写版本守卫、事务回滚 | 跨任务池默认关闭；平台产物配额已实现，外部项目文件不计入配额 |
 | 上下文 | 分段预算、稳定前缀、token 估算、spill、`contextStates`、自动摘要、质量评估与压缩回放 | 摘要仍是抽取式，不是模型生成的语义摘要 |
 | 可观测性 | 本地 trace / span、OTLP/HTTP JSON 导出、任务详情和运行记录导出 | OTLP 失败只记录状态，不影响本地任务执行 |
 | 状态接口 | `/api/state` 支持 cursor 分页、摘要字段选择和 active 详情按需加载 | 无参数请求保留全量旧响应以兼容现有客户端 |

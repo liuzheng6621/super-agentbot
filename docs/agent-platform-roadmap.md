@@ -129,7 +129,7 @@ Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile �
 
 - 已有只读 DAG、时间回放和跨任务总览；仍没有两个 Agent 产出的并排可视化合并评审。
 - 工作区树已支持目录懒加载，但超大仓库的索引复用和增量快照仍可继续优化。
-- 跨任务工作区池已支持显式共享 / 私有模式，但磁盘配额和自动清理策略仍未实现。
+- 跨任务工作区池已支持显式共享 / 私有模式；平台产物配额与回收站保留期已实现，外部项目文件不纳入配额。
 
 ### 改进建议
 
@@ -165,7 +165,7 @@ Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile �
 - 已有任务级 Scheduler，可限制同时运行的任务数，并展示排队位置和等待原因。
 - Provider 配额按绑定该 Provider 的活跃任务计数，不按每次 CLI 调用计数；同一个 Provider 仍可能被单任务内的多个工序并发使用。
 - Agent 租约只覆盖显式声明的 Agent；同一任务内可重入，不同任务之间互斥。
-- 磁盘配额、任务优先级和 Provider 级费用预算尚未实现；主/备 Provider 回退已实现。
+- 磁盘配额与任务优先级已实现；Provider 级费用预算尚未实现，主/备 Provider 回退已实现。
 - 已有可复用 Agent Profile（角色、技能、工具、MCP、Provider、模型、并发和工作区策略）；按能力标签自动路由仍可继续增强。
 
 ### 改进建议
@@ -184,7 +184,7 @@ Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile �
 3. **多工作区并行（已完成工作区池）**
    - 同一项目可创建多个隔离 worktree，按任务或分支分组。
    - 合并前做冲突预检，冲突交给指定 Agent 或人工解决。
-   - 工作区池已支持显式跨任务复用；磁盘配额和自动清理策略仍待后续。
+   - 工作区池已支持显式跨任务复用；平台产物配额和回收站保留期已生效。
 
 4. **事件与可观测性**
    - 统一记录调度排队、租约获取、Provider 限流、重试和回退。
@@ -204,6 +204,8 @@ Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile �
 | CI 与语法门 | 已完成 | GitHub Actions 覆盖 Ubuntu / Windows × Node 20 / 22；`npm run check:syntax` 检查全部 `.js/.mjs` |
 | Provider Profile | 已完成 | Agent 绑定主/备 Profile；Base URL、模型、密钥环境变量引用、CLI 参数模板和并发上限可配置；真实 CLI 失败后按顺序回退 |
 | 全局 Scheduler | 第一层已完成 | 任务并发上限、Provider 配额、排队位置、等待原因、Agent 租约和取消排队 |
+| 任务优先级 | 已完成 | `low / normal / high` 排序，同优先级按单调队列序号 FIFO；摘要、调度快照和界面可见 |
+| 工作区配额 | 已完成 | 平台产物配额、`413` 显式拒绝、回收站保留期和任务用量投影 |
 | CLI 执行策略 | 第一层已完成 | `inherit / strict`；工具白名单推导沙箱；Codex / DSH / Claude 能力矩阵；不可强制时拒绝；策略事件与消息元数据 |
 | Shell 沙箱 | 已完成固定命令路径 | 固定命令白名单、operator 审批、一次性执行、超时和进程树回收；任意 shell 仍关闭 |
 | 测试入口提取 | 已完成第一步 | `server/test-entry.mjs` 负责真实测试文件枚举与命令生成；`orchestrator.mjs` 保留兼容导出 |

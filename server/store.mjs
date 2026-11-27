@@ -192,6 +192,12 @@ export const ROLE_LABEL = {
   tester: '测试',
   reviewer: '评审',
 };
+export const TASK_PRIORITIES = ['low', 'normal', 'high'];
+
+export function normalizeTaskPriority(value) {
+  const priority = String(value || '').trim().toLowerCase();
+  return TASK_PRIORITIES.includes(priority) ? priority : 'normal';
+}
 
 export const TOOL_CATALOG = [
   {
@@ -880,6 +886,11 @@ class Store {
           a.timeouts = normalizeTimeoutOverrides(a.timeouts);
         }
         for (const t of this.db.tasks) {
+          const priority = normalizeTaskPriority(t.priority);
+          if (t.priority !== priority) {
+            t.priority = priority;
+            recovered = true;
+          }
           if (!t.tenantId) {
             t.tenantId = 'default';
             recovered = true;
@@ -1972,6 +1983,7 @@ class Store {
   createTask({
     goal,
     mode = 'auto',
+    priority = 'normal',
     workspace = '',
     debate = null,
     isolation = 'direct',
@@ -2033,6 +2045,7 @@ class Store {
       title: goal.length > 26 ? goal.slice(0, 26) + '…' : goal,
       goal,
       mode,
+      priority: normalizeTaskPriority(priority),
       // 工作流模式：null 跟随全局设置，debate 先讨论后实施，direct 直接开工
       flowMode: debate === 'direct' || debate === 'debate' ? debate : null,
       status: 'idle',
@@ -2095,6 +2108,7 @@ class Store {
       title: task.title,
       goal: task.goal,
       mode: task.mode,
+      priority: normalizeTaskPriority(task.priority),
       flowMode: task.flowMode || null,
       sourceWorkspace: task.sourceWorkspace || task.workspace,
       worktree: task.worktree ? { ...task.worktree } : null,

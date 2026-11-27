@@ -228,3 +228,79 @@ test('HTTP state pagination is stable, bounded and keeps the legacy shape', asyn
     }
   }
 });
+
+test('HTTP task creation persists priority and exposes it in state summaries', async () => {
+  const httpTemp = fs.mkdtempSync(path.join(temp, 'priority-http-'));
+  const port = await availablePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const child = spawn(process.execPath, ['server/index.mjs'], {
+    cwd: path.resolve('.'),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: '127.0.0.1',
+      AGENTFORGE_DATA_DIR: httpTemp,
+      AGENTFORGE_SKIP_TEAM_BOOTSTRAP: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+
+  try {
+    await waitForHealth(baseUrl, child);
+    const response = await fetch(`${baseUrl}/api/tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        goal: 'priority HTTP task',
+        priority: 'high',
+        autoRun: false,
+      }),
+    });
+    assert.equal(response.status, 201);
+    const { task } = await response.json();
+    assert.equal(task.priority, 'high');
+
+    const stateResponse = await fetch(
+      `${baseUrl}/api/state?limit=1&fields=id,title,priority&includeActiveTask=0`,
+    );
+    assert.equal(stateResponse.status, 200);
+    const state = await stateResponse.json();
+    assert.equal(state.tasks[0].id, task.id);
+    assert.equal(state.tasks[0].priority, 'high');
+
+    const invalid = await fetch(`${baseUrl}/api/tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        goal: 'invalid priority HTTP task',
+        priority: 'urgent-ish',
+        autoRun: false,
+      }),
+    });
+    assert.equal(invalid.status, 201);
+    assert.equal((await invalid.json()).task.priority, 'normal');
+  } catch (err) {
+    throw new Error(`${err.message}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  } finally {
+    if (child.exitCode === null) child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+      setTimeout(resolve, 2000).unref();
+    });
+    try {
+      fs.rmSync(httpTemp, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
+    } catch {
+      /* Windows may hold a workspace handle briefly. */
+    }
+  }
+});

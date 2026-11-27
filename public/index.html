@@ -181,6 +181,11 @@
                   <button class="fm active" data-mode="debate">先讨论</button>
                   <button class="fm" data-mode="direct">直接开工</button>
                 </div>
+                <div class="flow-mode mini priority-mode" id="composerPriority" role="group" aria-label="任务优先级">
+                  <button class="fm active" data-priority="normal" title="普通优先级">普通</button>
+                  <button class="fm" data-priority="high" title="优先进入调度队列">高</button>
+                  <button class="fm" data-priority="low" title="让其他任务先执行">低</button>
+                </div>
                 <div class="mention-list" id="mentionList"></div>
                 <label class="attach-btn" title="添加图片">
                   <input type="file" id="imageInput" accept="image/png,image/jpeg,image/webp,image/gif" hidden />

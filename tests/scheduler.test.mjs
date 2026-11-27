@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-scheduler-'));
 process.env.AGENTFORGE_DATA_DIR = temp;
@@ -196,6 +197,97 @@ test('scheduler enforces global task concurrency and reports queue position', as
   await wait(20);
   assert.deepEqual(started, [first.id, second.id]);
   assert.equal(store.getTask(second.id).status, 'done');
+});
+
+test('scheduler dequeues higher priority first and keeps FIFO within the same priority', async () => {
+  resetScheduler();
+  store.updateSettings({ maxTaskConcurrency: 1 });
+  store.updateProvider('local-default', { maxConcurrency: 4 });
+  let releaseFirst;
+  const firstGate = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const started = [];
+  configureScheduler({
+    execute: async (taskId) => {
+      started.push(taskId);
+      if (started.length === 1) await firstGate;
+      store.updateTask(taskId, { status: 'done' }, 'task.status');
+    },
+  });
+
+  const first = store.createTask({ goal: 'priority blocker' });
+  const low = store.createTask({ goal: 'priority low', priority: 'low' });
+  const normal = store.createTask({ goal: 'priority normal' });
+  const high = store.createTask({ goal: 'priority high', priority: 'high' });
+  enqueueTask(first.id);
+  enqueueTask(low.id);
+  enqueueTask(normal.id);
+  enqueueTask(high.id);
+  await wait(20);
+
+  assert.equal(store.getTask(first.id).priority, 'normal');
+  assert.equal(store.getTask(high.id).queuePosition, 1);
+  assert.equal(store.getTask(normal.id).queuePosition, 2);
+  assert.equal(store.getTask(low.id).queuePosition, 3);
+  assert.equal(schedulerSnapshot().queue[0].priority, 'high');
+
+  releaseFirst();
+  await wait(30);
+  assert.deepEqual(started, [first.id, high.id, normal.id, low.id]);
+});
+
+test('legacy tasks without priority load as normal without changing the db shape', () => {
+  const legacyDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-priority-legacy-'));
+  const legacyFile = path.join(legacyDir, 'db.json');
+  const legacyTask = {
+    id: 'legacy-priority-task',
+    goal: 'legacy task without priority',
+    title: 'legacy task',
+    mode: 'auto',
+    status: 'done',
+    createdAt: 1,
+    messages: [],
+    plan: [],
+    artifacts: [],
+    events: [],
+    fileChanges: [],
+  };
+  fs.writeFileSync(
+    legacyFile,
+    JSON.stringify({
+      agents: store.agents,
+      providers: store.providers,
+      profiles: [],
+      tasks: [legacyTask],
+      settings: store.db.settings,
+    }),
+  );
+  const storeUrl = new URL('../server/store.mjs', import.meta.url).href;
+  const script = `
+    import { store } from ${JSON.stringify(storeUrl)};
+    const task = store.getTask('legacy-priority-task');
+    if (task.priority !== 'normal') throw new Error('legacy priority was not migrated');
+    store.flush();
+    console.log(JSON.stringify(store.taskSummary(task)));
+  `;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: path.resolve('.'),
+    env: { ...process.env, AGENTFORGE_DATA_DIR: legacyDir },
+    encoding: 'utf8',
+  });
+  assert.equal(child.status, 0, child.stderr || child.stdout);
+  assert.equal(JSON.parse(child.stdout.trim()).priority, 'normal');
+  const saved = JSON.parse(fs.readFileSync(legacyFile, 'utf8'));
+  assert.deepEqual(Object.keys(saved).sort(), [
+    'agents',
+    'profiles',
+    'providers',
+    'settings',
+    'tasks',
+  ]);
+  assert.equal(saved.tasks[0].priority, 'normal');
+  fs.rmSync(legacyDir, { recursive: true, force: true });
 });
 
 test('provider quota and explicit agent leases block tasks until resources release', async () => {
