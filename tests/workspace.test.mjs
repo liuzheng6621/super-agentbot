@@ -64,7 +64,9 @@ test('workspace tree, read, write, search and change tracking form a closed loop
   assert.equal(found.results.length, 1);
   assert.equal(found.results[0].path, 'src/app.js');
 
-  writeWorkspaceEntry(task, 'src/app.js', 'export const answer = 42;\n');
+  writeWorkspaceEntry(task, 'src/app.js', 'export const answer = 42;\n', {
+    expectedVersion: read.version,
+  });
   current = store.getTask(task.id);
   const change = current.fileChanges.find((item) => item.path === 'src/app.js');
   assert.equal(change.status, 'M');
@@ -319,5 +321,168 @@ test('workspace pool policy rejects traversal and reserved directories', () => {
   });
   assert.throws(() => writeWorkspaceEntry(task, 'x.txt', 'x', {}, traversal), /越出工作区/);
   assert.throws(() => writeWorkspaceEntry(task, 'x.txt', 'x', {}, reserved), /内部目录/);
+  store.removeTask(task.id);
+});
+
+test('read-after-write guard rejects stale owner and agent writes with an audit trail', async () => {
+  const { toolGateway } = await import('../server/tool-gateway.mjs');
+  const task = store.createTask({ goal: 'read after write guard' });
+  const agent = store.addAgent({
+    name: 'Guard Writer',
+    role: 'coder',
+    mode: 'sim',
+    seat: false,
+    tools: ['workspace.read', 'workspace.write'],
+  });
+  const owner = { kind: 'owner', id: 'owner', name: 'Owner UI' };
+  const created = await toolGateway.invokeTool({
+    taskId: task.id,
+    toolId: 'workspace.write',
+    operation: 'write',
+    args: { op: 'write', path: 'src/guard.js', content: 'export const value = 1;\n' },
+    principal: owner,
+    source: 'test.owner',
+  });
+  assert.equal(created.ok, true, 'creating a new file does not need a prior read');
+
+  const ownerRead = await toolGateway.invokeTool({
+    taskId: task.id,
+    toolId: 'workspace.read',
+    operation: 'file',
+    args: { op: 'file', path: 'src/guard.js' },
+    principal: owner,
+    source: 'test.owner',
+  });
+  await assert.rejects(
+    toolGateway.invokeTool({
+      taskId: task.id,
+      toolId: 'workspace.write',
+      operation: 'write',
+      args: { op: 'write', path: 'src/guard.js', content: 'stale owner write\n' },
+      principal: owner,
+      source: 'test.owner',
+    }),
+    (err) => err.status === 409 && /expectedVersion/.test(err.message),
+  );
+  await assert.rejects(
+    toolGateway.invokeTool({
+      taskId: task.id,
+      toolId: 'workspace.write',
+      operation: 'write',
+      args: {
+        op: 'write',
+        path: 'src/guard.js',
+        content: 'stale owner write\n',
+        expectedVersion: '0000000000000000',
+      },
+      principal: owner,
+      source: 'test.owner',
+    }),
+    (err) => err.status === 409 && /写入冲突/.test(err.message),
+  );
+  const ownerWrite = await toolGateway.invokeTool({
+    taskId: task.id,
+    toolId: 'workspace.write',
+    operation: 'write',
+    args: {
+      op: 'write',
+      path: 'src/guard.js',
+      content: 'export const value = 2;\n',
+      expectedVersion: ownerRead.result.version,
+    },
+    principal: owner,
+    source: 'test.owner',
+  });
+  assert.equal(ownerWrite.ok, true);
+
+  await assert.rejects(
+    toolGateway.invokeTool({
+      taskId: task.id,
+      toolId: 'workspace.write',
+      operation: 'write',
+      args: { op: 'write', path: 'src/guard.js', content: 'agent without read\n' },
+      agentId: agent.id,
+      source: 'test.agent',
+    }),
+    (err) => err.status === 409 && /必须先读取/.test(err.message),
+  );
+  const agentRead = await toolGateway.invokeTool({
+    taskId: task.id,
+    toolId: 'workspace.read',
+    operation: 'file',
+    args: { op: 'file', path: 'src/guard.js' },
+    agentId: agent.id,
+    source: 'test.agent',
+  });
+  const system = {
+    kind: 'system',
+    id: 'orchestrator',
+    name: 'Orchestrator',
+  };
+  const orchestratorWrite = await toolGateway.invokeTool({
+    taskId: task.id,
+    toolId: 'workspace.write',
+    operation: 'write',
+    args: { op: 'write', path: 'src/guard.js', content: 'export const value = 3;\n' },
+    agentId: agent.id,
+    principal: system,
+    source: 'orchestrator',
+  });
+  assert.equal(orchestratorWrite.ok, true);
+  await toolGateway.invokeTool({
+    taskId: task.id,
+    toolId: 'workspace.read',
+    operation: 'file',
+    args: { op: 'file', path: 'src/guard.js' },
+    agentId: agent.id,
+    source: 'test.agent',
+  });
+  const agentWrite = await toolGateway.invokeTool({
+    taskId: task.id,
+    toolId: 'workspace.write',
+    operation: 'write',
+    args: { op: 'write', path: 'src/guard.js', content: 'export const value = 4;\n' },
+    agentId: agent.id,
+    source: 'test.agent',
+  });
+  assert.equal(agentWrite.ok, true, 'the agent read receipt follows its real identity');
+  const postWriteRead = await toolGateway.invokeTool({
+    taskId: task.id,
+    toolId: 'workspace.read',
+    operation: 'file',
+    args: { op: 'file', path: 'src/guard.js' },
+    agentId: agent.id,
+    source: 'test.agent',
+  });
+  assert.equal(postWriteRead.result.content, 'export const value = 4;\n');
+
+  fs.writeFileSync(
+    path.join(task.workspace, 'src/guard.js'),
+    'export const value = 5;\n',
+  );
+  await assert.rejects(
+    toolGateway.invokeTool({
+      taskId: task.id,
+      toolId: 'workspace.write',
+      operation: 'write',
+      args: { op: 'write', path: 'src/guard.js', content: 'agent stale write\n' },
+      agentId: agent.id,
+      source: 'test.agent',
+    }),
+    (err) => err.status === 409 && /读取后已被修改/.test(err.message),
+  );
+  assert.equal(agentRead.result.version, ownerWrite.result.version);
+
+  const events = store.getTask(task.id).events;
+  assert.ok(
+    events.some(
+      (event) =>
+        event.type === 'tool.call.end' &&
+        event.data.tool === 'workspace.write' &&
+        event.data.status === 'error' &&
+        event.data.statusCode === 409,
+    ),
+    'conflicts must be visible in the run audit',
+  );
   store.removeTask(task.id);
 });

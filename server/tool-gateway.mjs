@@ -371,7 +371,10 @@ function executeWorkspaceTool(task, toolId, operation, args, meta) {
       };
     }
     if (operation === 'file') {
-      return readWorkspaceFile(task, args.path, { agent });
+      return readWorkspaceFile(task, args.path, {
+        agent,
+        principal: meta.principal,
+      });
     }
     if (operation === 'events') {
       const limit = Math.max(1, Math.min(800, Number(args.limit) || 160));
@@ -521,6 +524,7 @@ export class ToolGateway {
         stepId: auditMeta.stepId,
         principal: actor,
         callId,
+        expectedVersion: normalized.expectedVersion || '',
       };
       const result =
         tool.id === 'mcp.call'

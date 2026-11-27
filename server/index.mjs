@@ -1124,7 +1124,13 @@ const server = http.createServer(async (req, res) => {
           op === 'move'
             ? { op, from: body.from, to: body.to }
             : op === 'write'
-              ? { op, path: body.path, content: body.content }
+              ? {
+                  op,
+                  path: body.path,
+                  content: body.content,
+                  expectedVersion:
+                    typeof body.expectedVersion === 'string' ? body.expectedVersion : '',
+                }
               : { op, path: body.path };
         const call = await toolGateway.invokeTool({
           taskId: task.id,

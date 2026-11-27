@@ -95,7 +95,7 @@ export const TOOL_CATALOG = [
   {
     id: 'workspace.write',
     label: '创建或修改文件',
-    description: '创建目录或原子写入工作区文件。',
+    description: '创建目录或原子写入工作区文件；修改已有文件时必须匹配最近读取版本。',
     risk: 'write',
     scope: 'workspace',
     audit: true,
@@ -106,6 +106,7 @@ export const TOOL_CATALOG = [
         op: { enum: ['write', 'mkdir'] },
         path: { type: 'string' },
         content: { type: 'string', maxLength: 2097152 },
+        expectedVersion: { type: 'string', maxLength: 80 },
       },
       required: ['op', 'path'],
       additionalProperties: false,

@@ -1982,7 +1982,12 @@ async function saveWorkspaceFile() {
   try {
     await api(`/api/tasks/${S.task.id}/fs`, {
       method: "POST",
-      body: { op: "write", path: S.workspacePreviewPath, content },
+      body: {
+        op: "write",
+        path: S.workspacePreviewPath,
+        content,
+        expectedVersion: S.workspacePreviewData?.version || "",
+      },
     });
     toast("文件已保存", "ok");
     await loadWorkspace({ force: true });

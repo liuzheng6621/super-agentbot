@@ -31,6 +31,8 @@ const SKIP_DIRS = new Set([
 ]);
 const SENSITIVE =
   /^(\.env(?:\.|$)|\.npmrc$|\.pypirc$|\.netrc$|\.git-credentials$|id_(?:rsa|dsa|ecdsa|ed25519)(?:\.|$)|.*\.(?:pem|key|p12|pfx|jks|keystore)$)/i;
+const READ_RECEIPT_TTL_MS = 30 * 60 * 1000;
+const readReceipts = new Map();
 
 export class WorkspaceError extends Error {
   constructor(message, status = 400) {
@@ -448,7 +450,7 @@ export function workspaceInfo(task) {
 export function readWorkspaceFile(
   task,
   relPath,
-  { maxBytes = MAX_PREVIEW_BYTES, agent = null } = {},
+  { maxBytes = MAX_PREVIEW_BYTES, agent = null, principal = null } = {},
 ) {
   const pooled = agent ? pooledPath(task, relPath, agent) : null;
   const { rel, abs } = pooled || safePath(task, relPath, { mustExist: true });
@@ -459,14 +461,89 @@ export function readWorkspaceFile(
   if (stat.size > maxBytes) fail(`文件过大，仅支持 ${Math.round(maxBytes / 1024 / 1024)}MB 以内的文本预览`, 413);
   const buffer = fs.readFileSync(abs);
   const binary = isBinary(buffer);
+  const version = versionOf(abs) || '';
+  rememberReadReceipt({ task, rel, abs, version, principal, agent });
   return {
     path: rel,
     bytes: stat.size,
-    version: versionOf(abs) || '',
+    version,
     lang: langOf(rel),
     binary,
     content: binary ? '' : buffer.toString('utf8'),
   };
+}
+
+function readReceiptKey({ taskId, principal, agentId, rel, abs }) {
+  const actorKind = principal?.kind === 'system' ? 'agent' : principal?.kind || (agentId ? 'agent' : 'owner');
+  const actorId = String(principal?.id || agentId || 'owner');
+  return `${taskId}:${actorKind}:${actorId}:${rel}:${abs}`;
+}
+
+function rememberReadReceipt({ task, rel, abs, version, principal, agent }) {
+  if (!version) return;
+  const key = readReceiptKey({
+    taskId: task.id,
+    principal,
+    agentId: agent?.id || '',
+    rel,
+    abs,
+  });
+  readReceipts.set(key, { version, at: Date.now() });
+  if (readReceipts.size <= 2000) return;
+  const cutoff = Date.now() - READ_RECEIPT_TTL_MS;
+  for (const [entryKey, receipt] of readReceipts) {
+    if (receipt.at < cutoff) readReceipts.delete(entryKey);
+  }
+}
+
+function expectedVersionOf(meta) {
+  return String(meta.expectedVersion ?? meta.arguments?.expectedVersion ?? '').trim();
+}
+
+function verifyWriteVersion({ task, rel, abs, beforeVersion, meta, agent }) {
+  if (!beforeVersion) return;
+  const principalKind = meta.principal?.kind || (agent?.id ? 'agent' : 'owner');
+  if (principalKind === 'system') return;
+  const expectedVersion = expectedVersionOf(meta);
+  const actorId = String(meta.principal?.id || agent?.id || meta.agentId || 'owner');
+  if (principalKind === 'agent') {
+    // Tool Gateway wraps orchestrator writes in the system principal. A prior
+    // workspace.read by that agent still counts as its real read receipt.
+    const receiptPrincipal = { kind: 'agent', id: agent?.id || actorId };
+    const key = readReceiptKey({
+      taskId: task.id,
+      principal: receiptPrincipal,
+      agentId: agent?.id || '',
+      rel,
+      abs,
+    });
+    const receipt = readReceipts.get(key);
+    if (!receipt || Date.now() - receipt.at > READ_RECEIPT_TTL_MS) {
+      fail(`写入被拒绝：Agent ${actorId} 必须先读取 ${rel} 的当前版本`, 409);
+    }
+    if (receipt.version !== beforeVersion) {
+      fail(
+        `写入冲突：${rel} 在读取后已被修改（读取版本 ${receipt.version}，当前版本 ${beforeVersion}）`,
+        409,
+      );
+    }
+    if (expectedVersion && expectedVersion !== beforeVersion) {
+      fail(
+        `写入冲突：${rel} 的期望版本 ${expectedVersion} 与当前版本 ${beforeVersion} 不一致`,
+        409,
+      );
+    }
+    return;
+  }
+  if (!expectedVersion) {
+    fail(`写入被拒绝：修改 ${rel} 必须提交 expectedVersion`, 409);
+  }
+  if (expectedVersion !== beforeVersion) {
+    fail(
+      `写入冲突：${rel} 已被其他成员修改（期望版本 ${expectedVersion}，当前版本 ${beforeVersion}）`,
+      409,
+    );
+  }
 }
 
 export function searchWorkspace(task, query, { maxFiles = MAX_SEARCH_FILES, maxResults = MAX_SEARCH_RESULTS } = {}) {
@@ -554,8 +631,11 @@ export function writeWorkspaceEntry(task, relPath, content, meta = {}, agent = n
   }
   if (existing?.isDirectory()) fail('目标是目录，不能写入文件', 400);
   const beforeVersion = existing ? versionOf(abs) : '';
+  verifyWriteVersion({ task, rel, abs, beforeVersion, meta, agent });
   writeFileAtomic(abs, text);
   const afterVersion = versionOf(abs) || '';
+  const principal = meta.principal || null;
+  const expectedVersion = expectedVersionOf(meta);
   const artifact = {
     path: rel,
     bytes,
@@ -565,6 +645,9 @@ export function writeWorkspaceEntry(task, relPath, content, meta = {}, agent = n
     agentId: meta.agentId || '',
     stepId: meta.stepId || '',
     beforeVersion,
+    expectedVersion,
+    principalKind: principal?.kind || (agent?.id ? 'agent' : 'owner'),
+    principalId: principal?.id || meta.agentId || (agent?.id ? agent.id : 'owner'),
     source: 'platform',
   };
   store.addArtifact(task.id, artifact);
@@ -583,7 +666,24 @@ export function writeWorkspaceEntry(task, relPath, content, meta = {}, agent = n
     bytes,
     beforeVersion,
     afterVersion,
+    expectedVersion,
+    principalKind: principal?.kind || (agent?.id ? 'agent' : 'owner'),
+    principalId: principal?.id || meta.agentId || (agent?.id ? agent.id : 'owner'),
   });
+  if (existing) {
+    const receiptPrincipal =
+      principal?.kind === 'system' && (agent?.id || meta.agentId)
+        ? { kind: 'agent', id: agent?.id || meta.agentId }
+        : principal;
+    const key = readReceiptKey({
+      taskId: task.id,
+      principal: receiptPrincipal,
+      agentId: agent?.id || '',
+      rel,
+      abs,
+    });
+    readReceipts.delete(key);
+  }
   return { path: rel, bytes, version: afterVersion, beforeVersion };
 }
 
