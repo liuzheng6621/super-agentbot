@@ -344,7 +344,7 @@ function recordRun(task, agent) {
   if (!agent?.stats) return;
   agent.stats.runs = (agent.stats.runs || 0) + 1;
   task.stats.agentRuns = (task.stats.agentRuns || 0) + 1;
-  store.save();
+  store.save({ tasks: [task.id], agents: true });
 }
 
 /* ------------------------------------------------------------------ */

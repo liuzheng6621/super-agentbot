@@ -29,6 +29,7 @@ const MAX_MESSAGES = 400;
 const MAX_TASK_EVENTS = 800;
 const MAX_FILE_CHANGES = 500;
 const MAX_PLAN_VERSIONS = 40;
+const SAVE_WINDOW_MS = 200;
 
 export const ROLE_ORDER = ['planner', 'architect', 'coder', 'tester', 'reviewer'];
 export const ROLE_LABEL = {
@@ -387,7 +388,30 @@ class Store {
     this.listeners = new Set();
     this._saveTimer = null;
     this._lastSerialized = null;
+    this._serialized = {
+      agents: null,
+      providers: null,
+      tasks: new Map(),
+      settings: null,
+    };
+    this._dirty = {
+      all: true,
+      agents: false,
+      providers: false,
+      tasks: new Set(),
+      tasksAll: false,
+      settings: false,
+    };
+    this.persistenceStats = {
+      saveCalls: 0,
+      scheduledFlushes: 0,
+      flushes: 0,
+      writes: 0,
+      taskSerializations: 0,
+      fullSerializations: 0,
+    };
     this._load();
+    process.once('exit', () => this.flush());
   }
 
   _load() {
@@ -515,25 +539,132 @@ class Store {
     }
   }
 
-  save() {
-    // 流式输出期间持续调用 save()，不能被反复重置成永远不落盘。
+  _markDirty(dirty) {
+    if (!dirty || dirty === true || dirty.all === true) {
+      this._dirty.all = true;
+      return;
+    }
+    let touched = false;
+    if (dirty.agents) {
+      this._dirty.agents = true;
+      touched = true;
+    }
+    if (dirty.providers) {
+      this._dirty.providers = true;
+      touched = true;
+    }
+    if (dirty.settings) {
+      this._dirty.settings = true;
+      touched = true;
+    }
+    if (Object.prototype.hasOwnProperty.call(dirty, 'tasks')) {
+      touched = true;
+      if (dirty.tasks === true) {
+        this._dirty.tasksAll = true;
+      } else {
+        for (const id of dirty.tasks || []) {
+          if (id) this._dirty.tasks.add(String(id));
+        }
+      }
+    }
+    if (!touched) this._dirty.all = true;
+  }
+
+  _resetDirty() {
+    this._dirty = {
+      all: false,
+      agents: false,
+      providers: false,
+      tasks: new Set(),
+      tasksAll: false,
+      settings: false,
+    };
+  }
+
+  _serializeTask(task) {
+    this.persistenceStats.taskSerializations += 1;
+    return JSON.stringify(task);
+  }
+
+  _buildSerializedDb() {
+    if (this._dirty.all) {
+      this._serialized.agents = JSON.stringify(this.db.agents);
+      this._serialized.providers = JSON.stringify(this.db.providers);
+      this._serialized.settings = JSON.stringify(this.db.settings);
+      this._serialized.tasks = new Map();
+      for (const task of this.db.tasks) {
+        this._serialized.tasks.set(task.id, this._serializeTask(task));
+      }
+      this.persistenceStats.fullSerializations += 1;
+    } else {
+      if (this._dirty.agents || this._serialized.agents === null) {
+        this._serialized.agents = JSON.stringify(this.db.agents);
+      }
+      if (this._dirty.providers || this._serialized.providers === null) {
+        this._serialized.providers = JSON.stringify(this.db.providers);
+      }
+      if (this._dirty.settings || this._serialized.settings === null) {
+        this._serialized.settings = JSON.stringify(this.db.settings);
+      }
+      if (this._dirty.tasksAll) {
+        this._serialized.tasks.clear();
+        for (const task of this.db.tasks) {
+          this._serialized.tasks.set(task.id, this._serializeTask(task));
+        }
+      } else {
+        for (const id of this._dirty.tasks) {
+          const task = this.db.tasks.find((item) => item.id === id);
+          if (task) this._serialized.tasks.set(id, this._serializeTask(task));
+          else this._serialized.tasks.delete(id);
+        }
+      }
+    }
+
+    const liveTaskIds = new Set(this.db.tasks.map((task) => task.id));
+    for (const id of this._serialized.tasks.keys()) {
+      if (!liveTaskIds.has(id)) this._serialized.tasks.delete(id);
+    }
+    const taskFragments = this.db.tasks.map((task) => {
+      let fragment = this._serialized.tasks.get(task.id);
+      if (fragment === undefined) {
+        fragment = this._serializeTask(task);
+        this._serialized.tasks.set(task.id, fragment);
+      }
+      return fragment;
+    });
+    return `{"agents":${this._serialized.agents},"providers":${this._serialized.providers},"tasks":[${taskFragments.join(',')}],"settings":${this._serialized.settings}}`;
+  }
+
+  save(dirty = null) {
+    this.persistenceStats.saveCalls += 1;
+    // 无参 save() 是旧调用的保守契约：无法确认改动范围时，下一次 flush 必须全量序列化。
+    this._markDirty(dirty);
+    // dirty 窗口只启动一次，窗口内的连续追加共享同一次落盘。
     if (this._saveTimer) return;
-    this._saveTimer = setTimeout(() => this.flush(), 400);
+    this.persistenceStats.scheduledFlushes += 1;
+    this._saveTimer = setTimeout(() => this.flush(), SAVE_WINDOW_MS);
   }
 
   /** 先写临时文件，再原子替换，避免退出瞬间截断 db.json。 */
   flush() {
     clearTimeout(this._saveTimer);
     this._saveTimer = null;
+    this.persistenceStats.flushes += 1;
     try {
-      const json = JSON.stringify(this.db, null, 2);
+      if (this._lastSerialized === null) this._dirty.all = true;
+      const json = this._buildSerializedDb();
       // 内容没变就别重写：恢复流程会无条件 flush 一次
-      if (json === this._lastSerialized) return;
+      if (json === this._lastSerialized) {
+        this._resetDirty();
+        return;
+      }
       fs.mkdirSync(DATA_DIR, { recursive: true });
       const tmp = `${DB_FILE}.tmp`;
       fs.writeFileSync(tmp, json, 'utf8');
       fs.renameSync(tmp, DB_FILE);
       this._lastSerialized = json;
+      this.persistenceStats.writes += 1;
+      this._resetDirty();
     } catch (err) {
       console.error('[store] 持久化失败:', err.message);
     }
@@ -574,7 +705,7 @@ class Store {
       throw new Error(`Provider ID 已存在：${provider.id}`);
     }
     this.db.providers.push(provider);
-    this.save();
+    this.save({ providers: true });
     this.broadcast({ type: 'providers.changed', providers: this.db.providers.map(redactProvider) });
     return provider;
   }
@@ -586,7 +717,7 @@ class Store {
     next.id = provider.id;
     next.builtin = provider.builtin === true;
     Object.assign(provider, next);
-    this.save();
+    this.save({ providers: true });
     this.broadcast({ type: 'providers.changed', providers: this.db.providers.map(redactProvider) });
     return provider;
   }
@@ -602,7 +733,7 @@ class Store {
         (providerId) => providerId !== id && providerId !== agent.providerId,
       );
     }
-    this.save();
+    this.save({ providers: true, agents: true });
     this.broadcast({ type: 'providers.changed', providers: this.db.providers.map(redactProvider) });
     this.broadcast({ type: 'agents.changed' });
     return true;
@@ -667,7 +798,7 @@ class Store {
     };
     if (agent.seat) this.demoteRolePeers(role, agent.id);
     this.db.agents.push(agent);
-    this.save();
+    this.save({ agents: true });
     this.broadcast({ type: 'agents.changed' });
     return agent;
   }
@@ -743,7 +874,7 @@ class Store {
       agent.status = 'idle';
       agent.activity = '';
     }
-    this.save();
+    this.save({ agents: true });
     this.broadcast({ type: 'agents.changed' });
     return agent;
   }
@@ -757,28 +888,33 @@ class Store {
       const next = this.db.agents.find((a) => a.role === target.role);
       if (next) next.seat = true;
     }
-    this.save();
+    this.save({ agents: true });
     this.broadcast({ type: 'agents.changed' });
     return true;
   }
 
   removeAgentReferences(id) {
     let changed = false;
+    const taskIds = new Set();
     for (const task of this.db.tasks) {
+      let taskChanged = false;
       for (const step of task.plan || []) {
         if (step.agentId === id) {
           step.agentId = '';
           changed = true;
+          taskChanged = true;
         }
       }
       for (const artifact of task.artifacts || []) {
         if (artifact.agentId === id) {
           artifact.agentId = '';
           changed = true;
+          taskChanged = true;
         }
       }
+      if (taskChanged) taskIds.add(task.id);
     }
-    if (changed) this.save();
+    if (changed) this.save({ tasks: [...taskIds] });
     return changed;
   }
 
@@ -860,7 +996,7 @@ class Store {
     };
     if (!external) fs.mkdirSync(root, { recursive: true });
     this.db.tasks.unshift(task);
-    this.save();
+    this.save({ tasks: [task.id] });
     this.broadcast({ type: 'task.created', task: this.taskSummary(task) });
     return task;
   }
@@ -928,7 +1064,7 @@ class Store {
       s.simSpeed = clamp(patch.simSpeed, 1, 20, s.simSpeed);
     if (patch.defaultMode !== undefined && ['auto', 'cli', 'sim'].includes(patch.defaultMode))
       s.defaultMode = patch.defaultMode;
-    this.flush();
+    this.save({ settings: true });
     this.broadcast({ type: 'settings.changed', settings: { ...s } });
     return { ...s };
   }
@@ -937,7 +1073,7 @@ class Store {
     const task = this.getTask(id);
     if (!task) return null;
     Object.assign(task, patch);
-    this.save();
+    this.save({ tasks: [id] });
     this.broadcast({ type: event, taskId: id, patch });
     return task;
   }
@@ -956,7 +1092,7 @@ class Store {
         /* 目录可能不存在 */
       }
     }
-    this.save();
+    this.save({ tasks: [] });
     this.broadcast({ type: 'task.deleted', taskId: id });
     return true;
   }
@@ -1007,7 +1143,7 @@ class Store {
         kind: message.kind,
       },
     });
-    this.save();
+    this.save({ tasks: [taskId] });
     return message;
   }
 
@@ -1023,7 +1159,7 @@ class Store {
       if (agent) agent.stats.tokens += n;
     }
     this.broadcast({ type: 'task.stats', taskId, stats: task.stats });
-    this.save();
+    this.save({ tasks: [taskId], agents: !!agentId });
     return n;
   }
 
@@ -1041,6 +1177,7 @@ class Store {
     task.stats.tokens += deltaTokens;
     task.stats.tokensOut = (task.stats.tokensOut || 0) + deltaTokens;
     this.broadcast({ type: 'message.delta', taskId, runId: task.runId || null, id: messageId, delta });
+    this.save({ tasks: [taskId], agents: !!msg.agentId });
   }
 
   /** 直接改写整条消息（用于撤掉「等待输出」这类临时提示） */
@@ -1051,6 +1188,7 @@ class Store {
     if (!msg) return;
     msg.text = text;
     this.broadcast({ type: 'message.replace', taskId, runId: task.runId || null, id: messageId, text });
+    this.save({ tasks: [taskId] });
   }
 
   endMessage(taskId, messageId, meta = {}) {
@@ -1061,7 +1199,7 @@ class Store {
     msg.done = true;
     msg.meta = { ...msg.meta, ...meta };
     this.broadcast({ type: 'message.end', taskId, runId: task.runId || null, id: messageId, meta: msg.meta });
-    this.save();
+    this.save({ tasks: [taskId] });
   }
 
   /* ---------- plan ---------- */
@@ -1112,7 +1250,7 @@ class Store {
       source: options.source || 'orchestrator',
     });
     this._emitPlan(task);
-    this.save();
+    this.save({ tasks: [taskId] });
     return task.plan;
   }
 
@@ -1132,7 +1270,7 @@ class Store {
       added: added.map((step) => step.id),
     });
     this._emitPlan(task);
-    this.save();
+    this.save({ tasks: [taskId] });
     return added;
   }
 
@@ -1166,7 +1304,7 @@ class Store {
       source: options.source || 'manual',
     });
     this._emitPlan(task);
-    this.save();
+    this.save({ tasks: [taskId] });
     return task.plan;
   }
 
@@ -1199,7 +1337,7 @@ class Store {
     if (!step) return;
     Object.assign(step, patch);
     this.broadcast({ type: 'plan.updated', taskId, runId: task.runId, plan: task.plan });
-    this.save();
+    this.save({ tasks: [taskId] });
   }
 
   /* ---------- debate ---------- */
@@ -1210,7 +1348,7 @@ class Store {
       runId: task.runId || null,
       debate: task.debate,
     });
-    this.save();
+    this.save({ tasks: [task.id] });
   }
 
   setDebate(taskId, patch) {
@@ -1304,7 +1442,7 @@ class Store {
       runId: saved.runId || null,
       event: { ...saved },
     });
-    this.save();
+    this.save({ tasks: [taskId] });
     return saved;
   }
 
@@ -1354,7 +1492,7 @@ class Store {
       stepId: saved.stepId,
       data: { ...saved },
     });
-    this.save();
+    this.save({ tasks: [taskId] });
     return saved;
   }
 
@@ -1409,7 +1547,7 @@ class Store {
         source: file.source || 'artifact',
       });
     }
-    this.save();
+    this.save({ tasks: [taskId] });
   }
 
   markArtifactDeleted(taskId, relPath, meta = {}) {
@@ -1437,7 +1575,7 @@ class Store {
       trashPath: meta.trashPath || '',
       source: 'workspace',
     });
-    this.save();
+    this.save({ tasks: [taskId] });
     return found;
   }
 }
