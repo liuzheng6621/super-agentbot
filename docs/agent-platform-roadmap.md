@@ -230,6 +230,19 @@ M2 的目标不是把单机项目包装成“多租户 SaaS”，而是把它变
 
 Agent Insight 的参考结论是：保留本项目零依赖、单进程、可直接运行的优势，不移植其完整的 Next.js / Prisma 应用结构；只吸收明确的服务契约——安全边界与审计、统一 trace / span、可持久化的定时工作及历史 / 重试 / 恢复。OpenHands 类项目同样用于对照能力，不把整套运行时替换掉。
 
+## M3 计划（修订版，尚未实施）
+
+详细拆分、验收标准和 backlog 见 [agentforge-openbot-plan.md](agentforge-openbot-plan.md)。M3 的顺序由依赖关系决定，不按功能热度排序：
+
+| 阶段 | 重点 | 前置条件 |
+| --- | --- | --- |
+| M3-0 | owner / operator / agent / system 主体、Token 作用域、操作者审计 | 先给高风险端点建立授权边界；暂不做完整多租户 |
+| M3-1 | Provider 用量账本、上下文状态、历史检索、Automation `clientMessageId` 幂等 | 账本可靠后才做账户池；未知上下文窗口不得伪造 compaction |
+| M3-2 | 只读 MCP、白名单、密钥环境引用、启动超时、工具效果分类 | 只开放 `read`，写工具和任意 shell 暂不开放 |
+| M3-3 | operator-only 固定命令运行器、持久化审批队列 | 先固定命令和审计，再审批；最后才评估 MCP 写工具 |
+
+M3 不包含：自由 shell、Agent 自审批、MCP 写工具、Provider fill-first / spread、Agent 级持久工作区池、多实例 SQLite 和完整 RBAC。这些能力在对应前置阶段完成后再排期。
+
 ## 实施顺序
 
 | 阶段 | 重点 | 交付物 |
@@ -238,36 +251,43 @@ Agent Insight 的参考结论是：保留本项目零依赖、单进程、可直
 | P1（第一层已完成） | Tool Gateway、计划版本、消息路由、Provider Profile、CLI 参数模板与自动回退、CLI 执行策略 | 平台 API 可校验、CLI 可强制或明确拒绝、可审计、可重规划 |
 | P2（第一层已完成） | 全局 Scheduler、任务并发、Provider 配额、Agent 租约；专项 Agent Profile 待补 | 稳定的多任务并发 |
 | M2（团队服务基线，已完成） | 共享服务 Token、CORS / 审计、trace / span、Automation、启动恢复 | 可部署的单实例团队服务，不等同于多租户平台 |
-| P3 | DAG 图、时间回放、评审与合并工作台 | 面向复杂项目的可视化协作 |
+| M3（下一步，尚未实施） | 身份与审计、用量 / 上下文、历史与幂等、只读 MCP、受控执行与审批 | 先补齐高风险能力的前置边界 |
+| M4（计划） | Agent Profile、工作区池、读后写守卫、事务回滚、DAG 图与时间回放 | 面向复杂项目的分工与工作区 |
+| M5 / P3（计划） | RBAC / 多租户、OTLP、多实例持久化、目录懒加载、`/api/state` 分页 | 生产化与规模化 |
 
 ## 下一阶段 backlog
 
-以下条目来自本轮与 OpenHands 能力对照，尚未实施：
+> OpenBot 融合计划的执行拆分与验收标准见 [agentforge-openbot-plan.md](agentforge-openbot-plan.md)。本表只保留能力边界和尚未实施项，不重复给出另一套优先级。
+
+以下条目来自本轮与 OpenHands / OpenBot 能力对照，均尚未实施：
 
 | 优先级 | 条目 | 现状 | 建议 |
 | --- | --- | --- | --- |
-| P1 | MCP / 外部工具接入 | Tool Gateway 目前覆盖工作区工具 | 先做只读 MCP 适配与白名单，再开放写工具 |
-| P1 | 用户身份、RBAC 与租户隔离 | 已有共享服务 Token，但没有账号、用户权限或租户数据边界 | 在服务 Token 之上增加登录 / SSO、角色权限、租户键和每用户审计 |
-| P1 | OTLP / OpenTelemetry 导出 | trace 目前只存在于本地任务事件、详情和导出中 | 增加可配置的 OTLP exporter，补齐跨服务关联和采样策略，不改变本地记录 |
-| P1 | 多实例持久化与分布式调度 | JSON 文件、Automation runner 和 Scheduler 都绑定单进程 | 先抽象存储 / 租约接口，再接数据库、分布式锁和队列；迁移期间保留现有 `db.json` |
-| P2 | 专项 Agent Profile 与能力路由 | 角色固定为五席位，技能只是提示词注入 | 把技能、工具、Provider、模型和并发组合成可复用 Profile |
-| P2 | 工作区租约、读后写守卫、事务回滚 | 有变更账本和回收站，没有跨 Agent 写冲突检测 | 在 Tool Gateway 增加版本检查与操作组 |
-| P2 | DAG 图、时间回放、跨任务总览 | 已有工序账本和控制台六视图 | 先做只读可视化和事件回放，不改执行内核 |
+| M3-0 | 服务身份与授权边界 | 已有共享服务 Token，但没有用户身份、作用域或 per-user 审计 | 先补 owner / operator / agent 主体和 Token scope，再开放高风险端点 |
+| M3-1 | Provider 用量账本、上下文状态、历史检索、Automation 幂等 | Scheduler 按活跃任务计数；token 记在 task / agent；Automation 没有审批和事件等待 | 先做账本、`contextStates`、`history_search/read` 和 `clientMessageId`，`await_event` 单独设计 |
+| M3-2 | MCP / 外部工具接入 | Tool Gateway 目前覆盖工作区工具；当前 CLI 是每次调用启动子进程 | 先做只读 MCP、白名单、密钥引用、超时和审计，不假设 Provider 会话 |
+| M3-3 | 受控 Shell 与审批队列 | `shell` 端点仍返回 501；没有审批实体 | 先 operator-only 固定命令，再做持久化审批；自由 shell 保持关闭 |
+| M4 | 专项 Agent Profile 与能力路由 | 角色固定为五席位，技能只是提示词注入 | 把技能、工具、Provider、模型和并发组合成可复用 Profile |
+| M4 | 工作区池、工作区租约、读后写守卫、事务回滚 | 有任务级工作区和变更账本，没有跨 Agent 写冲突检测 | 先定义 Profile 和 Workspace 契约，再实现隔离、清理和冲突处理 |
+| M4 | DAG 图、时间回放、跨任务总览 | 已有工序账本和控制台六视图 | 先做只读可视化和事件回放，不改执行内核 |
+| M5 / P3 | RBAC / 多租户、OTLP、多实例持久化、目录懒加载、`/api/state` 分页 | 共享 Token、单进程 JSON 存储和全量任务摘要仍是当前边界 | 完成存储与身份架构决策后再做规模化；SQLite 引入前先确认零依赖承诺 |
 
-## 本轮非目标（只记录，不实施）
+## M3 明确延期项
+
+以下内容不在 M3-0 至 M3-3 的实施范围内；M3 只先补齐高风险能力的前置边界：
 
 | 优先级 | 条目 | 现状 | 后续建议 |
 | --- | --- | --- | --- |
 | P1 | P1-5 目录扫描优化 | `listWorkspaceFiles()` 仍会遍历目录并截断结果 | 改为按需懒加载、索引复用和增量快照 |
 | P1 | P1-7 `/api/state` 分页 | 当前返回任务摘要和最新任务全量详情 | 增加 cursor、摘要字段选择和详情按需加载 |
 | P1 | P1-9 spill 推广 | 目前主要覆盖超长上游产物 | 把 spill 复用于事件、工具输出和导出附件 |
-| P1 | P1-10 超时配置化 | 质量门和各阶段仍使用代码内固定预算 | 将超时放进设置与 Agent/Provider Profile |
+| P1 | P1-10 超时配置化 | 质量门和各阶段仍使用代码内固定预算 | 将超时放进设置与 Agent / Provider Profile |
+| P2 | Automation `await_event` | 当前没有 durable 等待状态、事件身份、唤醒或取消语义 | 单独设计等待 / 唤醒状态机，不并入 `clientMessageId` 幂等批次 |
 | P2 | CLI 网关配置去硬编码 | `CANDIDATES` 仍内置 magpie 地址、模型和 `--openai-api-key magpie` | 统一走 Provider Profile 和模板变量 |
 | P2 | 监听与权限边界 | `HOST`、`bypassPermissions`、`yolo` 仍沿用现有策略 | 单独做安全评审和显式配置，不在本轮修改 |
-| P2 | 辩论多样性检测 | 已有提案、交叉评分和降级标记 | 增加方案相似度/角度覆盖检测，避免多份提案同质化 |
-| P2 | 读后写守卫 | Tool Gateway 有版本和变更账本，但没有强制读取版本 | 写入前校验最近读取版本并返回冲突 |
-| P2 | 附件读图 | 当前主要处理文本上下文 | 增加视觉模型能力声明、图片类型/体积校验和脱敏 |
+| P2 | 辩论多样性检测 | 已有提案、交叉评分和降级标记 | 增加方案相似度 / 角度覆盖检测，避免多份提案同质化 |
+| P2 | 附件读图 | 当前主要处理文本上下文 | 增加视觉模型能力声明、图片类型 / 体积校验和脱敏 |
 | P2 | 摘要式上下文压缩 | 已有上下文预算和 spill | 增加可审计的分段摘要，不覆盖原始记录 |
 
-以上 P1 / P2 条目是后续 backlog。M1 只落地技能、运行记录导出和结构化评审；M2 只落地共享服务边界、trace、Automation 与恢复，没有修改 CLI `bypassPermissions` / `yolo` 的权限边界，也没有实现多用户、多租户或分布式运行。
+以上 P1 / P2 条目是后续 backlog。M1 只落地技能、运行记录导出和结构化评审；M2 只落地共享服务边界、trace、Automation 与恢复；M3 尚未实施。当前没有修改 CLI `bypassPermissions` / `yolo` 的权限边界，也没有实现多用户、多租户或分布式运行。
 

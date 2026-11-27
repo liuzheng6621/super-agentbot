@@ -396,7 +396,8 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 ├── docs/
 │   ├── screenshot.png
 │   ├── design-io-image-context.md
-│   └── agent-platform-roadmap.md
+│   ├── agent-platform-roadmap.md
+│   └── agentforge-openbot-plan.md
 ├── tests/                19 个测试文件、101 个测试
 ├── 安装到桌面.bat
 ├── 卸载桌面快捷方式.bat
