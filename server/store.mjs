@@ -191,11 +191,11 @@ export const TOOL_CATALOG = [
     risk: 'read',
     scope: 'workspace',
     audit: true,
-    operations: ['tree', 'files', 'file', 'events', 'changes', 'diff'],
+    operations: ['tree', 'directory', 'files', 'file', 'events', 'changes', 'diff'],
     inputSchema: {
       type: 'object',
       properties: {
-        op: { enum: ['tree', 'files', 'file', 'events', 'changes', 'diff'] },
+        op: { enum: ['tree', 'directory', 'files', 'file', 'events', 'changes', 'diff'] },
         path: { type: 'string' },
         limit: { type: 'integer', minimum: 1, maximum: 800 },
       },

@@ -1195,7 +1195,8 @@ function workspaceTreeHtml(nodes) {
   return (nodes || [])
     .map((node) => {
       if (node.type === "dir") {
-        return `<details class="ws-dir" open>
+        const loaded = node.lazyLoaded === true || !S.workspace?.lazy;
+        return `<details class="ws-dir" data-workspace-dir="${workspacePathData(node.path)}" data-loaded="${loaded}" ${loaded ? "open" : ""}>
           <summary>${workspaceStatusBadge(node.status)}<span class="ws-file-name">${escapeHtml(node.name)}</span></summary>
           <div class="ws-dir-children">${workspaceTreeHtml(node.children)}</div>
         </details>`;
@@ -1207,6 +1208,66 @@ function workspaceTreeHtml(nodes) {
       </button>`;
     })
     .join("");
+}
+
+function workspaceTreeNode(nodes, path) {
+  for (const node of nodes || []) {
+    if (node.path === path) return node;
+    if (node.type === "dir") {
+      const found = workspaceTreeNode(node.children, path);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+async function loadWorkspaceDirectory(path, details = null) {
+  const taskId = S.task?.id;
+  if (!taskId || !path) return;
+  if (details?.dataset.loading === "true") return;
+  if (details) details.dataset.loading = "true";
+  try {
+    const data = await api(
+      `/api/tasks/${taskId}/workspace?path=${encodeURIComponent(path)}`,
+    );
+    if (!S.task || S.task.id !== taskId) return;
+    const node = workspaceTreeNode(S.workspace?.tree, path);
+    if (node) {
+      node.children = data.tree || [];
+      node.lazyLoaded = true;
+    }
+    $$("details[data-workspace-dir]").forEach((item) => {
+      if (decodeURIComponent(item.dataset.workspaceDir || "") !== path) return;
+      item.dataset.loaded = "true";
+      item.dataset.loading = "false";
+      const children = item.querySelector(".ws-dir-children");
+      if (children) {
+        children.innerHTML =
+          workspaceTreeHtml(data.tree) || '<p class="hint">空目录。</p>';
+      }
+    });
+  } catch (err) {
+    toast(`目录加载失败：${err.message}`, "err");
+  } finally {
+    if (details) details.dataset.loading = "false";
+  }
+}
+
+function handleWorkspaceTreeClick(event) {
+  const file = event.target.closest("[data-workspace-file]");
+  if (file) {
+    previewWorkspaceFile(decodeURIComponent(file.dataset.workspaceFile));
+    return;
+  }
+  const details = event.target.closest("details[data-workspace-dir]");
+  if (!details || details.dataset.loaded === "true") return;
+  setTimeout(() => {
+    if (!details.open) return;
+    loadWorkspaceDirectory(
+      decodeURIComponent(details.dataset.workspaceDir || ""),
+      details,
+    );
+  }, 0);
 }
 
 function workspaceChangeHtml(change) {
@@ -2104,7 +2165,7 @@ async function loadWorkspace({ force = false } = {}) {
   if (!taskId || (S.workspaceLoading && !force)) return;
   S.workspaceLoading = true;
   try {
-    const data = await api(`/api/tasks/${taskId}/workspace`);
+    const data = await api(`/api/tasks/${taskId}/workspace?path=`);
     if (!S.task || S.task.id !== taskId) return;
     S.workspace = { ...(S.workspace || {}), ...data };
     renderWorkspace();
@@ -4240,9 +4301,7 @@ function bind() {
     }
   });
   $("#workspaceTree").addEventListener("click", (e) => {
-    const file = e.target.closest("[data-workspace-file]");
-    if (!file) return;
-    previewWorkspaceFile(decodeURIComponent(file.dataset.workspaceFile));
+    handleWorkspaceTreeClick(e);
   });
   $("#workspaceSearchResults").addEventListener("click", (e) => {
     const file = e.target.closest("[data-workspace-file]");
@@ -4305,8 +4364,7 @@ function bind() {
     setWorkspaceConsoleView("graph");
   });
   $("#wcTree").addEventListener("click", (e) => {
-    const file = e.target.closest("[data-workspace-file]");
-    if (file) previewWorkspaceFile(decodeURIComponent(file.dataset.workspaceFile));
+    handleWorkspaceTreeClick(e);
   });
   $("#wcSearchResults").addEventListener("click", (e) => {
     const file = e.target.closest("[data-workspace-file]");

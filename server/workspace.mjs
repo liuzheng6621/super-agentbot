@@ -333,6 +333,68 @@ export function listWorkspaceTree(
   };
 }
 
+export function listWorkspaceDirectory(
+  task,
+  relPath = '',
+  { maxEntries = MAX_TREE_ENTRIES } = {},
+) {
+  const { root, rel, abs } = safePath(task, relPath, {
+    allowEmpty: true,
+    mustExist: true,
+  });
+  let stat;
+  try {
+    stat = fs.statSync(abs);
+  } catch {
+    fail(`路径不存在：${rel || '.'}`, 404);
+  }
+  if (!stat.isDirectory()) fail('路径不是目录', 404);
+  const changes = changeMap(task);
+  let raw = [];
+  try {
+    raw = fs.readdirSync(abs, { withFileTypes: true });
+  } catch {
+    return { root, path: rel, entries: 0, truncated: false, tree: [] };
+  }
+
+  const tree = [];
+  let truncated = false;
+  for (const entry of raw) {
+    if (tree.length >= maxEntries) {
+      truncated = true;
+      break;
+    }
+    if (entry.isSymbolicLink()) continue;
+    if (entry.isDirectory() && SKIP_DIRS.has(entry.name)) continue;
+    const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+    const childAbs = path.join(abs, entry.name);
+    if (entry.isDirectory()) {
+      tree.push({
+        type: 'dir',
+        name: entry.name,
+        path: childRel,
+        status: changes.get(childRel)?.status || '',
+        children: [],
+        hasChildren: true,
+      });
+    } else if (entry.isFile()) {
+      try {
+        tree.push(statFile(childAbs, childRel, changes));
+      } catch {
+        /* A single unreadable file must not hide the rest of the directory. */
+      }
+    }
+  }
+
+  return {
+    root,
+    path: rel,
+    entries: tree.length,
+    truncated,
+    tree: sortEntries(tree),
+  };
+}
+
 function flattenTree(nodes, out = []) {
   for (const node of nodes || []) {
     if (node.type === 'file') out.push(node);
@@ -598,6 +660,32 @@ export function workspaceSnapshot(task) {
     summary: {
       files: files.length,
       directories: listed.entries - files.length,
+      added: changes.filter((change) => change.status === 'A').length,
+      modified: changes.filter((change) => change.status === 'M').length,
+      deleted: changes.filter((change) => change.status === 'D').length,
+      renamed: changes.filter((change) => change.status === 'R').length,
+    },
+  };
+}
+
+export function workspaceDirectorySnapshot(task, relPath = '') {
+  const listed = listWorkspaceDirectory(task, relPath);
+  const files = listed.tree.filter((entry) => entry.type === 'file');
+  const directories = listed.tree.filter((entry) => entry.type === 'dir');
+  const changes = task.fileChanges || [];
+  const events = (task.events || []).slice(-160);
+  return {
+    info: workspaceInfo(task),
+    path: listed.path,
+    lazy: true,
+    tree: listed.tree,
+    changes,
+    events,
+    entries: listed.entries,
+    truncated: listed.truncated,
+    summary: {
+      files: files.length,
+      directories: directories.length,
       added: changes.filter((change) => change.status === 'A').length,
       modified: changes.filter((change) => change.status === 'M').length,
       deleted: changes.filter((change) => change.status === 'D').length,

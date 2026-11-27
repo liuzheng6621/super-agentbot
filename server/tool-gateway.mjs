@@ -9,6 +9,7 @@ import {
   readWorkspaceFile,
   searchWorkspace,
   workspaceDiff,
+  workspaceDirectorySnapshot,
   workspacePoolInfo,
   workspaceSnapshot,
   writeWorkspaceEntry,
@@ -127,6 +128,15 @@ function resultSummary(operation, result) {
     return {
       entries: result?.entries || 0,
       files: result?.summary?.files || 0,
+      truncated: !!result?.truncated,
+    };
+  }
+  if (operation === 'directory') {
+    return {
+      path: result?.path || '',
+      entries: result?.entries || 0,
+      files: result?.summary?.files || 0,
+      directories: result?.summary?.directories || 0,
       truncated: !!result?.truncated,
     };
   }
@@ -364,6 +374,12 @@ function executeWorkspaceTool(task, toolId, operation, args, meta) {
     if (operation === 'tree') {
       return {
         ...workspaceSnapshot(task),
+        pool: workspacePoolInfo(task, agent),
+      };
+    }
+    if (operation === 'directory') {
+      return {
+        ...workspaceDirectorySnapshot(task, args.path || ''),
         pool: workspacePoolInfo(task, agent),
       };
     }

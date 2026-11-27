@@ -1,9 +1,10 @@
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-workspace-'));
 process.env.AGENTFORGE_DATA_DIR = temp;
@@ -12,6 +13,7 @@ const { store, toolsForRole } = await import('../server/store.mjs');
 const {
   applyWorkspaceTransaction,
   deleteWorkspaceEntry,
+  listWorkspaceDirectory,
   makeWorkspaceDir,
   moveWorkspaceEntry,
   readWorkspaceFile,
@@ -30,6 +32,31 @@ function git(root, args) {
   });
   assert.equal(result.status, 0, String(result.stderr || result.error?.message || 'git failed'));
   return String(result.stdout || '').trim();
+}
+
+function availablePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address();
+      server.close((err) => (err ? reject(err) : resolve(port)));
+    });
+  });
+}
+
+async function waitForHealth(baseUrl, child) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    if (child.exitCode !== null) throw new Error(`server exited with ${child.exitCode}`);
+    try {
+      const response = await fetch(`${baseUrl}/api/health`);
+      if (response.ok) return response.json();
+    } catch {
+      /* retry while the child starts */
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error('server did not become healthy');
 }
 
 after(() => {
@@ -73,6 +100,128 @@ test('workspace tree, read, write, search and change tracking form a closed loop
   assert.equal(change.status, 'M');
   assert.notEqual(change.beforeVersion, change.afterVersion);
   assert.equal(readWorkspaceFile(current, 'src/app.js').content, 'export const answer = 42;\n');
+});
+
+test('lazy workspace directory reads one level while the legacy snapshot stays recursive', () => {
+  const task = store.createTask({ goal: '验证工作区目录懒加载' });
+  fs.mkdirSync(path.join(task.workspace, 'src', 'deep'), { recursive: true });
+  fs.writeFileSync(path.join(task.workspace, 'root.txt'), 'root\n');
+  fs.writeFileSync(path.join(task.workspace, 'src', 'direct.txt'), 'direct\n');
+  fs.writeFileSync(path.join(task.workspace, 'src', 'deep', 'nested.txt'), 'nested\n');
+
+  const current = store.getTask(task.id);
+  const lazy = listWorkspaceDirectory(current, 'src');
+  assert.equal(lazy.path, 'src');
+  assert.deepEqual(
+    lazy.tree.map((entry) => [entry.type, entry.name]),
+    [
+      ['dir', 'deep'],
+      ['file', 'direct.txt'],
+    ],
+  );
+  const deep = lazy.tree.find((entry) => entry.name === 'deep');
+  assert.deepEqual(deep.children, []);
+  assert.equal(deep.hasChildren, true);
+
+  const full = workspaceSnapshot(current);
+  const src = full.tree.find((entry) => entry.name === 'src');
+  assert.equal(src.children.some((entry) => entry.name === 'deep'), true);
+  assert.equal(
+    src.children
+      .find((entry) => entry.name === 'deep')
+      .children.some((entry) => entry.name === 'nested.txt'),
+    true,
+  );
+  assert.throws(() => listWorkspaceDirectory(current, '../outside'), /越出工作区/);
+});
+
+test('HTTP workspace route exposes lazy directories and keeps the legacy full tree', async () => {
+  const dataDir = fs.mkdtempSync(path.join(temp, 'lazy-http-'));
+  const project = fs.mkdtempSync(path.join(temp, 'lazy-project-'));
+  fs.mkdirSync(path.join(project, 'src', 'deep'), { recursive: true });
+  fs.writeFileSync(path.join(project, 'root.txt'), 'root\n');
+  fs.writeFileSync(path.join(project, 'src', 'direct.txt'), 'direct\n');
+  fs.writeFileSync(path.join(project, 'src', 'deep', 'nested.txt'), 'nested\n');
+
+  const port = await availablePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const child = spawn(process.execPath, ['server/index.mjs'], {
+    cwd: path.resolve('.'),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: '127.0.0.1',
+      AGENTFORGE_DATA_DIR: dataDir,
+      AGENTFORGE_SKIP_TEAM_BOOTSTRAP: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+
+  try {
+    await waitForHealth(baseUrl, child);
+    const created = await fetch(`${baseUrl}/api/tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ goal: 'HTTP lazy workspace probe', workspace: project, autoRun: false }),
+    });
+    assert.equal(created.status, 201);
+    const { task } = await created.json();
+
+    const lazyResponse = await fetch(`${baseUrl}/api/tasks/${task.id}/workspace?path=`);
+    assert.equal(lazyResponse.status, 200);
+    const lazy = await lazyResponse.json();
+    assert.equal(lazy.lazy, true);
+    const src = lazy.tree.find((entry) => entry.name === 'src');
+    assert.equal(src.type, 'dir');
+    assert.deepEqual(src.children, []);
+    assert.equal(src.hasChildren, true);
+    assert.equal(lazy.tree.some((entry) => entry.name === 'nested.txt'), false);
+
+    const nestedResponse = await fetch(
+      `${baseUrl}/api/tasks/${task.id}/workspace?path=${encodeURIComponent('src')}`,
+    );
+    assert.equal(nestedResponse.status, 200);
+    const nested = await nestedResponse.json();
+    assert.deepEqual(
+      nested.tree.map((entry) => entry.name),
+      ['deep', 'direct.txt'],
+    );
+
+    const legacyResponse = await fetch(`${baseUrl}/api/tasks/${task.id}/workspace`);
+    assert.equal(legacyResponse.status, 200);
+    const legacy = await legacyResponse.json();
+    assert.equal(legacy.lazy, undefined);
+    assert.ok(legacy.files.some((entry) => entry.path === 'src/deep/nested.txt'));
+
+    const traversal = await fetch(
+      `${baseUrl}/api/tasks/${task.id}/workspace?path=${encodeURIComponent('../outside')}`,
+    );
+    assert.equal(traversal.status, 403);
+  } catch (err) {
+    throw new Error(`${err.message}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  } finally {
+    if (child.exitCode === null) child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+      setTimeout(resolve, 2000).unref();
+    });
+    try {
+      fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+      fs.rmSync(project, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    } catch {
+      /* Windows may briefly hold the child process directory. */
+    }
+  }
 });
 
 test('mkdir, move and delete-to-trash keep a recoverable workspace history', () => {

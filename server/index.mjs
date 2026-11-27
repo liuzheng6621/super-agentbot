@@ -1143,11 +1143,13 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, call.result);
       }
       if (action === 'workspace' && method === 'GET') {
+        const lazyPath = searchParams.get('path');
+        const lazy = searchParams.has('path');
         const call = await toolGateway.invokeTool({
           taskId: task.id,
           toolId: 'workspace.read',
-          operation: 'tree',
-          args: { op: 'tree' },
+          operation: lazy ? 'directory' : 'tree',
+          args: lazy ? { op: 'directory', path: lazyPath || '' } : { op: 'tree' },
           agentId: searchParams.get('agentId') || '',
           principal,
           source: searchParams.get('agentId') ? 'api.agent' : 'api.owner',
