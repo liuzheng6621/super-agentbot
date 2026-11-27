@@ -42,14 +42,18 @@ export function sleep(ms, signal) {
 /* 真实 CLI 适配器                                                      */
 /* ------------------------------------------------------------------ */
 
-function quoteArg(arg) {
-  if (process.platform === 'win32') {
-    if (arg === '') return '""';
-    if (!/[\s"&|<>^()]/.test(arg)) return arg;
-    return `"${arg.replace(/(["\\])/g, '\\$1')}"`;
-  }
-  if (!/[\s"'$`\\!*?[\]{}()<>|&;#~]/.test(arg)) return arg;
-  return `'${arg.replace(/'/g, `'\\''`)}'`;
+/**
+ * cmd.exe does not use POSIX backslash escaping. Percent expansion and
+ * metacharacters must be neutralised before the string reaches a shell.
+ */
+export function quoteCmdArg(arg) {
+  const value = String(arg ?? '');
+  if (value === '') return '""';
+  const escaped = value
+    .replace(/%/g, '%%')
+    .replace(/"/g, '\\"')
+    .replace(/\r?\n/g, '^');
+  return `"${escaped}"`;
 }
 
 function isGeminiCommand(command) {
@@ -124,7 +128,7 @@ function buildCommand(agent, prompt) {
   const { command } = agent.cli || {};
   const finalArgs = buildArgs(agent, prompt);
   // 命令本身也可能带空格（例如 Program Files 下的 CLI），不能只给参数加引号。
-  return [command, ...finalArgs].map((a) => quoteArg(a)).join(' ');
+  return [quoteCmdArg(command), ...finalArgs.map(quoteCmdArg)].join(' ');
 }
 
 /**
@@ -290,9 +294,30 @@ export function spawnCli(
           stdio: [passByStdin ? 'pipe' : 'ignore', 'pipe', 'pipe'],
         });
       } else {
-        // .cmd / .bat 只能过 cmd.exe，先把代码页切到 UTF-8，否则中文参数会乱码
+        // .cmd / .bat 只能过 cmd.exe，先把代码页切到 UTF-8，否则中文参数会乱码。
+        // Prompt 若已声明进参数，无法安全经过 cmd.exe，必须 fail closed。
+        if (!passByStdin) {
+          resolve({
+            code: -6,
+            stdout: '',
+            stderr:
+              'Windows .cmd/.bat 的 prompt 不能拼进命令行；请改为 stdin 输入，或使用 .exe 直连。',
+            elapsed: Date.now() - started,
+            policyDenied: true,
+            policy: {
+              ...prepared.policy,
+              status: 'denied',
+              reason: 'cmd.exe prompt 参数边界无法安全保证',
+            },
+          });
+          return;
+        }
         const prefix = process.platform === 'win32' ? 'chcp 65001>nul & ' : '';
-        child = spawn(prefix + buildCommand(execAgent, prompt), {
+        const shellAgent = {
+          ...execAgent,
+          cli: { ...execAgent.cli, command: resolved },
+        };
+        child = spawn(prefix + buildCommand(shellAgent, prompt), {
           cwd: runCwd,
           shell: true,
           windowsHide: true,
