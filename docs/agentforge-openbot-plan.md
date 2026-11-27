@@ -1,7 +1,7 @@
 # AgentForge × OpenBot 融合计划（M3-M5 完成版）
 
 > 更新日期：2026-11-27
-> 状态：M3 / M4 / M5 已完成；本文件保留能力边界与后续 backlog
+> 状态：M3 / M4 / M5 已完成；本轮 P1-9、P1-10 与五项 P2 能力已完成
 > 来源：OpenBot 上游仓库（https://github.com/OpenHands/OpenBot）+ AgentForge 现有路线图（`agent-platform-roadmap.md`）
 > 说明：本计划只吸收机制与契约，不移植 OpenBot 的 Electron / Bun / Cloudflare 架构。
 
@@ -27,10 +27,10 @@ AgentForge 继续保留零依赖、零构建、可直接运行的优点，并通
 | Shell / 命令 | 固定命令白名单、operator 审批、一次性执行、超时和进程树回收 | 不开放任意 shell；Agent 只能申请，不能自行批准 |
 | CLI 执行 | 每次调用启动独立子进程，Provider Profile 负责环境、参数、路由和回退 | 没有长期 Provider 会话；`inherit` 不是内核级隔离 |
 | Scheduler | 全局任务并发、Provider 配额、Agent 租约和排队原因可见 | Automation / Scheduler 仍是进程内调度，不是分布式队列 |
-| Automation | 周期 / 每日、CRUD、暂停恢复、重试、历史和启动恢复 | `await_event` 尚无 durable 等待状态 |
+| Automation | 周期 / 每日、CRUD、暂停恢复、重试、历史、启动恢复和 durable `await_event` | 事件等待持久化在 `settings.automations`；进程内调度器仍不是分布式队列 |
 | 服务安全 | owner / operator / agent / system 主体、Token 作用域、租户过滤、配额和审计 | 不是完整账号、RBAC、SSO 或按用户计费 |
 | 工作区 | 任务级 worktree / clone、显式工作区池、读后写版本守卫、事务回滚 | 跨任务池默认关闭；磁盘配额和任务优先级未实现 |
-| 上下文 | 分段预算、稳定前缀、token 估算、spill、`contextStates` 和可审计压缩记录 | 自动摘要策略仍可继续打磨 |
+| 上下文 | 分段预算、稳定前缀、token 估算、spill、`contextStates`、自动摘要、质量评估与压缩回放 | 摘要仍是抽取式，不是模型生成的语义摘要 |
 | 可观测性 | 本地 trace / span、OTLP/HTTP JSON 导出、任务详情和运行记录导出 | OTLP 失败只记录状态，不影响本地任务执行 |
 | 状态接口 | `/api/state` 支持 cursor 分页、摘要字段选择和 active 详情按需加载 | 无参数请求保留全量旧响应以兼容现有客户端 |
 
@@ -114,7 +114,19 @@ AgentForge 继续保留零依赖、零构建、可直接运行的优点，并通
 | 5 | M4 Profile / 工作区 | 已完成 | Profile、池、读后写、事务、DAG / 回放测试 |
 | 6 | M5 生产化 | 已完成 | 租户、OTLP、多实例、懒加载、分页测试 |
 
-全量验证：`node --test tests/*.test.mjs`，当前 `160 / 160` 通过。
+全量验证：`node --test tests/*.test.mjs`，当前 `178 / 178` 通过。
+
+## 本轮已完成
+
+| 条目 | 完成内容 | 主要验证 |
+| --- | --- | --- |
+| P1-9 spill 推广 | 大事件、消息和工具输出保留 spill 引用；Markdown / HTML 导出超限时生成附件句柄与响应头 | `tests/context-budget.test.mjs` |
+| P1-10 超时配置化 | 提案、质询、裁决、工序和质量门超时可由全局设置、Provider Profile 和 Agent Profile 分层覆盖 | `tests/timeouts.test.mjs` |
+| 辩论多样性 | 提案指纹、相似度分组、角度覆盖率、重复提案扣分和前端告警 | `tests/debate.test.mjs` |
+| CLI 网关去硬编码 | 内置 CLI 候选移除 Magpie 地址、模型和凭据参数，改由 Provider Profile `cliBindings` 注入 | `tests/adapters.test.mjs` |
+| 附件读图 | 声明视觉能力；校验 PNG / JPEG / WebP / GIF 类型、体积、尺寸和像素；只持久化内容寻址引用 | `tests/attachments.test.mjs` |
+| 上下文压缩 | 阈值自动触发、来源范围去重、摘要质量、历史、原文保留和按来源回放 | `tests/context-budget.test.mjs` |
+| Automation durable `await_event` | 持久等待、eventId 匹配、幂等唤醒、取消、完成对账、租约互斥、API 与 UI 可见 | `tests/automation.test.mjs`、`tests/http-security.test.mjs` |
 
 ## 后续 backlog
 
@@ -122,14 +134,7 @@ AgentForge 继续保留零依赖、零构建、可直接运行的优点，并通
 
 | 优先级 | 条目 | 当前情况与建议 |
 | --- | --- | --- |
-| P1 | P1-9 spill 推广 | 目前主要覆盖超长上游产物；后续复用于事件、工具输出和导出附件 |
-| P1 | P1-10 超时配置化 | 质量门和各阶段仍有固定预算；后续放进设置与 Agent / Provider Profile |
-| P2 | CLI 网关硬编码 | `CANDIDATES` 仍有 magpie 地址、模型和 `--openai-api-key magpie`；统一走 Provider Profile 和模板变量 |
 | P2 | 监听与权限边界 | `HOST`、`bypassPermissions`、`yolo` 仍沿用现有策略；单独做安全评审和显式配置 |
-| P2 | 辩论多样性检测 | 已有提案、交叉评分和降级标记；后续增加方案相似度和角度覆盖检测 |
-| P2 | 附件读图 | 当前主要处理文本上下文；后续增加视觉能力声明、图片类型 / 体积校验和脱敏 |
-| P2 | 摘要式上下文压缩自动化 | 已有预算、spill 和可审计压缩记录；后续增加自动触发、摘要质量和回放策略 |
-| P2 | Automation durable `await_event` | 当前没有 durable 等待状态、事件身份、唤醒或取消语义；单独设计状态机 |
 | P2 | 完整账号 / RBAC / SSO | 当前是 Token 主体和租户过滤，不是完整用户身份体系 |
 | P2 | 外部数据库 / 分布式队列 | 当前是 JSON + 文件锁 + 租约；SQLite 或队列引入前需单独架构决策 |
 

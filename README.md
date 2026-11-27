@@ -9,7 +9,7 @@
 [![Node](https://img.shields.io/badge/node-%E2%89%A520.11-3c873a?logo=node.js&logoColor=white)](https://nodejs.org)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-blue)
 ![Build](https://img.shields.io/badge/build-none-lightgrey)
-![Tests](https://img.shields.io/badge/tests-160%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-178%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4)
 
@@ -32,7 +32,9 @@
 - **独立评审**：评审候选只允许 `reviewer / tester / architect`，实现者不会被悄悄拉来审自己；自审按真实 `reviewerId / implementerId` 判定并写入任务事件。
 - **服务安全边界**：默认回环地址可零配置启动；绑定到局域网或其他非回环地址时强制要求 `AGENTFORGE_API_TOKEN`，也可显式接受无鉴权风险。支持 Bearer、`X-AgentForge-Token`、浏览器 SSE 查询令牌、同源 / CORS 白名单和拒绝审计。
 - **统一 trace / span**：任务事件自动带 `traceId / spanId / parentSpanId / kind / runId`，运行根 span 写入任务详情；界面、`/api/state`、任务详情和 Markdown / HTML 导出都可追踪一次运行。
-- **Automation / 定时任务**：支持周期与每日计划、启停、立即运行、最近历史、失败重试、重叠运行阻止和启动恢复；调度器只在本进程内运行，不伪装成分布式队列。
+- **Automation / 定时任务**：支持周期与每日计划、启停、立即运行、最近历史、失败重试、重叠运行阻止、启动恢复和 durable `await_event`；调度器只在本进程内运行，不伪装成分布式队列。
+- **上下文压缩与回放**：达到阈值可自动压缩，保留来源消息范围、摘要质量、历史记录和原文回放；压缩记录进入 `/api/state`，原始消息不删除。
+- **图片附件**：Provider Profile 需声明 `vision` 能力；只接收 PNG / JPEG / WebP / GIF，校验体积、尺寸和像素，按内容寻址保存，持久化数据不内联 base64 或本地绝对路径。
 - **重启恢复**：服务重启时把遗留的 queued / running 任务标为中断并写入 `run.recovered` 事件；已发出的 Automation 结果会重新对齐，不留下幽灵排队任务。
 - **增量持久化**：流式消息在 200ms dirty 窗口内合并落盘，只重新序列化变化任务；进程正常退出前会 flush 未完成窗口。
 - **CLI 解析缓存**：命令解析走进程级缓存，PATH 变化时由探测/刷新接口显式失效，减少热路径同步调用。
@@ -100,7 +102,7 @@
 **工程**
 
 - 📦 **零依赖、零构建** — 纯 Node.js + 原生 ESM，`node server/index.mjs` 就起来，前端不打包、不装包管理器。
-- ✅ **160 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、真实质量门、结构化评审、项目技能、运行记录导出、独立评审、持久化 dirty 窗口、可执行文件解析缓存、上下文预算与压缩、工作区文件闭环、工作区池与事务回滚、读后写守卫、Git 隔离、工具策略、CLI 强制沙箱映射、计划版本、消息路由、Tool Gateway 审计、Provider Profile 与用量账本、CLI 参数模板、Provider 自动回退、全局调度队列、Agent 租约、真实工时统计、输出完整性判定、服务 Token / 作用域 / CORS、MCP、审批、trace / OTLP、Automation 恢复、租户隔离、多实例锁与 `/api/state` 分页。
+- ✅ **178 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、真实质量门、结构化评审、项目技能、运行记录导出、独立评审、持久化 dirty 窗口、可执行文件解析缓存、上下文预算与压缩、工作区文件闭环、工作区池与事务回滚、读后写守卫、Git 隔离、工具策略、CLI 强制沙箱映射、计划版本、消息路由、Tool Gateway 审计、Provider Profile 与用量账本、CLI 参数模板、Provider 自动回退、全局调度队列、Agent 租约、真实工时统计、输出完整性判定、服务 Token / 作用域 / CORS、MCP、审批、trace / OTLP、Automation 恢复与事件等待、租户隔离、多实例锁与 `/api/state` 分页。
 
 ## 快速开始
 
@@ -212,9 +214,9 @@ CLI 是不可控的第三方进程，所以调用不是「起进程 → 收字�
 
 ### 与 Magpie 的关系
 
-AgentForge **不是基于 Magpie 框架实现**。Magpie 目前只是部分 CLI 适配器中的默认兼容网关：`server/adapters.mjs` 仍为 Codex、Aider、Gemini、Qwen 等命令保留 `http://127.0.0.1:3425`、模型名或环境变量的默认值。
+AgentForge **不是基于 Magpie 框架实现**，也不依赖任何特定兼容网关。内置 CLI 候选只保留原生命令、参数与输入方式；Base URL、模型、密钥环境变量引用和 CLI 参数模板统一由 Provider Profile 的 `cliBindings` 注入。
 
-现在 Provider Profile 已把 Base URL、模型、密钥环境变量引用、CLI 参数模板和并发上限带到配置层，Agent 可以绑定主 Provider 与有序备用 Provider；执行时会解析成临时子进程环境，失败后在同一工序内自动切换，不把明文密钥写回持久化数据。
+Agent 可以绑定主 Provider 与有序备用 Provider；执行时会解析成临时子进程环境，失败后在同一工序内自动切换，不把明文密钥写回持久化数据。
 
 真实 CLI 的工具边界由 Agent 的 `executionPolicy` 控制：`inherit` 保持兼容，`strict` 会按工具白名单选择 CLI 原生沙箱。当前能可靠表达的组合是 Codex / DSH 的只读或工作区可写沙箱，以及 Claude 无 shell 的只读工具白名单；无法证明的边界会返回 `-6` 并写入 `cli.policy.denied`，不会启动子进程。完整设计见 [docs/agent-platform-roadmap.md](docs/agent-platform-roadmap.md)。
 
@@ -310,6 +312,8 @@ Token 已带最小主体和作用域：`AGENTFORGE_API_TOKEN` 是跨租户 owner
 | `GET` `POST` | `/api/automations` | Automation 列表 / 创建定时任务 |
 | `GET` `PATCH` `DELETE` | `/api/automations/:id` | 查看、修改、暂停 / 恢复或删除 Automation |
 | `POST` | `/api/automations/:id/run` | 立即触发一次 Automation |
+| `POST` `DELETE` | `/api/automations/:id/wait` | 进入 durable 事件等待 / 取消等待 |
+| `POST` | `/api/automations/:id/events` | 以 `{ eventId }` 唤醒等待中的 Automation；重复事件幂等 |
 | `GET` `POST` | `/api/providers` | Provider Profile 列表 / 新增 |
 | `PATCH` `DELETE` | `/api/providers/:id` | 修改 / 删除 Profile（`local-default` 不可删除） |
 | `GET` `POST` | `/api/profiles` | 可复用 Agent Profile 列表 / 创建 |
@@ -333,6 +337,10 @@ Token 已带最小主体和作用域：`AGENTFORGE_API_TOKEN` 是跨租户 owner
 | `GET` | `/api/tasks/:id/workspace` | 工作区树、变更、事件、摘要与 Git 信息 |
 | `GET` | `/api/tasks/:id/search?q=` | 工作区全文搜索 |
 | `GET` | `/api/tasks/:id/events?limit=` | 任务事件流（工具调用 / 文件变更 / 运行结果） |
+| `GET` | `/api/tasks/:id/context/compactions` | 上下文压缩历史 |
+| `GET` | `/api/tasks/:id/context/compactions/:compactionId/replay` | 按来源消息回放某次压缩 |
+| `PATCH` | `/api/tasks/:id/context` | 设置 `contextWindow` / `autoCompactAt` |
+| `POST` | `/api/tasks/:id/context/compact` | 手动压缩当前任务上下文 |
 | `GET` | `/api/tasks/:id/changes` | 文件变更账本 |
 | `GET` | `/api/tasks/:id/graph` | 只读 DAG 节点、依赖边与并行层 |
 | `GET` | `/api/tasks/:id/replay` | 消息、事件和文件变更的时间回放 |
@@ -426,7 +434,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 │   ├── design-io-image-context.md
 │   ├── agent-platform-roadmap.md
 │   └── agentforge-openbot-plan.md
-├── tests/                27 个测试文件、160 个测试
+├── tests/                29 个测试文件、178 个测试
 ├── 安装到桌面.bat
 ├── 卸载桌面快捷方式.bat
 └── data/                 运行时数据（gitignore）
@@ -438,7 +446,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 npm test
 ```
 
-160 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、结构化评审结论与字段校验、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `no-test-entry` 判定、真实 CLI 任务同样执行质量门、独立评审与自审身份判定、目录快照复用、上游瞬时故障只重试一次且不掩盖真实失败、上下文预算与可审计压缩、工作区文件闭环与路径/敏感文件边界、工作区池与事务回滚、读后写守卫、Agent 工具策略、CLI 强制沙箱映射与拒绝事件、计划版本与已完成工序保留、消息路由、Tool Gateway 权限与审计、Provider Profile 持久化与迁移、Provider 用量账本、CLI 参数模板渲染、Provider 路由与真实子进程回退、全局任务并发、Provider 配额、Agent 租约与排队取消、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计、输出完整性判定、提案宽松解析、退出码分类与参数拼装、dirty 窗口合并落盘与退出前 flush、可执行文件解析缓存、项目技能发现与边界保护、运行记录导出与脱敏、服务 Token / 作用域 / CORS / 安全审计、MCP 只读边界、命令审批与一次性执行、trace / span / OTLP 链路、Automation 调度 / 重试 / 幂等 / 恢复、租户隔离与配额、多实例锁与租约、目录懒加载、`/api/state` 分页。
+178 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、结构化评审结论与字段校验、辩论评分 / 多样性 / 角度覆盖规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `no-test-entry` 判定、真实 CLI 任务同样执行质量门、独立评审与自审身份判定、目录快照复用、上游瞬时故障只重试一次且不掩盖真实失败、上下文预算 / 自动压缩 / 质量与回放、事件与导出 spill、图片附件视觉门禁、工作区文件闭环与路径/敏感文件边界、工作区池与事务回滚、读后写守卫、Agent 工具策略、CLI 强制沙箱映射与拒绝事件、计划版本与已完成工序保留、消息路由、Tool Gateway 权限与审计、Provider Profile 持久化与迁移、Provider 用量账本、CLI 参数模板渲染、Provider 路由与真实子进程回退、全局任务并发、Provider 配额、Agent 租约与排队取消、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计、输出完整性判定、提案宽松解析、退出码分类与参数拼装、dirty 窗口合并落盘与退出前 flush、可执行文件解析缓存、项目技能发现与边界保护、运行记录导出与脱敏、服务 Token / 作用域 / CORS / 安全审计、MCP 只读边界、命令审批与一次性执行、trace / span / OTLP 链路、Automation 调度 / 重试 / 幂等 / 恢复 / 事件等待、租户隔离与配额、多实例锁与租约、目录懒加载、`/api/state` 分页。
 
 ## 已知边界
 
@@ -448,7 +456,7 @@ npm test
 - **`trae-cli` 的行为取决于模型**：工具齐全（bash / 编辑 / 顺序思考），但某些模型只肯调顺序思考而不落盘——这是模型行为，不是配置问题。
 - **模拟模式**：一个可用 CLI 都没有时才会启用，产出仍是可运行的代码（`tests/*.test.js` 能直接 `node` 执行），但成员会明确标注 `SIM 演示`。
 - **CLI 严格策略是原生能力映射，不是内核级代理**：`strict` 只放行 Codex / DSH / Claude 能明确表达的组合，并覆盖参数里的危险开关；`inherit` 仍允许 CLI 使用自身工具。真正的网络代理和跨进程系统调用拦截仍待后续。
-- **Magpie 只是默认网关**：项目不依赖 Magpie 框架；Provider Profile、密钥引用、CLI 参数模板、自动回退和 CLI 严格策略已落地。
+- **网关由 Provider Profile 决定**：项目不依赖 Magpie 或任何内置兼容网关；Provider Profile、密钥引用、CLI 参数模板、自动回退和 CLI 严格策略已落地。
 - **调度粒度仍是任务级**：全局任务并发、Provider 配额和显式 Agent 租约已生效；Provider 配额按绑定该 Provider 的活跃任务计数，不按每次 CLI 调用计数。磁盘配额和任务优先级仍在路线图中。
 
 ## Roadmap
@@ -477,15 +485,17 @@ npm test
 - [x] 服务重启恢复（中断任务、`run.recovered`、Automation 对账）
 - [ ] 磁盘配额与任务优先级
 - [x] 跨任务工作区总览、DAG 图与时间回放
-- [ ] 附件与读图（把截图交给视觉模型看 UI）
+- [x] 附件与读图（视觉能力声明、类型 / 体积 / 尺寸校验、内容寻址存储）
 - [x] 正规压缩（长任务的摘要式上下文压缩）
 - [x] 租户隔离与任务配额（不含完整账号 / RBAC / SSO）
 - [x] OTLP / OpenTelemetry 导出
 - [x] 多实例 JSON 持久化 + 文件锁 + 任务 / Automation 租约
 - [x] 目录懒加载与 `/api/state` cursor 分页
-- [ ] P1-9 spill 推广（事件 / 工具输出 / 导出附件）
-- [ ] P1-10 超时配置化
-- [ ] Automation durable `await_event`
+- [x] P1-9 spill 推广（事件 / 工具输出 / 导出附件）
+- [x] P1-10 超时配置化（全局 / Provider / Agent Profile）
+- [x] Automation durable `await_event`（等待 / 唤醒 / 取消 / 完成对账）
+- [x] 辩论多样性与角度覆盖检测
+- [x] 上下文压缩自动触发、质量评估与回放
 - [ ] 完整用户账号、RBAC、SSO
 - [ ] 外部数据库或分布式队列
 
@@ -513,7 +523,7 @@ gemini -p "Reply with exactly: OK" --skip-trust
 <details>
 <summary><b>怎么把所有 CLI 指向自己的网关或模型？</b></summary>
 
-设 `AGENTFORGE_MODEL`，例如 `AGENTFORGE_MODEL=my-gateway/my-model npm start`。也可以为每个 Provider Profile 配置 `baseUrl`、`model`、`apiKeyRef` 和 `cliBindings`；参数模板会把模型、网关、密钥引用和 prompt 解析到子进程环境或参数里，无需修改源码。
+为每个 Provider Profile 配置 `baseUrl`、`model`、`apiKeyRef` 和 `cliBindings`，再把 Agent 绑定到该 Profile。参数模板会把模型、网关、密钥引用和 prompt 解析到子进程环境或参数里，无需修改源码。`AGENTFORGE_MODEL` 只作为显式兜底，不会改写各 CLI 的内置网关参数。
 </details>
 
 <details>

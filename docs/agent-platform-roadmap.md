@@ -2,7 +2,7 @@
 
 > 评估日期：2026-11-27
 
-本文基于当前仓库实现，区分“已经落地”“已有边界”和“下一阶段建议”，避免把提示词约束、平台 API 和真实 Tool Gateway 混为一谈。M3 / M4 / M5 已完成，当前 `160 / 160` 测试通过。
+本文基于当前仓库实现，区分“已经落地”“已有边界”和“下一阶段建议”，避免把提示词约束、平台 API 和真实 Tool Gateway 混为一谈。M3 / M4 / M5 已完成，当前 `178 / 178` 测试通过。
 
 ## 1. 工具调用能力
 
@@ -62,11 +62,11 @@
 
 ### 现状
 
-AgentForge 不是基于 Magpie 框架实现。Magpie 目前只是部分 CLI 适配器中的默认兼容网关：
+AgentForge 不是基于 Magpie 框架实现，也不再在内置 CLI 候选中携带 Magpie 地址、模型或凭据参数：
 
-- `server/adapters.mjs` 为 Codex、Aider、Gemini、Qwen 等命令硬编码了模型名、网关地址或环境变量。
-- 典型默认地址是 `http://127.0.0.1:3425`，模型默认值是 `trae-cn/glm-5.3-flash`。
-- `AGENTFORGE_MODEL` 仍是全局模型名兜底；Provider Profile 已可覆盖模型、Base URL、密钥环境变量引用和并发上限。
+- `server/adapters.mjs` 只保留 CLI 原生命令、参数和输入方式。
+- Provider Profile 的 `cliBindings` 负责注入模型、Base URL、密钥环境变量引用和 prompt 参数模板。
+- Agent 可绑定主 Provider 与有序备用 Provider，真实 CLI 失败后自动回退。
 
 Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile 解析为临时子进程环境，明文密钥不写回 `db.json`；CLI 参数模板、主/备 Provider 自动路由和失败回退也已接入。真实 CLI 子进程的强制工具拦截已由 `server/cli-policy.mjs` 接入第一版原生策略映射，内核级代理仍待补。
 
@@ -265,7 +265,6 @@ M3 不包含：自由 shell、Agent 自审批、MCP 写工具、Provider fill-fi
 
 | 优先级 | 条目 | 现状 | 建议 |
 | --- | --- | --- | --- |
-| P2 | Automation durable `await_event` | 当前没有 durable 等待状态、事件身份、唤醒或取消语义 | 单独设计等待 / 唤醒状态机，不并入 `clientMessageId` 幂等批次 |
 | P2 | 完整账号 / RBAC / SSO | 已有 Token 主体、作用域、租户过滤和任务配额 | 需要用户身份、角色权限、SSO 和按用户计费时再做 |
 | P2 | 外部数据库 / 分布式队列 | 当前是 JSON + 文件锁 + 租约，多实例可共享同一数据目录 | SQLite 或队列引入前先做架构决策，保持零依赖承诺清楚 |
 
@@ -275,14 +274,7 @@ M3 不包含：自由 shell、Agent 自审批、MCP 写工具、Provider fill-fi
 
 | 优先级 | 条目 | 现状 | 后续建议 |
 | --- | --- | --- | --- |
-| P1 | P1-9 spill 推广 | 目前主要覆盖超长上游产物 | 把 spill 复用于事件、工具输出和导出附件 |
-| P1 | P1-10 超时配置化 | 质量门和各阶段仍使用代码内固定预算 | 将超时放进设置与 Agent / Provider Profile |
-| P2 | Automation `await_event` | 当前没有 durable 等待状态、事件身份、唤醒或取消语义 | 单独设计等待 / 唤醒状态机，不并入 `clientMessageId` 幂等批次 |
-| P2 | CLI 网关配置去硬编码 | `CANDIDATES` 仍内置 magpie 地址、模型和 `--openai-api-key magpie` | 统一走 Provider Profile 和模板变量 |
 | P2 | 监听与权限边界 | `HOST`、`bypassPermissions`、`yolo` 仍沿用现有策略 | 单独做安全评审和显式配置，不在本轮修改 |
-| P2 | 辩论多样性检测 | 已有提案、交叉评分和降级标记 | 增加方案相似度 / 角度覆盖检测，避免多份提案同质化 |
-| P2 | 附件读图 | 当前主要处理文本上下文 | 增加视觉模型能力声明、图片类型 / 体积校验和脱敏 |
-| P2 | 摘要式上下文压缩自动化 | 已有上下文预算、spill 和可审计压缩记录 | 增加自动触发、摘要质量和回放策略，不覆盖原始记录 |
 
-以上 P1 / P2 条目是后续 backlog。M3 / M4 / M5 已完成；当前没有修改 CLI `bypassPermissions` / `yolo` 的权限边界，也没有实现完整用户账号、RBAC、SSO 或分布式队列。
+以上剩余条目是后续 backlog。M3 / M4 / M5 已完成；P1-9、P1-10、辩论多样性、CLI 网关去硬编码、附件读图、上下文压缩和 Automation durable `await_event` 已移出 backlog。当前没有修改 CLI `bypassPermissions` / `yolo` 的权限边界，也没有实现完整用户账号、RBAC、SSO 或分布式队列。
 
