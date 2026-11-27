@@ -45,6 +45,7 @@ const S = {
   overviewLoading: false,
   workspaceDiffPath: "",
   workspaceDiff: null,
+  pendingImage: null,
   agentPolicyPreviewTimer: null,
   agentPolicyPreviewSeq: 0,
 };
@@ -704,6 +705,17 @@ function friendlyCliText(value) {
 
 function messageHtml(m) {
   const isUser = m.kind === "user" || m.agentId === "user";
+  const image = m.image
+    ? `<figure class="msg-image"><img src="/api/tasks/${encodeURIComponent(
+        S.task?.id || "",
+      )}/attachments/${encodeURIComponent(m.image.sha256)}.${
+        m.image.mime === "image/jpeg" ? "jpg" : m.image.mime.split("/")[1]
+      }" alt="${escapeHtml(
+        m.text || "图片附件",
+      )}" loading="lazy" /><figcaption>${escapeHtml(
+        `${m.image.width}×${m.image.height} · ${fmtBytes(m.image.bytes)}`,
+      )}</figcaption></figure>`
+    : "";
   const color = m.color || "#b8d94f";
   const badge =
     m.kind === "proposal"
@@ -733,7 +745,7 @@ function messageHtml(m) {
       ${isUser ? "" : `<span class="avatar" style="--c:${color}">${initials(m.name)}</span>`}
       <div class="msg-main">
         ${head}
-        <div class="bubble" style="--c:${color}">${md(friendlyCliText(m.text || ""))}</div>
+        <div class="bubble" style="--c:${color}">${image}${md(friendlyCliText(m.text || ""))}</div>
         ${meta}
       </div>
       ${isUser ? `<span class="avatar" style="--c:${color}">${initials(m.name)}</span>` : ""}
@@ -3147,7 +3159,11 @@ async function createTask(goal) {
 async function sendMessage() {
   const input = $("#input");
   const text = input.value.trim();
-  if (!text) return;
+  if (!text && !S.pendingImage) return;
+  if (!text && !S.task) {
+    toast("请先创建任务，再发送图片", "err");
+    return;
+  }
   if (!S.task) {
     await createTask(text);
     return;
@@ -3155,9 +3171,63 @@ async function sendMessage() {
   input.value = "";
   autosize(input);
   try {
-    await api(`/api/tasks/${S.task.id}/chat`, { method: "POST", body: { text } });
+    await api(`/api/tasks/${S.task.id}/chat`, {
+      method: "POST",
+      body: { text, image: S.pendingImage || null },
+    });
+    S.pendingImage = null;
+    renderAttachmentTray();
   } catch (err) {
     toast(`发送失败：${err.message}`, "err");
+  }
+}
+
+function renderAttachmentTray() {
+  const tray = $("#attachmentTray");
+  if (!tray) return;
+  if (!S.pendingImage) {
+    tray.hidden = true;
+    tray.innerHTML = "";
+    return;
+  }
+  tray.hidden = false;
+  tray.innerHTML = `<span class="attachment-chip">
+    <img src="${escapeHtml(S.pendingImage.preview)}" alt="" />
+    <span>${escapeHtml(S.pendingImage.name || "图片")}</span>
+    <button type="button" id="attachmentRemove" aria-label="移除图片">×</button>
+  </span>`;
+}
+
+async function attachImageFile(file) {
+  if (!file || !S.task) {
+    toast("请先创建或选择一个任务，再添加图片", "err");
+    return;
+  }
+  if (!/^image\/(png|jpeg|webp|gif)$/.test(file.type)) {
+    toast("只支持 PNG / JPEG / WebP / GIF", "err");
+    return;
+  }
+  try {
+    const data = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result || "").split(",")[1] || "");
+      reader.onerror = () => reject(reader.error || new Error("读取图片失败"));
+      reader.readAsDataURL(file);
+    });
+    const { image } = await api(`/api/tasks/${S.task.id}/attachments`, {
+      method: "POST",
+      body: { name: file.name, data },
+    });
+    S.pendingImage = {
+      ...image,
+      name: file.name,
+      preview: `/api/tasks/${encodeURIComponent(S.task.id)}/attachments/${image.sha256}.${
+        image.mime === "image/jpeg" ? "jpg" : image.mime.split("/")[1]
+      }`,
+    };
+    renderAttachmentTray();
+  } catch (err) {
+    toast(`图片上传失败：${err.message}`, "err");
   }
 }
 
@@ -4130,6 +4200,16 @@ function bind() {
 
   /* 发送 */
   $("#sendBtn").addEventListener("click", sendMessage);
+  $("#imageInput").addEventListener("change", (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (file) attachImageFile(file);
+  });
+  $("#attachmentTray").addEventListener("click", (e) => {
+    if (!e.target.closest("#attachmentRemove")) return;
+    S.pendingImage = null;
+    renderAttachmentTray();
+  });
   $("#input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();

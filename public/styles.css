@@ -1387,6 +1387,83 @@ kbd {
   box-shadow: 1px 1px 0 var(--hard);
 }
 
+.attach-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 2px solid var(--edge);
+  background: var(--card);
+  color: var(--fg);
+  cursor: pointer;
+  box-shadow: 2px 2px 0 var(--hard);
+}
+
+.attach-btn:hover {
+  background: var(--yellow);
+}
+
+.attachment-tray {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 2px 0;
+}
+
+.attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 2px solid var(--edge);
+  background: var(--card);
+  font-size: 11px;
+}
+
+.attachment-chip img {
+  width: 30px;
+  height: 30px;
+  object-fit: cover;
+  border: 1px solid var(--edge);
+}
+
+.attachment-chip span {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-chip button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.msg-image {
+  margin: 0 0 8px;
+}
+
+.msg-image img {
+  display: block;
+  max-width: min(100%, 640px);
+  max-height: 360px;
+  border: 2px solid var(--edge);
+  object-fit: contain;
+  background: var(--card);
+}
+
+.msg-image figcaption {
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--muted);
+}
+
 /* 数据条 */
 .hero-stats {
   display: flex;

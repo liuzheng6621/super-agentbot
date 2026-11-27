@@ -171,6 +171,7 @@
           <footer class="composer">
             <div class="composer-box" id="composerBox">
               <textarea id="input" rows="1" placeholder="描述你的目标，回车发起协作…" disabled></textarea>
+              <div class="attachment-tray" id="attachmentTray" hidden></div>
               <div class="composer-bar">
                 <button type="button" class="dir-pick" id="dirPick" title="选一个已有的项目文件夹，让下一次开工在里面干活">
                   <span class="dir-ico">📁</span>
@@ -181,6 +182,12 @@
                   <button class="fm" data-mode="direct">直接开工</button>
                 </div>
                 <div class="mention-list" id="mentionList"></div>
+                <label class="attach-btn" title="添加图片">
+                  <input type="file" id="imageInput" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
+                  <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
+                    <path d="M21 12.5l-8.5 8.5a6 6 0 01-8.5-8.5L12.5 4a4 4 0 015.7 5.7l-8.4 8.4a2 2 0 01-2.8-2.8l7.7-7.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </label>
                 <div class="composer-right">
                   <span class="tip" id="composerTip">自动编排 · 5 位成员</span>
                   <button class="send-btn" id="sendBtn" aria-label="发送" disabled>

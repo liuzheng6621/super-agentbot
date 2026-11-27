@@ -13,6 +13,7 @@ import { providerRoute, withProviderProfile } from './providers.mjs';
 import { policySummary, resolveCliPolicy } from './cli-policy.mjs';
 import { commandKey } from './command-key.mjs';
 import { timeoutFor, timeoutSummary } from './timeouts.mjs';
+import { attachmentAbsolutePath, imageDataUrl } from './attachments.mjs';
 import {
   cancelQueuedTask,
   configureScheduler,
@@ -317,7 +318,7 @@ function compactContextMessages(messages, { beforeIndex = 0, maxMessages = 8 } =
 export function buildContextPack(task, { maxMessages = 8, maxFiles = 80, files } = {}) {
   const allFiles = files || listWorkspaceFiles(task);
   const messages = Array.isArray(task.messages) ? task.messages : [];
-  const visibleMessages = messages.filter((message) => message.text);
+  const visibleMessages = messages.filter((message) => message.text || message.image);
   const recentStart = Math.max(0, visibleMessages.length - maxMessages);
   const beforeIndex = messages.findIndex((message) => message === visibleMessages[recentStart]);
   const compaction = task.contextState?.compaction || null;
@@ -331,11 +332,19 @@ export function buildContextPack(task, { maxMessages = 8, maxFiles = 80, files }
       to: (m.to || []).map((recipient) => recipient.name || recipient.id).join(', '),
       correlationId: m.correlationId || '',
       stepId: m.stepId || '',
-      text: String(m.text).replace(/\s+/g, ' ').slice(0, 300),
+      text: String(m.text || '').replace(/\s+/g, ' ').slice(0, 300),
+      image: m.image ? { ...m.image } : null,
     }));
+  const images = recent.filter((message) => message.image).map((message) => message.image);
   const selectedFiles = allFiles.filter((f) => f.bytes > 0).slice(0, maxFiles);
   const estimate = estimateTokens(
-    [task.goal, task.workspace, compaction?.summary || '', ...recent.map((m) => m.text)]
+    [
+      task.goal,
+      task.workspace,
+      compaction?.summary || '',
+      ...recent.map((m) => m.text),
+      ...images.map((image) => image.sha256),
+    ]
       .filter(Boolean)
       .join('\n'),
   );
@@ -355,6 +364,7 @@ export function buildContextPack(task, { maxMessages = 8, maxFiles = 80, files }
     })),
     files: selectedFiles,
     messages: recent,
+    images,
     compaction,
     contextState: {
       estimatedTokens: estimate,
@@ -456,7 +466,7 @@ export function stableBlock(context) {
  * 易变区：状态、工序账本、最近摘要、文件清单，每一步都会变。
  * 必须放在 prompt 末尾，否则它前面的所有内容都跟着失效。
  */
-export function volatileBlock(context, step = '') {
+export function volatileBlock(context, step = '', { inlineImages = true } = {}) {
   if (!context) return '';
   return [
     '# 项目上下文（实时）',
@@ -472,8 +482,25 @@ export function volatileBlock(context, step = '') {
     '# 最近协作摘要',
     context.compaction?.summary ? `- 早先上下文：${context.compaction.summary}` : '',
     context.messages.length
-      ? context.messages.map((m) => `- ${m.name}: ${m.text}`).join('\n')
+      ? context.messages
+          .map((m) =>
+            m.image
+              ? `- ${m.name}: [图片 ${m.image.width}×${m.image.height} ${m.image.mime} sha256=${m.image.sha256.slice(0, 12)}] ${m.text || ''}`.trim()
+              : `- ${m.name}: ${m.text}`,
+          )
+          .join('\n')
       : '- 暂无',
+    context.images?.length
+      ? `\n# 本轮图片输入\n${context.images
+          .map((image, index) => {
+            const meta = `${index + 1}. ${image.mime} ${image.width}×${image.height}`;
+            if (!inlineImages) {
+              return `${meta}，只读路径：${attachmentAbsolutePath(image)}`;
+            }
+            return `${meta}，data URL：data:${image.mime};base64,${imageDataUrl(image).split(',')[1]}`;
+          })
+          .join('\n')}`
+      : '',
     '',
     '# 已知文件',
     context.files.length
@@ -1258,6 +1285,10 @@ function toolPolicyBlock(agent) {
 
 export function buildPrompt(task, agent, step, depsText, context, extra = {}) {
   const role = step?.role || agent.role;
+  const imagePaths = (context?.images || []).map(
+    (image) =>
+      `- ${image.mime} ${image.width}×${image.height}，只读路径：${attachmentAbsolutePath(image)}`,
+  );
   const lines = [
     stableBlock(context),
     `你是「${agent.name}」，团队中的${agent.title}。`,
@@ -1272,6 +1303,10 @@ export function buildPrompt(task, agent, step, depsText, context, extra = {}) {
     '',
     '# 依赖工序的真实产物',
     depsText || '无',
+    '',
+    imagePaths.length
+      ? `# 图片附件\n${imagePaths.join('\n')}\n需要细节时用文件工具读取上面的只读路径。`
+      : '',
     '',
     extra.repairRound ? `# 返工轮次\n这是第 ${extra.repairRound} 轮修复。只处理评审阻塞项，不要扩大改动范围。` : '',
     extra.decision
@@ -1319,7 +1354,7 @@ export function buildPrompt(task, agent, step, depsText, context, extra = {}) {
     lines.push('4. 结尾用一行「下一步建议：…」收口。');
   }
   // 易变内容永远放最后：前面越稳定，提供方的前缀缓存命中越长
-  lines.push('', volatileBlock(context, step?.title || ''));
+  lines.push('', volatileBlock(context, step?.title || '', { inlineImages: agent.mode !== 'cli' }));
   return lines.filter((line) => line !== '').join('\n');
 }
 
@@ -1339,7 +1374,7 @@ function buildPlanPrompt(agent, task, context = null, extra = {}) {
     '',
     '不要写业务代码，不要客套。中文 Markdown，结尾用一行「下一步建议：…」收口。',
     '',
-    volatileBlock(context, '需求拆解'),
+    volatileBlock(context, '需求拆解', { inlineImages: agent.mode !== 'cli' }),
   ].join('\n');
 }
 
@@ -1369,7 +1404,7 @@ function buildSummaryPrompt(agent, task, outputs, context, extra = {}) {
     '# 你的任务',
     '给出交付结论、遗留风险，以及需要用户拍板的 3 件事。不要宣称未通过的工序已经完成。中文 Markdown。',
     '',
-    volatileBlock(context, '交付收口'),
+    volatileBlock(context, '交付收口', { inlineImages: agent.mode !== 'cli' }),
   ]
     .filter(Boolean)
     .join('\n');
@@ -1750,7 +1785,7 @@ function buildProposalPrompt(task, agent, angle, context, extra = {}) {
     '- 只输出方案文本，不要创建、修改、删除任何文件。',
     '- 不要写完整代码，不要客套话，中文 Markdown，800 字以内。',
     '',
-    volatileBlock(context, `方案提案 · ${angle.label}`),
+    volatileBlock(context, `方案提案 · ${angle.label}`, { inlineImages: agent.mode !== 'cli' }),
   ]
     .filter(Boolean)
     .join('\n');
@@ -3183,23 +3218,50 @@ function parseMentions(text) {
   return found;
 }
 
-export async function chat(taskId, text, { speed = 1 } = {}) {
+export async function chat(taskId, text, { speed = 1, image = null } = {}) {
   const task = store.getTask(taskId);
   if (!task) return false;
   const mentioned = parseMentions(text);
+  const agent = mentioned[0] || pickAgent('planner');
+  if (!agent) throw new Error('团队里还没有任何智能体');
+  const imageProvider = image ? store.providerForAgent(agent) : null;
+  if (image) {
+    if (!imageProvider?.capabilities?.includes('vision')) {
+      const error = new Error('当前模型不支持图片输入，请切换到声明了 vision 能力的 Provider');
+      error.code = 'IMAGE_UNSUPPORTED_MODEL';
+      error.status = 422;
+      throw error;
+    }
+  }
 
-  const userMessage = store.addMessage(taskId, {
-    agentId: 'user',
-    name: '你',
-    role: 'user',
-    title: 'Owner',
-    color: '#94a3b8',
-    kind: 'user',
-    text,
-    done: true,
-  }, {
-    to: mentioned.length ? mentioned : null,
-  });
+  const userMessage = image
+    ? store.addImageMessage(
+        taskId,
+        {
+          agentId: 'user',
+          name: '你',
+          role: 'user',
+          title: 'Owner',
+          color: '#94a3b8',
+          text,
+          done: true,
+          to: mentioned.length ? mentioned : null,
+        },
+        image,
+        { provider: imageProvider },
+      )
+    : store.addMessage(taskId, {
+        agentId: 'user',
+        name: '你',
+        role: 'user',
+        title: 'Owner',
+        color: '#94a3b8',
+        kind: 'user',
+        text,
+        done: true,
+      }, {
+        to: mentioned.length ? mentioned : null,
+      });
 
   try {
     const shouldStart = /^(开始|开工|继续|动手|跑起来|go|start)/i.test(text.trim());
@@ -3273,9 +3335,6 @@ export async function chat(taskId, text, { speed = 1 } = {}) {
       store.endMessage(taskId, briefing.id, {});
       return true;
     }
-
-    const agent = mentioned[0] || pickAgent('planner');
-    if (!agent) throw new Error('团队里还没有任何智能体');
 
     const ctx = store.getTask(taskId);
     const context = buildContextPack(ctx);

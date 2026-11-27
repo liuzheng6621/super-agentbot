@@ -30,6 +30,7 @@ import { probeClis, spawnCli, clearResolveCache } from './adapters.mjs';
 import { redactProvider } from './providers.mjs';
 import { redactAgentProfile } from './profiles.mjs';
 import { timeoutCatalog } from './timeouts.mjs';
+import { AttachError, admitImage, readAttachment } from './attachments.mjs';
 import { adoptInstalledClis, rebalanceTeam } from './adopt.mjs';
 import { ensureRealTeam, refreshTeam, judgeHealth } from './team.mjs';
 import { toolGateway } from './tool-gateway.mjs';
@@ -1197,6 +1198,57 @@ const server = http.createServer(async (req, res) => {
       return res.end(transcript.body);
     }
 
+    const attachmentMatch = pathname.match(/^\/api\/tasks\/([\w-]+)\/attachments$/);
+    if (attachmentMatch && method === 'POST') {
+      const task = visibleTask(principal, attachmentMatch[1]);
+      if (!task) return json(res, 404, { error: '任务不存在' });
+      const raw = await readBody(req, 12 * 1024 * 1024);
+      try {
+        const buffer = Buffer.from(String(raw.data || ''), 'base64');
+        const image = admitImage(buffer, { name: raw.name });
+        store.addTaskAttachment(task.id, image);
+        return json(res, 201, { image });
+      } catch (err) {
+        if (err instanceof AttachError) {
+          return json(res, err.status || 400, { error: err.message, code: err.code });
+        }
+        throw err;
+      }
+    }
+
+    const attachmentFileMatch = pathname.match(
+      /^\/api\/tasks\/([\w-]+)\/attachments\/([a-f0-9]{64})\.(png|jpg|webp|gif)$/i,
+    );
+    if (attachmentFileMatch && method === 'GET') {
+      const task = visibleTask(principal, attachmentFileMatch[1]);
+      if (!task) return json(res, 404, { error: '任务不存在' });
+      const sha256 = attachmentFileMatch[2].toLowerCase();
+      const mime = {
+        png: 'image/png',
+        jpg: 'image/jpeg',
+        webp: 'image/webp',
+        gif: 'image/gif',
+      }[attachmentFileMatch[3].toLowerCase()];
+      if (!store.taskHasAttachment(task.id, sha256, mime)) {
+        return json(res, 404, { error: '图片附件不属于该任务', code: 'IMAGE_NOT_FOUND' });
+      }
+      try {
+        const { buffer } = readAttachment({ sha256, mime });
+        res.writeHead(200, {
+          'Content-Type': mime,
+          'Cache-Control': 'private, max-age=31536000, immutable',
+          'Content-Length': buffer.length,
+          'X-Content-Type-Options': 'nosniff',
+        });
+        return res.end(buffer);
+      } catch (err) {
+        if (err instanceof AttachError) {
+          return json(res, err.status || 404, { error: err.message, code: err.code });
+        }
+        throw err;
+      }
+    }
+
     const taskMatch = pathname.match(
       /^\/api\/tasks\/([\w-]+)(?:\/(run|stop|chat|replan|files|file|workspace|search|events|changes|diff|fs|tools|graph|replay))?$/,
     );
@@ -1236,8 +1288,26 @@ const server = http.createServer(async (req, res) => {
       if (action === 'chat' && method === 'POST') {
         const body = await readBody(req);
         const text = String(body.text || '').trim();
-        if (!text) return json(res, 400, { error: '消息为空' });
-        chat(task.id, text, { speed: Number(body.speed) || 1 }).catch((e) =>
+        const attachment = body.image?.sha256
+          ? {
+              sha256: String(body.image.sha256),
+              mime: String(body.image.mime || ''),
+              width: Number(body.image.width) || 0,
+              height: Number(body.image.height) || 0,
+              bytes: Number(body.image.bytes) || 0,
+            }
+          : null;
+        if (!text && !attachment) return json(res, 400, { error: '消息为空' });
+        if (
+          attachment &&
+          !store.taskHasAttachment(task.id, attachment.sha256, attachment.mime)
+        ) {
+          return json(res, 400, {
+            error: '图片附件不属于该任务，请重新上传',
+            code: 'IMAGE_INVALID_REFERENCE',
+          });
+        }
+        chat(task.id, text, { speed: Number(body.speed) || 1, image: attachment }).catch((e) =>
           console.error('[chat]', e),
         );
         return json(res, 202, { ok: true });

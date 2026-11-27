@@ -22,6 +22,7 @@ import {
   redactProvider,
   resolveProvider,
 } from './providers.mjs';
+import { publicImageRef, supportsVision } from './attachments.mjs';
 import { normalizeExecutionPolicy } from './cli-policy.mjs';
 import { normalizeMcpServer } from './mcp.mjs';
 import {
@@ -2045,6 +2046,7 @@ class Store {
       scheduler: null,
       plan: [],
       messages: [],
+      attachments: [],
       artifacts: [],
       runId: null,
       trace: null,
@@ -2285,6 +2287,62 @@ class Store {
     });
     this.save({ tasks: [taskId] });
     return message;
+  }
+
+  addImageMessage(taskId, msg = {}, image = null, { provider = null } = {}) {
+    const task = this.getTask(taskId);
+    if (!task) return null;
+    if (!image?.sha256) {
+      const error = new Error('图片附件引用无效');
+      error.code = 'IMAGE_INVALID_REFERENCE';
+      error.status = 400;
+      throw error;
+    }
+    const effectiveProvider =
+      provider || this.providerForAgent({ providerId: msg.providerId || DEFAULT_PROVIDER_ID });
+    if (!supportsVision(effectiveProvider)) {
+      const error = new Error('当前模型不支持图片输入，请切换到声明了 vision 能力的 Provider');
+      error.code = 'IMAGE_UNSUPPORTED_MODEL';
+      error.status = 422;
+      throw error;
+    }
+    this.addTaskAttachment(taskId, image);
+    return this.addMessage(
+      taskId,
+      {
+        ...msg,
+        kind: 'image',
+        image: publicImageRef(image),
+      },
+      { to: msg.to || { kind: 'owner', id: 'user', name: '你' } },
+    );
+  }
+
+  addTaskAttachment(taskId, image = null) {
+    const task = this.getTask(taskId);
+    if (!task || !image?.sha256) return null;
+    if (!Array.isArray(task.attachments)) task.attachments = [];
+    const ref = publicImageRef(image);
+    if (!ref) return null;
+    if (!task.attachments.some((item) => item.sha256 === ref.sha256 && item.mime === ref.mime)) {
+      task.attachments.push(ref);
+      this.save({ tasks: [taskId] });
+    }
+    return ref;
+  }
+
+  taskHasAttachment(taskId, sha256, mime) {
+    const task = this.getTask(taskId);
+    if (!task) return false;
+    const sha = String(sha256 || '').toLowerCase();
+    const type = String(mime || '').toLowerCase();
+    const matches = (image) =>
+      String(image?.sha256 || '').toLowerCase() === sha &&
+      (!type || String(image?.mime || '').toLowerCase() === type);
+    return (
+      (task.attachments || []).some(matches) ||
+      (task.messages || []).some((message) => matches(message.image))
+    );
   }
 
   /** 记一次真实发出去的提示词：token 账必须算输入，只算输出会把成本低估一个数量级。 */
