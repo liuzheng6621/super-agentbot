@@ -2618,6 +2618,7 @@ export function stepAgentCandidates(step, preferred = null) {
 }
 
 const PLACEHOLDER_TEST = /no test specified/i;
+const NODE_TEST_FILE = /\.(?:test|spec)\.(?:m?js|cjs)$/i;
 
 function commandText(command, args = []) {
   return [command, ...args]
@@ -2626,6 +2627,37 @@ function commandText(command, args = []) {
       return /[\s"'&|<>^()]/.test(value) ? `"${value.replace(/"/g, '\\"')}"` : value;
     })
     .join(' ');
+}
+
+function discoverNodeTestFiles(root) {
+  const testsDir = path.join(root, 'tests');
+  let stat;
+  try {
+    stat = fs.statSync(testsDir);
+  } catch {
+    return [];
+  }
+  if (!stat.isDirectory()) return [];
+
+  const found = [];
+  const visit = (dir) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const abs = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        visit(abs);
+      } else if (entry.isFile() && NODE_TEST_FILE.test(entry.name)) {
+        found.push(path.relative(root, abs).split(path.sep).join('/'));
+      }
+    }
+  };
+  visit(testsDir);
+  return found.sort();
 }
 
 /**
@@ -2684,20 +2716,14 @@ export function detectTestCommand(task) {
   if (exists('go.mod')) {
     return { command: 'go', args: ['test', './...'], label: 'go test ./...', source: 'go.mod' };
   }
-  try {
-    if (exists('tests')) {
-      const names = fs.readdirSync(abs('tests'));
-      if (names.some((n) => /\.(test|spec)\.(m?js|cjs)$/.test(n))) {
-        return {
-          command: process.execPath,
-          args: ['--test', 'tests/**/*.test.{js,mjs,cjs}'],
-          label: 'node --test tests/**/*.test.{js,mjs,cjs}',
-          source: 'tests/ 目录',
-        };
-      }
-    }
-  } catch {
-    /* 目录读不到就跳过这一条 */
+  const nodeTests = discoverNodeTestFiles(root);
+  if (nodeTests.length) {
+    return {
+      command: process.execPath,
+      args: ['--test', ...nodeTests],
+      label: `node --test ${nodeTests.join(' ')}`,
+      source: 'tests/ 目录',
+    };
   }
   // 最后才用关键词模板猜出的文件名，且必须真的存在
   const rel = `tests/${sim.pickModule(task.goal).name}.test.js`;

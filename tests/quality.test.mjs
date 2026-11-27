@@ -89,8 +89,26 @@ test('测试入口探测按 npm / Makefile / pytest 优先级执行', () => {
   assert.equal(detectTestCommand(workspace({ 'go.mod': 'module x\n' })).command, 'go');
 
   const nodeTests = detectTestCommand(workspace({ 'tests/a.test.js': '' }));
-  assert.deepEqual(nodeTests.args, ['--test', 'tests/**/*.test.{js,mjs,cjs}']);
+  assert.deepEqual(nodeTests.args, ['--test', 'tests/a.test.js']);
   assert.equal(nodeTests.command, process.execPath);
+
+  const specOnly = detectTestCommand(workspace({ 'tests/unit/foo.spec.mjs': '' }));
+  assert.deepEqual(specOnly.args, ['--test', 'tests/unit/foo.spec.mjs']);
+
+  const nested = detectTestCommand(
+    workspace({
+      'tests/unit/foo.test.mjs': '',
+      'tests/unit/bar.spec.cjs': '',
+    }),
+  );
+  assert.deepEqual(nested.args, [
+    '--test',
+    'tests/unit/bar.spec.cjs',
+    'tests/unit/foo.test.mjs',
+  ]);
+
+  assert.equal(detectTestCommand(workspace({ 'tests/notes.js': '' })), null, '非测试 JS 不算入口');
+  assert.equal(detectTestCommand(workspace({ tests: 'not-a-directory' })), null, 'tests 文件不算目录');
 
   assert.equal(detectTestCommand(workspace({ 'README.md': '# 空' })), null, '什么都没有就必须返回 null');
 });
