@@ -17,6 +17,7 @@ import {
   resolveProvider,
 } from './providers.mjs';
 import { normalizeExecutionPolicy } from './cli-policy.mjs';
+import { normalizeMcpServer } from './mcp.mjs';
 
 export const ROOT = path.resolve(import.meta.dirname, '..');
 export const DATA_DIR = process.env.AGENTFORGE_DATA_DIR
@@ -31,6 +32,7 @@ const MAX_FILE_CHANGES = 500;
 const MAX_PLAN_VERSIONS = 40;
 const MAX_SKILL_ACTIVATIONS = 40;
 const SAVE_WINDOW_MS = 200;
+const MAX_MCP_SERVERS = 32;
 
 export const ROLE_ORDER = ['planner', 'architect', 'coder', 'tester', 'reviewer'];
 export const ROLE_LABEL = {
@@ -194,6 +196,26 @@ export const TOOL_CATALOG = [
       additionalProperties: false,
     },
   },
+  {
+    id: 'mcp.call',
+    label: '调用 MCP 只读工具',
+    description: '通过本地 stdio MCP server 调用已白名单的只读工具。',
+    risk: 'read',
+    scope: 'mcp',
+    audit: true,
+    operations: ['call'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        op: { const: 'call' },
+        serverId: { type: 'string' },
+        tool: { type: 'string' },
+        arguments: { type: 'object' },
+      },
+      required: ['op', 'serverId', 'tool'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 export const ROLE_TOOLS = {
@@ -248,6 +270,18 @@ export function normalizeSkills(value) {
   ];
 }
 
+export function normalizeMcpServerIds(value, servers = []) {
+  if (!Array.isArray(value)) return [];
+  const known = new Set((servers || []).map((server) => String(server?.id || '')));
+  return [
+    ...new Set(
+      value
+        .map((id) => String(id || '').trim())
+        .filter((id) => id && known.has(id)),
+    ),
+  ].slice(0, 16);
+}
+
 function normalizePlanStep(step = {}, fallbackId = 'step-1', used = new Set(), reset = false) {
   let id = String(step.id || fallbackId);
   if (used.has(id)) id = `${fallbackId}-${randomUUID().slice(0, 4)}`;
@@ -294,6 +328,7 @@ function defaultAgents() {
     tagline,
     skills,
     tools: toolsForRole(role),
+    mcpServers: [],
     executionPolicy: 'inherit',
     mode: 'sim',
     providerId: DEFAULT_PROVIDER_ID,
@@ -336,6 +371,7 @@ function emptyDb() {
       debatePoolSeats: 1,
       debateConcurrency: 2,
       automations: [],
+      mcpServers: [],
       securityAudit: [],
     },
   };
@@ -562,6 +598,7 @@ class Store {
           },
         };
         if (!Array.isArray(this.db.settings.automations)) this.db.settings.automations = [];
+        if (!Array.isArray(this.db.settings.mcpServers)) this.db.settings.mcpServers = [];
         if (!Array.isArray(this.db.settings.securityAudit)) this.db.settings.securityAudit = [];
         // 运行状态不跨进程保留
         normalizeSeats(this.db.agents);
@@ -595,6 +632,9 @@ class Store {
           const skills = normalizeSkills(a.skills);
           if (JSON.stringify(skills) !== JSON.stringify(a.skills || [])) recovered = true;
           a.skills = skills;
+          const mcpServers = normalizeMcpServerIds(a.mcpServers, this.db.settings.mcpServers);
+          if (JSON.stringify(mcpServers) !== JSON.stringify(a.mcpServers || [])) recovered = true;
+          a.mcpServers = mcpServers;
         }
         for (const t of this.db.tasks) {
           if (!Array.isArray(t.usageLedger)) t.usageLedger = [];
@@ -898,6 +938,50 @@ class Store {
     return this.db.agents;
   }
 
+  get mcpServers() {
+    if (!Array.isArray(this.db.settings.mcpServers)) this.db.settings.mcpServers = [];
+    return this.db.settings.mcpServers;
+  }
+
+  getMcpServer(id) {
+    return this.mcpServers.find((server) => server.id === id) || null;
+  }
+
+  addMcpServer(input = {}) {
+    if (this.mcpServers.length >= MAX_MCP_SERVERS) {
+      throw new Error(`MCP server 最多 ${MAX_MCP_SERVERS} 个`);
+    }
+    const server = normalizeMcpServer(input);
+    if (this.getMcpServer(server.id)) throw new Error(`MCP server ID 已存在：${server.id}`);
+    this.mcpServers.push(server);
+    this.save({ settings: true });
+    this.broadcast({ type: 'mcp.changed' });
+    return server;
+  }
+
+  updateMcpServer(id, patch = {}) {
+    const server = this.getMcpServer(id);
+    if (!server) return null;
+    const next = normalizeMcpServer({ ...patch, id: server.id }, server);
+    Object.assign(server, next);
+    this.save({ settings: true });
+    this.broadcast({ type: 'mcp.changed' });
+    return server;
+  }
+
+  removeMcpServer(id) {
+    const index = this.mcpServers.findIndex((server) => server.id === id);
+    if (index < 0) return false;
+    this.mcpServers.splice(index, 1);
+    for (const agent of this.db.agents) {
+      agent.mcpServers = (agent.mcpServers || []).filter((serverId) => serverId !== id);
+    }
+    this.save({ settings: true, agents: true });
+    this.broadcast({ type: 'mcp.changed' });
+    this.broadcast({ type: 'agents.changed' });
+    return true;
+  }
+
   getAgent(id) {
     return this.db.agents.find((a) => a.id === id);
   }
@@ -925,6 +1009,7 @@ class Store {
       tagline: patch.tagline || '',
       skills: normalizeSkills(patch.skills),
       tools: normalizeTools(patch.tools, role),
+      mcpServers: normalizeMcpServerIds(patch.mcpServers, this.db.settings.mcpServers),
       executionPolicy: normalizeExecutionPolicy(patch.executionPolicy),
       mode: patch.mode === 'cli' ? 'cli' : 'sim',
       providerId: this.getProvider(String(patch.providerId || DEFAULT_PROVIDER_ID))
@@ -993,6 +1078,11 @@ class Store {
     // 先把旧 cli 存下来再合并，否则 Object.assign 已经把 agent.cli 覆盖成新对象了
     if (patch.cli) agent.cli = { ...prevCli, ...patch.cli };
     if (patch.skills !== undefined) agent.skills = normalizeSkills(patch.skills);
+    if (patch.mcpServers !== undefined) {
+      agent.mcpServers = normalizeMcpServerIds(patch.mcpServers, this.db.settings.mcpServers);
+    } else {
+      agent.mcpServers = normalizeMcpServerIds(agent.mcpServers, this.db.settings.mcpServers);
+    }
     const role = agent.role;
     if (hasExplicitTools) agent.tools = normalizeTools(patch.tools, role);
     else if (patch.role && role !== prevRole) agent.tools = toolsForRole(role);

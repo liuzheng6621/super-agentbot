@@ -11,6 +11,7 @@ import {
   workspaceSnapshot,
   writeWorkspaceEntry,
 } from './workspace.mjs';
+import { callReadOnlyMcpTool } from './mcp.mjs';
 
 const TOOL_BY_ID = new Map(TOOL_CATALOG.map((tool) => [tool.id, tool]));
 const DEFAULT_OPERATION = {
@@ -21,6 +22,7 @@ const DEFAULT_OPERATION = {
   'workspace.delete': 'delete',
   history_search: 'search',
   history_read: 'read',
+  'mcp.call': 'call',
   shell: 'exec',
 };
 
@@ -148,6 +150,14 @@ function resultSummary(operation, result) {
     return {
       items: result?.items?.length || 0,
       truncated: !!result?.truncated,
+    };
+  }
+  if (operation === 'call') {
+    return {
+      serverId: result?.serverId || '',
+      tool: result?.tool || '',
+      truncated: !!result?.truncated,
+      bytes: result?.bytes || 0,
     };
   }
   return {};
@@ -353,6 +363,36 @@ function executeWorkspaceTool(task, toolId, operation, args, meta) {
   fail(`未实现的工具：${toolId}`, 501);
 }
 
+function visibleMcpServer(args, agentId) {
+  const server = store.getMcpServer(String(args.serverId || ''));
+  if (!server || server.enabled === false) fail('MCP server 不存在或已停用', 404);
+  if (agentId) {
+    const agent = store.getAgent(agentId);
+    const allowed = new Set(Array.isArray(agent?.mcpServers) ? agent.mcpServers : []);
+    if (!allowed.has(server.id)) {
+      fail(`智能体「${agent?.name || agentId}」没有 MCP server ${server.id} 权限`, 403);
+    }
+  }
+  return server;
+}
+
+async function callMcpTool(task, args, meta) {
+  const server = visibleMcpServer(args, meta.agentId);
+  const call = await callReadOnlyMcpTool({
+    server,
+    tool: args.tool,
+    arguments: args.arguments || {},
+    cwd: task.workspace,
+    env: process.env,
+  });
+  return {
+    serverId: server.id,
+    serverLabel: server.label,
+    tool: String(args.tool),
+    ...call,
+  };
+}
+
 export class ToolGateway {
   descriptors() {
     return TOOL_CATALOG.map((tool) => ({
@@ -377,7 +417,7 @@ export class ToolGateway {
     return { tool, principal: actor };
   }
 
-  invokeTool({
+  async invokeTool({
     taskId,
     toolId,
     operation,
@@ -444,7 +484,10 @@ export class ToolGateway {
         principal: actor,
         callId,
       };
-      const result = executeWorkspaceTool(task, tool.id, op, normalized, meta);
+      const result =
+        tool.id === 'mcp.call'
+          ? await callMcpTool(task, normalized, meta)
+          : executeWorkspaceTool(task, tool.id, op, normalized, meta);
       const durationMs = Date.now() - startedAt;
       if (audit) {
         store.addTaskEvent(task.id, {

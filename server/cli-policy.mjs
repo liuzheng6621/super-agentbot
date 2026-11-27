@@ -8,6 +8,9 @@ const TOOL_EFFECTS = Object.freeze({
   'workspace.write': Object.freeze({ write: true }),
   'workspace.move': Object.freeze({ write: true }),
   'workspace.delete': Object.freeze({ write: true, destructive: true }),
+  'history_search': Object.freeze({ read: true }),
+  'history_read': Object.freeze({ read: true }),
+  'mcp.call': Object.freeze({ read: true }),
   shell: Object.freeze({ execute: true }),
 });
 

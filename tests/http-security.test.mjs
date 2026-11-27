@@ -282,3 +282,109 @@ test('HTTP task creation returns the same task for a repeated clientMessageId', 
     }
   }
 });
+
+test('HTTP MCP endpoints keep env references redacted and allow only read calls', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-http-mcp-'));
+  const port = await availablePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const child = spawn(process.execPath, ['server/index.mjs'], {
+    cwd: path.resolve('.'),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: '127.0.0.1',
+      AGENTFORGE_DATA_DIR: temp,
+      AGENTFORGE_API_TOKEN: TOKEN,
+      AGENTFORGE_SKIP_TEAM_BOOTSTRAP: '1',
+      MCP_FIXTURE_SECRET: 'http-mcp-secret',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+
+  try {
+    await waitForHealth(baseUrl, child);
+    const headers = {
+      Authorization: `Bearer ${TOKEN}`,
+      'Content-Type': 'application/json',
+    };
+    const fixture = path.resolve('tests/fixtures/mcp-readonly-server.mjs');
+    const created = await fetch(`${baseUrl}/api/mcp/servers`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        id: 'http-fixture',
+        label: 'HTTP Fixture',
+        transport: 'stdio',
+        command: process.execPath,
+        args: [fixture],
+        envRefs: { MCP_FIXTURE_SECRET: 'env:MCP_FIXTURE_SECRET' },
+        startTimeoutMs: 3000,
+        callTimeoutMs: 3000,
+      }),
+    });
+    assert.equal(created.status, 201);
+    const createdBody = await created.json();
+    assert.deepEqual(createdBody.server.envRefs, {
+      MCP_FIXTURE_SECRET: 'env:MCP_FIXTURE_SECRET',
+    });
+
+    const state = await fetch(`${baseUrl}/api/state`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    }).then((response) => response.json());
+    assert.equal(JSON.stringify(state).includes('http-mcp-secret'), false);
+
+    const task = await fetch(`${baseUrl}/api/tasks`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ goal: 'HTTP MCP call', autoRun: false }),
+    }).then((response) => response.json());
+    const called = await fetch(`${baseUrl}/api/tasks/${task.task.id}/mcp/call`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        serverId: 'http-fixture',
+        tool: 'read_doc',
+        arguments: {},
+      }),
+    });
+    assert.equal(called.status, 200);
+    const calledBody = await called.json();
+    assert.equal(calledBody.ok, true);
+    assert.match(JSON.stringify(calledBody.result), /fixture:read_doc:http-mcp-secret/);
+
+    const rejected = await fetch(`${baseUrl}/api/tasks/${task.task.id}/mcp/call`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        serverId: 'http-fixture',
+        tool: 'write_doc',
+        arguments: {},
+      }),
+    });
+    assert.equal(rejected.status, 400);
+    assert.match((await rejected.json()).error, /不是只读工具/);
+  } catch (err) {
+    throw new Error(`${err.message}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  } finally {
+    if (child.exitCode === null) child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+      setTimeout(resolve, 2000).unref();
+    });
+    try {
+      fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
+    } catch {
+      /* Windows can hold the data directory briefly. */
+    }
+  }
+});

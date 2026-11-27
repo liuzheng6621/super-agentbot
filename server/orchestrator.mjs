@@ -142,13 +142,15 @@ export function pickAgent(role) {
   return seats.find((a) => a.role !== 'coder') || seats[0] || store.agents[0] || null;
 }
 
-export function writeWorkspaceFile(task, relPath, content, meta = {}) {
-  const invocation = toolGateway.invokeTool({
+export async function writeWorkspaceFile(task, relPath, content, meta = {}) {
+  const invocation = await toolGateway.invokeTool({
     taskId: task.id,
     toolId: 'workspace.write',
     operation: 'write',
     args: { op: 'write', path: relPath, content },
-    agentId: meta.agentId || '',
+    // The orchestrator is the platform actor; the producing agent is retained
+    // in event metadata rather than impersonating a second permission check.
+    agentId: '',
     principal: { kind: 'system', id: 'orchestrator', name: 'Orchestrator' },
     stepId: meta.stepId || '',
     source: 'orchestrator',
@@ -2157,20 +2159,20 @@ async function runStep(task, agent, { step, kind, prompt, signal, speed, simOutp
   });
   throwIfAborted(signal);
   for (const file of out.artifacts || []) {
-    writeWorkspaceFile(task, file.path, file.content, {
+    await writeWorkspaceFile(task, file.path, file.content, {
       agentId: agent.id,
       stepId: step?.id || '',
     });
   }
   if (step?.role === 'architect') {
     const mod = sim.pickModule(task.goal);
-    writeWorkspaceFile(task, `docs/${mod.name}-design.md`, sim.designDoc({ goal: task.goal }), {
+    await writeWorkspaceFile(task, `docs/${mod.name}-design.md`, sim.designDoc({ goal: task.goal }), {
       agentId: agent.id,
       stepId: step.id,
     });
   }
   if (step?.role === 'tester') {
-    writeWorkspaceFile(task, 'README.md', readmeFor(task), { agentId: agent.id, stepId: step.id });
+    await writeWorkspaceFile(task, 'README.md', readmeFor(task), { agentId: agent.id, stepId: step.id });
   }
   return {
     ok: true,

@@ -212,6 +212,7 @@ function requiredScope(method, pathname) {
   if (
     pathname.startsWith('/api/providers') ||
     pathname.startsWith('/api/agents') ||
+    pathname.startsWith('/api/mcp') ||
     pathname === '/api/settings'
   ) {
     return method === 'GET' ? 'read' : 'operator:admin';

@@ -97,9 +97,9 @@ test('message envelopes carry route, correlation, step and artifact references',
   assert.equal(audit.data.route.taskId, task.id);
 });
 
-test('tool gateway audits owner calls and rejects an unauthorized agent', () => {
+test('tool gateway audits owner calls and rejects an unauthorized agent', async () => {
   const task = store.createTask({ goal: 'verify tool gateway' });
-  const ownerWrite = toolGateway.invokeTool({
+  const ownerWrite = await toolGateway.invokeTool({
     taskId: task.id,
     toolId: 'workspace.write',
     operation: 'write',
@@ -117,8 +117,8 @@ test('tool gateway audits owner calls and rejects an unauthorized agent', () => 
     seat: false,
     tools: [],
   });
-  assert.throws(
-    () => toolGateway.invokeTool({
+  await assert.rejects(
+    toolGateway.invokeTool({
       taskId: task.id,
       toolId: 'workspace.read',
       operation: 'file',
@@ -142,7 +142,7 @@ test('tool gateway audits owner calls and rejects an unauthorized agent', () => 
   assert.equal(deniedEnd.data.principal.id, deniedAgent.id);
   assert.ok(events.some((event) => event.type === 'tool.policy.denied'));
 
-  const ownerRead = toolGateway.invokeTool({
+  const ownerRead = await toolGateway.invokeTool({
     taskId: task.id,
     toolId: 'workspace.read',
     operation: 'file',
@@ -153,7 +153,7 @@ test('tool gateway audits owner calls and rejects an unauthorized agent', () => 
   assert.match(ownerRead.result.content, /ok = true/);
 
   const beforeQuietRead = store.getTask(task.id).events.length;
-  const quietRead = toolGateway.invokeTool({
+  const quietRead = await toolGateway.invokeTool({
     taskId: task.id,
     toolId: 'workspace.read',
     operation: 'tree',
@@ -166,7 +166,7 @@ test('tool gateway audits owner calls and rejects an unauthorized agent', () => 
   assert.equal(store.getTask(task.id).events.length, beforeQuietRead);
 });
 
-test('history tools are read-only, scoped to the task by default and cursor-paginated', () => {
+test('history tools are read-only, scoped to the task by default and cursor-paginated', async () => {
   const task = store.createTask({ goal: 'history search primary task' });
   const other = store.createTask({ goal: 'history search other task' });
   for (let index = 0; index < 15; index += 1) {
@@ -190,52 +190,52 @@ test('history tools are read-only, scoped to the task by default and cursor-pagi
     text: 'NEEDLE other task',
   });
 
-  const first = toolGateway.invokeTool({
+  const first = (await toolGateway.invokeTool({
     taskId: task.id,
     toolId: 'history_search',
     operation: 'search',
     args: { op: 'search', query: 'NEEDLE', limit: 5 },
     principal: { kind: 'owner', id: 'owner', name: 'Owner UI' },
     source: 'test.history',
-  }).result;
+  })).result;
   assert.equal(first.results.length, 5);
   assert.ok(first.results.every((item) => item.taskId === task.id));
   assert.ok(first.truncated);
   assert.ok(first.cursor);
 
-  const second = toolGateway.invokeTool({
+  const second = (await toolGateway.invokeTool({
     taskId: task.id,
     toolId: 'history_search',
     operation: 'search',
     args: { op: 'search', query: 'NEEDLE', limit: 5, cursor: first.cursor },
     principal: { kind: 'owner', id: 'owner', name: 'Owner UI' },
     source: 'test.history',
-  }).result;
+  })).result;
   assert.equal(second.results.length, 5);
   assert.notEqual(second.results[0].id, first.results[0].id);
 
-  const cross = toolGateway.invokeTool({
+  const cross = (await toolGateway.invokeTool({
     taskId: task.id,
     toolId: 'history_search',
     operation: 'search',
     args: { op: 'search', query: 'NEEDLE', scope: 'all', limit: 50 },
     principal: { kind: 'owner', id: 'owner', name: 'Owner UI' },
     source: 'test.history',
-  }).result;
+  })).result;
   assert.ok(cross.results.some((item) => item.taskId === other.id));
 
   const messageHit = first.results.find(
     (item) => item.taskId === task.id && item.kind === 'message' && item.cursor,
   );
   assert.ok(messageHit);
-  const read = toolGateway.invokeTool({
+  const read = (await toolGateway.invokeTool({
     taskId: task.id,
     toolId: 'history_read',
     operation: 'read',
     args: { op: 'read', cursor: messageHit.cursor, limit: 2 },
     principal: { kind: 'owner', id: 'owner', name: 'Owner UI' },
     source: 'test.history',
-  }).result;
+  })).result;
   assert.ok(read.items.length >= 1);
   assert.equal(read.items[0].kind, 'message');
 

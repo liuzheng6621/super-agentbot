@@ -30,6 +30,10 @@ import { redactProvider } from './providers.mjs';
 import { adoptInstalledClis, rebalanceTeam } from './adopt.mjs';
 import { ensureRealTeam, refreshTeam, judgeHealth } from './team.mjs';
 import { toolGateway } from './tool-gateway.mjs';
+import {
+  probeMcpServer,
+  redactMcpServer,
+} from './mcp.mjs';
 import { executionPolicyCatalog, resolveCliPolicy } from './cli-policy.mjs';
 import {
   WorkspaceError,
@@ -314,6 +318,7 @@ const server = http.createServer(async (req, res) => {
         providers: store.providers.map(redactProvider),
         tasks,
         settings: { ...store.db.settings },
+        mcpServers: store.mcpServers.map(redactMcpServer),
         scheduler: schedulerSnapshot(),
         automations: automationSnapshot(),
         automationRunner: automationRunnerSnapshot(),
@@ -405,6 +410,46 @@ const server = http.createServer(async (req, res) => {
     }
     if (pathname === '/api/providers' && method === 'GET') {
       return json(res, 200, { providers: store.providers.map(redactProvider) });
+    }
+    if (pathname === '/api/mcp/servers' && method === 'GET') {
+      return json(res, 200, { servers: store.mcpServers.map(redactMcpServer) });
+    }
+    if (pathname === '/api/mcp/servers' && method === 'POST') {
+      const body = await readBody(req);
+      try {
+        const serverConfig = store.addMcpServer(body);
+        return json(res, 201, { server: redactMcpServer(serverConfig) });
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    const mcpServerMatch = pathname.match(/^\/api\/mcp\/servers\/([\w-]+)(\/probe)?$/);
+    if (mcpServerMatch) {
+      const mcpServer = store.getMcpServer(mcpServerMatch[1]);
+      if (!mcpServer) return json(res, 404, { error: 'MCP server 不存在' });
+      if (mcpServerMatch[2] && method === 'POST') {
+        try {
+          const result = await probeMcpServer(mcpServer, { cwd: WORKSPACE_DIR });
+          return json(res, 200, result);
+        } catch (err) {
+          return json(res, 400, { ok: false, error: err.message });
+        }
+      }
+      if (method === 'PATCH') {
+        const body = await readBody(req);
+        try {
+          const updated = store.updateMcpServer(mcpServer.id, body);
+          return json(res, 200, { server: redactMcpServer(updated) });
+        } catch (err) {
+          return json(res, 400, { error: err.message });
+        }
+      }
+      if (method === 'DELETE') {
+        return json(res, 200, { ok: store.removeMcpServer(mcpServer.id) });
+      }
+      if (method === 'GET') {
+        return json(res, 200, { server: redactMcpServer(mcpServer) });
+      }
     }
     if (pathname === '/api/providers' && method === 'POST') {
       const body = await readBody(req);
@@ -612,6 +657,37 @@ const server = http.createServer(async (req, res) => {
       return json(res, 201, { task: taskDetail(store.getTask(task.id)) });
     }
 
+    const taskMcpMatch = pathname.match(/^\/api\/tasks\/([\w-]+)\/mcp\/call$/);
+    if (taskMcpMatch && method === 'POST') {
+      const task = store.getTask(taskMcpMatch[1]);
+      if (!task) return json(res, 404, { error: '任务不存在' });
+      const body = await readBody(req);
+      try {
+        const call = await toolGateway.invokeTool({
+          taskId: task.id,
+          toolId: 'mcp.call',
+          operation: 'call',
+          args: {
+            op: 'call',
+            serverId: body.serverId,
+            tool: body.tool,
+            arguments: body.arguments || {},
+          },
+          agentId: typeof body.agentId === 'string' ? body.agentId : '',
+          principal,
+          stepId: typeof body.stepId === 'string' ? body.stepId : '',
+          source: body.agentId ? 'api.agent' : 'api.owner',
+        });
+        return json(res, 200, {
+          ok: true,
+          callId: call.callId,
+          result: call.result,
+        });
+      } catch (err) {
+        return json(res, Number(err?.status) || 400, { ok: false, error: err.message });
+      }
+    }
+
     const exportMatch = pathname.match(/^\/api\/tasks\/([\w-]+)\/export$/);
     if (exportMatch && method === 'GET') {
       const task = store.getTask(exportMatch[1]);
@@ -700,7 +776,7 @@ const server = http.createServer(async (req, res) => {
         });
       }
       if (action === 'files' && method === 'GET') {
-        const call = toolGateway.invokeTool({
+        const call = await toolGateway.invokeTool({
           taskId: task.id,
           toolId: 'workspace.read',
           operation: 'files',
@@ -713,7 +789,7 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, call.result);
       }
       if (action === 'workspace' && method === 'GET') {
-        const call = toolGateway.invokeTool({
+        const call = await toolGateway.invokeTool({
           taskId: task.id,
           toolId: 'workspace.read',
           operation: 'tree',
@@ -726,7 +802,7 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, call.result);
       }
       if (action === 'search' && method === 'GET') {
-        const call = toolGateway.invokeTool({
+        const call = await toolGateway.invokeTool({
           taskId: task.id,
           toolId: 'workspace.search',
           operation: 'search',
@@ -740,7 +816,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (action === 'events' && method === 'GET') {
         const limit = Math.max(1, Math.min(800, Number(searchParams.get('limit')) || 160));
-        const call = toolGateway.invokeTool({
+        const call = await toolGateway.invokeTool({
           taskId: task.id,
           toolId: 'workspace.read',
           operation: 'events',
@@ -753,7 +829,7 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, call.result);
       }
       if (action === 'changes' && method === 'GET') {
-        const call = toolGateway.invokeTool({
+        const call = await toolGateway.invokeTool({
           taskId: task.id,
           toolId: 'workspace.read',
           operation: 'changes',
@@ -766,7 +842,7 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, call.result);
       }
       if (action === 'diff' && method === 'GET') {
-        const call = toolGateway.invokeTool({
+        const call = await toolGateway.invokeTool({
           taskId: task.id,
           toolId: 'workspace.read',
           operation: 'diff',
@@ -796,7 +872,7 @@ const server = http.createServer(async (req, res) => {
             : op === 'write'
               ? { op, path: body.path, content: body.content }
               : { op, path: body.path };
-        const call = toolGateway.invokeTool({
+        const call = await toolGateway.invokeTool({
           taskId: task.id,
           toolId,
           operation: op,
@@ -810,7 +886,7 @@ const server = http.createServer(async (req, res) => {
       }
       if (action === 'file' && method === 'GET') {
         const rel = searchParams.get('path') || '';
-        const call = toolGateway.invokeTool({
+        const call = await toolGateway.invokeTool({
           taskId: task.id,
           toolId: 'workspace.read',
           operation: 'file',
