@@ -84,7 +84,7 @@
 
 **执行**
 
-- 🖥 **本机 CLI 体检接入** — 内置候选覆盖 10 个常用 CLI；启动后台并发体检已安装项，只有「真回了话且没有鉴权错误」的才占执行席位，同一个 CLI 可兼任多角色（`OpenCode · 架构师`）。仓库自动测试验证调用契约与进程路径，不等于本机已安装并授权全部 10 个 CLI。
+- 🖥 **本机 CLI 体检接入** — 内置候选覆盖 10 个常用 CLI；启动后台并发体检已安装项，只有「真回了话且没有鉴权错误」的才占执行席位，同一个 CLI 可兼任多角色（`OpenCode · 架构师`）。体检复用已绑定 Agent 的 Provider Profile，参数模板、Base URL、模型和密钥环境引用会进入真实子进程；仓库自动测试验证调用契约、Provider 注入、Windows `.cmd` 与进程路径，不等于本机已安装并授权全部 10 个 CLI。
 - 🔎 **CLI 解析缓存** — `resolveCommand()` 缓存命令解析结果，避免每次调用都同步跑 `where.exe` / `which`；探测或刷新团队时显式失效，带参数的命令串也能正确提取可执行文件。
 - 🔌 **Provider Profile、参数模板与自动回退** — 每个 Agent 可绑定独立 Provider Profile，保存 Base URL、模型、密钥环境变量引用、CLI 参数模板和并发上限；可配置有序备用 Provider，真实 CLI 失败后自动切换并把 `provider.fallback` 写入任务事件流。密钥只从服务进程环境读取，不写入 `db.json`。
 - 🧾 **产物带内容版本** — 每个产物记录 `version`（sha256 前 16 位），改写即换版本，可判断「这一步到底动了什么」。
@@ -200,7 +200,7 @@ flowchart TD
 | `Config file not found` | 缺配置文件 | 用 `--config-file` 指定，或写进参数模板 |
 | 超时无输出 | 首次拉模型 / 不支持一次性提示词 | 单独点成员 ⚙ 或 `POST /api/agents/:id/test` 用更长超时复测 |
 
-体检结果写进 `data/db.json` 的 `settings.teamHealth`，二次启动几乎零等待；改了 Key 就点左栏「体检并换真实席位」强制重检。
+体检结果写进 `data/db.json` 的 `settings.teamHealth`，二次启动几乎零等待；改了 Key 就点左栏「体检并换真实席位」强制重检。已绑定 Provider Profile 的 CLI 会按该 Profile 的 `cliBindings` 执行体检，不再绕过 Agent 配置直接使用裸命令。
 
 ### 调用层的四道兜底
 
@@ -466,7 +466,7 @@ npm test
 
 ## Roadmap
 
-- [x] CLI 体检组队与 10 个内置候选适配（自动测试覆盖调用契约；具体 CLI 安装与授权需本机验收）
+- [x] CLI 体检组队与 10 个内置候选适配（自动测试覆盖调用契约、Provider 注入和 Windows `.cmd`；具体 CLI 安装与授权需本机验收）
 - [x] 方案辩论、DAG 并行、真实质量门返工
 - [x] 独立评审（禁止实现者自审）
 - [x] dirty 窗口增量持久化与退出前 flush

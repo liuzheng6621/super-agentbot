@@ -4,6 +4,7 @@ import path from 'node:path';
 import { store, ROLE_ORDER } from './store.mjs';
 import { probeClis, spawnCli } from './adapters.mjs';
 import { commandBaseName } from './command-key.mjs';
+import { withProviderProfile } from './providers.mjs';
 
 /** 体检只要求最短回复，避免为了探活消耗一整轮模型输出 */
 export const HEALTH_PROMPT = 'Reply with exactly: OK';
@@ -98,11 +99,14 @@ export function pickRealTeam(candidates = []) {
 /** 汇总本机探测结果 + 已持久化的体检缓存，按命令名去重 */
 export function collectCandidates(probed, agents = store.agents, cache = store.db.settings.teamHealth) {
   const healthByKey = new Map();
+  const agentsByKey = new Map();
   // 缓存按命令名存，不依赖「团队里恰好有没有这个成员」
   for (const [key, h] of Object.entries(cache || {})) if (h) healthByKey.set(key, h);
   for (const a of agents) {
-    if (a.mode !== 'cli' || !a.cli?.command || !a.health) continue;
+    if (a.mode !== 'cli' || !a.cli?.command) continue;
     const key = baseName(a.cli.command);
+    if (!agentsByKey.has(key)) agentsByKey.set(key, a);
+    if (!a.health) continue;
     healthByKey.set(key, a.health);
   }
   const map = new Map();
@@ -110,6 +114,23 @@ export function collectCandidates(probed, agents = store.agents, cache = store.d
     if (!c.found) continue;
     const key = baseName(c.command);
     if (map.has(key)) continue;
+    const agent = agentsByKey.get(key);
+    const executionAgent = agent
+      ? withProviderProfile(
+          {
+            ...agent,
+            cli: {
+              ...(agent.cli || {}),
+              command: c.path || c.command,
+              args:
+                Array.isArray(agent.cli?.args) && agent.cli.args.length
+                  ? agent.cli.args
+                  : c.args || [],
+            },
+          },
+          store.providerForAgent(agent),
+        )
+      : null;
     map.set(key, {
       key,
       label: c.label,
@@ -118,6 +139,7 @@ export function collectCandidates(probed, agents = store.agents, cache = store.d
       env: c.env,
       healthTimeout: c.healthTimeout,
       health: healthByKey.get(key) || null,
+      executionAgent,
     });
   }
   return [...map.values()];
@@ -132,8 +154,11 @@ export async function checkCandidates(candidates, { timeout = HEALTH_TIMEOUT, co
       const batch = need.slice(i, i + concurrency);
       await Promise.all(
         batch.map(async (c) => {
+          const executionAgent = c.executionAgent || {
+            cli: { command: c.path, args: c.args, env: c.env, cwd: '' },
+          };
           const res = await spawnCli(
-            { cli: { command: c.path, args: c.args, env: c.env, cwd: '' } },
+            executionAgent,
             HEALTH_PROMPT,
             // 慢启动的 CLI（trae-cli 这类 Python agent）自带更长的体检预算
             { timeout: c.healthTimeout || timeout, cwd: work },

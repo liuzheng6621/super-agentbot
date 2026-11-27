@@ -161,6 +161,119 @@ test('真实体检会在独立临时工作区执行候选命令', async () => {
   assert.match(candidates[0].health.note, /在线|进程未自行退出/);
 });
 
+test('团队体检会把 Agent 的 Provider Profile 注入真实子进程', async () => {
+  const fixture = path.resolve('tests/fixtures/team-observe-fixture.mjs');
+  const output = path.join(temp, 'team-observe-provider.json');
+  const provider = store.addProvider({
+    id: 'team-observe-provider',
+    name: 'Team Observe Provider',
+    model: 'team-observe-model',
+    cliBindings: {
+      node: {
+        args: [fixture, '--provider-arg', '{{model}}'],
+        env: {
+          TEAM_OBSERVE_OUT: output,
+          TEAM_PROVIDER_MARKER: 'from-provider-binding',
+        },
+      },
+    },
+  });
+  try {
+    const agent = {
+      id: 'team-observe-agent',
+      mode: 'cli',
+      providerId: provider.id,
+      cli: { command: process.execPath, args: [fixture] },
+    };
+    const candidates = collectCandidates(
+      [
+        {
+          found: true,
+          command: process.execPath,
+          label: 'Observe Fixture',
+          path: process.execPath,
+          args: [fixture],
+        },
+      ],
+      [agent],
+    );
+    assert.ok(candidates[0].executionAgent, '匹配到 Agent 时必须生成 Provider 解析后的执行副本');
+    await checkCandidates(candidates, { timeout: 5000 });
+    assert.equal(candidates[0].health.ok, true, candidates[0].health.note);
+
+    const observed = JSON.parse(fs.readFileSync(output, 'utf8'));
+    assert.equal(path.basename(observed.cwd).startsWith('af-team-'), true);
+    assert.deepEqual(observed.argv, ['--provider-arg', 'team-observe-model']);
+    assert.equal(observed.stdin, 'Reply with exactly: OK\n');
+    assert.equal(observed.env.TEAM_PROVIDER_MARKER, 'from-provider-binding');
+    assert.equal(observed.env.AGENTFORGE_PROVIDER_ID, provider.id);
+    assert.equal(observed.env.AGENTFORGE_PROVIDER_NAME, provider.name);
+    assert.equal(observed.env.AGENTFORGE_MODEL, provider.model);
+  } finally {
+    store.removeProvider(provider.id);
+  }
+});
+
+test(
+  '团队体检对 Windows .cmd 使用真实 Provider 环境并通过 stdin 传 prompt',
+  { skip: process.platform !== 'win32' },
+  async () => {
+    const dir = fs.mkdtempSync(path.join(temp, 'team-cmd-'));
+    const fixture = path.resolve('tests/fixtures/team-observe-fixture.mjs');
+    const output = path.join(dir, 'team-observe-cmd.json');
+    const command = path.join(dir, 'team-observe.cmd');
+    fs.writeFileSync(
+      command,
+      ['@echo off', `"${process.execPath}" "${fixture}" %*`, ''].join('\r\n'),
+      'utf8',
+    );
+    const provider = store.addProvider({
+      id: 'team-observe-cmd-provider',
+      name: 'Team Observe CMD Provider',
+      cliBindings: {
+        'team-observe': {
+          env: {
+            TEAM_OBSERVE_OUT: output,
+            TEAM_PROVIDER_MARKER: 'from-cmd-provider',
+          },
+        },
+      },
+    });
+    try {
+      const agent = {
+        id: 'team-observe-cmd-agent',
+        mode: 'cli',
+        providerId: provider.id,
+        cli: { command, args: ['--from-agent', 'a & b'] },
+      };
+      const candidates = collectCandidates(
+        [
+          {
+            found: true,
+            command,
+            label: 'Team Observe CMD',
+            path: command,
+            args: ['--from-agent', 'a & b'],
+          },
+        ],
+        [agent],
+      );
+      await checkCandidates(candidates, { timeout: 5000 });
+      assert.equal(candidates[0].health.ok, true, candidates[0].health.note);
+
+      const observed = JSON.parse(fs.readFileSync(output, 'utf8'));
+      assert.equal(path.basename(observed.cwd).startsWith('af-team-'), true);
+      assert.deepEqual(observed.argv, ['--from-agent', 'a & b']);
+      assert.equal(observed.stdin, 'Reply with exactly: OK\n');
+      assert.equal(observed.env.TEAM_PROVIDER_MARKER, 'from-cmd-provider');
+      assert.equal(observed.env.AGENTFORGE_PROVIDER_ID, provider.id);
+    } finally {
+      store.removeProvider(provider.id);
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
+    }
+  },
+);
+
 test('新接入的 CLI 不再是内置席位，且带体检字段', () => {
   const a = store.addAgent({ name: '真实成员', mode: 'cli', cli: { command: 'opencode' } });
   assert.equal(a.builtin, false);
