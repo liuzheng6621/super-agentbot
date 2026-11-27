@@ -18,6 +18,7 @@ const {
   listTaskCompactions,
   replayTaskCompaction,
 } = await import('../server/orchestrator.mjs');
+const contextBudget = await import('../server/context-budget.mjs');
 const { estimateTokens } = await import('../server/tokens.mjs');
 const { writeFileAtomic, versionOf, spillText, readSpillText, spillValue } = await import('../server/fs.mjs');
 
@@ -60,6 +61,19 @@ test('稳定区与易变区真的分开了', () => {
   // 账本/文件清单这些每步都变的东西，一个都不许留在稳定区
   assert.ok(!stable.includes('工序账本'));
   assert.ok(!stable.includes('已知文件'));
+});
+
+test('context budget is implemented in its module and re-exported by orchestrator', () => {
+  assert.equal(compactTaskContext, contextBudget.compactTaskContext);
+  assert.equal(stableBlock, contextBudget.stableBlock);
+  assert.equal(volatileBlock, contextBudget.volatileBlock);
+  const orchestratorSource = fs.readFileSync(
+    path.resolve('server/orchestrator.mjs'),
+    'utf8',
+  );
+  assert.match(orchestratorSource, /from '\.\/context-budget\.mjs'/);
+  assert.match(orchestratorSource, /return buildContextPackFromFiles\(task,/);
+  assert.doesNotMatch(orchestratorSource, /function compactContextMessages\(/);
 });
 
 test('连续两步的 prompt 共享稳定前缀（前缀缓存才可能命中）', () => {

@@ -269,7 +269,7 @@ node --test tests/**/*.test.{js,mjs,cjs}
 | `server/workspace.mjs` | 1118 |
 | `server/tool-gateway.mjs` | 607 |
 
-当前已开始按稳定职责拆，不做一次性重写。`server/test-entry.mjs`、`server/review-independence.mjs`、`server/review-analysis.mjs` 和 `server/debate-analysis.mjs` 已从 `server/orchestrator.mjs` 提取，保留原导出兼容；后续继续按小步提交：
+当前已开始按稳定职责拆，不做一次性重写。`server/test-entry.mjs`、`server/review-independence.mjs`、`server/review-analysis.mjs`、`server/debate-analysis.mjs` 和 `server/context-budget.mjs` 已从 `server/orchestrator.mjs` 提取，保留原导出兼容；后续继续按小步提交：
 
 - `orchestrator`：run controller、step runner、debate、quality gate、review、plan。
 - `store`：持久化、租户、任务查询、租约、迁移。
