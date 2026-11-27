@@ -459,11 +459,22 @@ const CANDIDATES = [
  * 所以先用 where.exe 确认命令真实存在，再尽力读取版本。
  */
 const resolveCache = new Map();
+export const resolveStats = {
+  cacheHits: 0,
+  cacheMisses: 0,
+  whereCalls: 0,
+  whichCalls: 0,
+  clears: 0,
+};
 
 /** 探测结果缓存：每次 CLI 调用都同步跑一遍 where.exe 会阻塞事件循环。 */
 export function resolveCommand(command) {
   const key = String(command || '').trim();
-  if (resolveCache.has(key)) return resolveCache.get(key);
+  if (resolveCache.has(key)) {
+    resolveStats.cacheHits += 1;
+    return resolveCache.get(key);
+  }
+  resolveStats.cacheMisses += 1;
   const found = resolveUncached(key);
   resolveCache.set(key, found);
   return found;
@@ -472,14 +483,35 @@ export function resolveCommand(command) {
 /** CLI 装卸或 PATH 变化后，由 /api/probe、/api/team/refresh 显式失效。 */
 export function clearResolveCache() {
   resolveCache.clear();
+  resolveStats.clears += 1;
+}
+
+function executableToken(command) {
+  const raw = String(command || '').trim();
+  if (!raw) return '';
+  if ((path.isAbsolute(raw) || /[\\/]/.test(raw)) && fs.existsSync(raw)) return raw;
+  const quoted = raw.match(/^"([^"]+)"(?:\s|$)|^'([^']+)'(?:\s|$)/);
+  if (quoted) return quoted[1] || quoted[2] || raw;
+  const windowsExecutable = raw.match(/^(.+?\.(?:exe|cmd|bat|ps1))(?:\s|$)/i);
+  if (windowsExecutable && fs.existsSync(windowsExecutable[1])) return windowsExecutable[1];
+  return raw.match(/^\S+/)?.[0] || raw;
 }
 
 function resolveUncached(command) {
   try {
     const raw = String(command || '').trim();
     if (raw && (path.isAbsolute(raw) || /[\\/]/.test(raw)) && fs.existsSync(raw)) return path.resolve(raw);
+    const executable = executableToken(raw);
+    if (
+      executable &&
+      (path.isAbsolute(executable) || /[\\/]/.test(executable)) &&
+      fs.existsSync(executable)
+    ) {
+      return path.resolve(executable);
+    }
     if (process.platform === 'win32') {
-      const res = spawnSync('where.exe', [command], { encoding: 'utf8', timeout: 5000, windowsHide: true });
+      resolveStats.whereCalls += 1;
+      const res = spawnSync('where.exe', [executable], { encoding: 'utf8', timeout: 5000, windowsHide: true });
       if (res.status === 0) {
         const found = (res.stdout || '')
           .split(/\r?\n/)
@@ -493,7 +525,8 @@ function resolveUncached(command) {
         if (best) return best;
       }
     } else {
-      const res = spawnSync('which', [command], { encoding: 'utf8', timeout: 5000 });
+      resolveStats.whichCalls += 1;
+      const res = spawnSync('which', [executable], { encoding: 'utf8', timeout: 5000 });
       if (res.status === 0) {
         const first = (res.stdout || '').trim().split('\n')[0];
         if (first && fs.existsSync(first)) return first;
@@ -502,7 +535,7 @@ function resolveUncached(command) {
     // 兜底：PATH 之外的常见安装目录（npm 全局、uv/pipx、winget、Programs…）
     for (const dir of commonBinDirs()) {
       for (const ext of process.platform === 'win32' ? ['.exe', '.cmd', '.bat', ''] : ['']) {
-        const p = path.join(dir, command + ext);
+        const p = path.join(dir, executable + ext);
         if (fs.existsSync(p)) return p;
       }
     }
