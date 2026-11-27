@@ -9,7 +9,7 @@
 [![Node](https://img.shields.io/badge/node-%E2%89%A520.11-3c873a?logo=node.js&logoColor=white)](https://nodejs.org)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-blue)
 ![Build](https://img.shields.io/badge/build-none-lightgrey)
-![Tests](https://img.shields.io/badge/tests-101%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-160%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4)
 
@@ -23,7 +23,7 @@
 
 ## 当前版本
 
-本轮把“多智能体协作”从固定流水线推进到可追踪、可重规划、可审计的第一层平台，并补上可部署的单实例团队服务基线：
+本轮把“多智能体协作”推进到可追踪、可重规划、可审计的平台基线，并补齐 M3 / M4 / M5 的身份、工作区、生产可观测性与多实例能力：
 
 - **真实质量门**：CLI 与模拟任务都执行工作区测试入口；没有入口、执行失败或超时都不能交付，并记录真实命令、退出码、耗时与输出。
 - **项目技能注入**：从工作区、源工作区与用户级 `.agents/skills/*/SKILL.md` 装载技能，按触发词或 Agent 显式标签激活，注入提案、质询、裁决、工序、收口与聊天 prompt；激活记录会出现在 `/api/state`、任务详情和界面上下文中。
@@ -40,8 +40,11 @@
 - **消息路由**：每条协作消息记录来源、目标、父消息、关联工序、产物引用和 `correlationId`。
 - **Tool Gateway 第一层**：平台 API 统一校验工具白名单、执行主体和工作区边界，并记录 `tool.call.start` / `tool.call.end` / `tool.policy.denied`。
 - **CLI 执行策略网关**：`strict` 模式把工具白名单映射到 Codex / DSH / Claude 的原生沙箱或工具白名单；无法强制的组合在启动前拒绝，并记录 `cli.policy.*`。
-- **六视图工作区控制台**：文件、执行轨迹、计划版本、协作消息、工具审计、Diff 在同一工作区中查看。
+- **多视图工作区控制台**：文件、执行轨迹、计划版本、协作消息、工具审计、DAG、回放、总览与 Diff 在同一工作区中查看。
 - **文件夹开工**：可从本机目录选择器选择已有项目，或使用 Git 隔离工作树并行开工。
+- **M3 平台边界**：owner / operator / agent / system 主体与 Token 作用域、Provider 用量账本、可审计上下文压缩、历史检索、`clientMessageId` 幂等、只读 MCP 网关和一次性命令审批。
+- **M4 工作区能力**：可复用 Agent Profile、默认不跨任务的工作区池、读后写版本守卫、事务回滚、DAG 图、时间回放和跨任务总览。
+- **M5 生产化**：按租户过滤任务 / Automation / 审批并执行任务配额、OTLP trace 导出、`db.json` 文件锁与任务 / Automation 租约、目录懒加载和 `/api/state` cursor 分页。
 
 ## 为什么会有这个项目
 
@@ -65,7 +68,7 @@
 - 🧩 **项目技能与用户技能** — 自动发现 `.agents/skills/*/SKILL.md`，支持 `name / description / triggers / roles / always / enabled` 前置字段；工作区技能覆盖源工作区与用户级同名技能。技能只注入提示词，不执行脚本，也不能绕过工具权限、质量门或用户目标。
 - 🧾 **可审计运行记录导出** — Markdown 适合归档和代码评审，HTML 适合直接打开阅读；导出前统一脱敏 API Key、Token、密码和 Bearer 凭据，并转义 HTML。
 - ✅ **结构化评审协议** — 只接受 `VERDICT: {"decision":"PASS|FAIL","blockers":0,"should":0}`；旧的自然语言 `VERDICT: PASS` 不再静默放行，`PASS` 携带 Blocker 也会被判为无效。
-- 🧑‍⚖️ **独立评审** — 评审候选只允许 `reviewer / tester / architect`，实现者绝不会被悄悄拉来审自己；只有实现席位时评审明确不可用。自审按真实 `reviewerId / implementerId` 判定，身份和 `selfReview` 会写入工序、质量记录与 `review.independence` 事件。
+- 🧑‍⚖️ **独立评审** — 评审候选只允许 `reviewer / tester / architect`，实现者绝不会被悄悄拉来审自己；只有实现席位时评审明确不可用。若历史或人工配置仍造成自审，真实 `reviewerId / implementerId`、`selfReview` 和 `review.independence` 事件会把它暴露出来。
 - 🎛 **工作流可视化配置** — 讨论开关与规模、工序并发、全局任务并发、返工轮次都在顶栏 ⚙ 里改，即时落库；另带「快速 / 均衡 / 严谨」三档预设。
 - 🔁 **任务级流程覆盖** — 输入框旁可切「先讨论」或「直接开工」，只影响当前任务，不动全局默认。
 - 🧭 **计划版本与有限重规划** — 计划以不可变快照保存；失败后自动重规划最多一次，手动重规划会保留已完成工序，方便在复杂项目中继续推进。
@@ -73,6 +76,8 @@
 - 🧰 **Agent 工具白名单与 Tool Gateway** — 每个成员声明可用工具，角色有默认策略，也能按成员覆盖；平台 API 会按 `agentId` 校验权限并写入工具审计。
 - 🛡 **真实 CLI 强制策略** — `strict` 会从工具集合推导只读 / 可写边界，覆盖 CLI 参数里的危险沙箱开关；Codex、DSH 映射原生沙箱，Claude 仅允许无 shell 的只读工具白名单，其他组合明确拒绝。
 - 🌳 **Git 隔离工作区** — 每个任务可在独立 detached worktree 中执行；Windows 文件系统无法写 worktree 元数据时自动回退 shared clone，源仓库不受影响。
+- 🧱 **可复用 Profile 与工作区池** — Profile 组合角色、技能、工具、MCP、Provider、模型、并发和工作区策略，可导入导出且不含密钥；跨任务 `Shared/` 或 Agent 私有目录必须显式开启，默认保持任务隔离。
+- 🔒 **读后写与事务回滚** — 修改已有文件必须提交最近读取版本，陈旧写入返回冲突并留痕；批量移动、删除和写入可作为单个事务提交，失败时回滚真实文件与元数据。
 
 **执行**
 
@@ -81,20 +86,21 @@
 - 🔌 **Provider Profile、参数模板与自动回退** — 每个 Agent 可绑定独立 Provider Profile，保存 Base URL、模型、密钥环境变量引用、CLI 参数模板和并发上限；可配置有序备用 Provider，真实 CLI 失败后自动切换并把 `provider.fallback` 写入任务事件流。密钥只从服务进程环境读取，不写入 `db.json`。
 - 🧾 **产物带内容版本** — 每个产物记录 `version`（sha256 前 16 位），改写即换版本，可判断「这一步到底动了什么」。
 - 🧷 **不合格输出不流转** — 每个角色的回复都要过结构校验：提案需 5 段标题、质询需覆盖全部方案、步骤需可执行产出；半截回复或「我无法完成」直接重试，不把残稿喂给下一步。
-- 💾 **原子写入 + 增量持久化** — 临时文件 → `fsync` → `rename`，Windows 占用自动退避重试；流式输出使用 200ms dirty 窗口合并写盘，只序列化变化任务，正常退出前自动 flush。
+- 💾 **增量持久化** — `db.json` 使用临时文件 + 原子替换，流式输出在 200ms dirty 窗口内合并写盘，只重新序列化变化任务，正常退出、`SIGINT` / `SIGTERM` 前自动 flush。当前 `db.json` 没有显式 `fsync`；工作区文件写入才会走临时文件 + `fsync` + `rename`。
+- 🧩 **零依赖多实例** — 同一数据目录可由多个进程共享：写盘走 `.db.lock` 合并，任务和 Automation 使用 `.leases.json` 租约避免重复执行。Automation / Scheduler 仍是进程内调度器，不是分布式队列。
 
 **界面**
 
 - ⚡ **SSE 实时流** — 逐字输出、Markdown / 表格 / 代码块渲染、阶段条实时高亮、点击工序跳到对应时间线。
 - 🗂 **三栏工作台** — 左栏席位与历史，中栏时间线与群聊，右栏上下文 / 辩论记录 / DAG / 产物源码。
-- 🖥 **全屏工作区控制台** — 文件树 / 搜索 / 预览 / 编辑、按 Agent 分组的执行泳道、Git diff、上下文预算和工具策略在同一屏查看。
+- 🖥 **全屏工作区控制台** — 文件树 / 搜索 / 预览 / 编辑、按 Agent 分组的执行泳道、DAG 图、时间回放、跨任务总览、Git diff、上下文预算和工具策略在同一屏查看。
 - 🌗 **两套配色** — 顶栏 `SHIFT` 切换日间与夜间。
 - 🪟 **桌面模式** — 不打包 Electron，用系统浏览器 `--app` 模式得到独立窗口与任务栏图标，双击即用。
 
 **工程**
 
 - 📦 **零依赖、零构建** — 纯 Node.js + 原生 ESM，`node server/index.mjs` 就起来，前端不打包、不装包管理器。
-- ✅ **101 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、真实质量门、结构化评审、项目技能、运行记录导出、独立评审、持久化 dirty 窗口、可执行文件解析缓存、上下文预算、工作区文件闭环、Git 隔离、工具策略、CLI 强制沙箱映射、计划版本、消息路由、Tool Gateway 审计、Provider Profile、CLI 参数模板、Provider 自动回退、全局调度队列、Agent 租约、真实工时统计、输出完整性判定、服务 Token / CORS、trace 与 Automation 恢复。
+- ✅ **160 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、真实质量门、结构化评审、项目技能、运行记录导出、独立评审、持久化 dirty 窗口、可执行文件解析缓存、上下文预算与压缩、工作区文件闭环、工作区池与事务回滚、读后写守卫、Git 隔离、工具策略、CLI 强制沙箱映射、计划版本、消息路由、Tool Gateway 审计、Provider Profile 与用量账本、CLI 参数模板、Provider 自动回退、全局调度队列、Agent 租约、真实工时统计、输出完整性判定、服务 Token / 作用域 / CORS、MCP、审批、trace / OTLP、Automation 恢复、租户隔离、多实例锁与 `/api/state` 分页。
 
 ## 快速开始
 
@@ -255,7 +261,9 @@ Git 隔离支持两种模式：
 - `worktree`：`git worktree add --detach`，每个任务独立目录，删除任务时只清理工作树。
 - `clone`：当 Windows 文件系统无法写 `.git/worktrees` 时自动回退到 `git clone --shared`，并在界面标记 `CLONE 回退`。
 
-同一进程内可以并行运行多个任务，每个任务使用独立工作区。全局 Scheduler 会限制同时运行的任务数，按 Provider 计算并发配额，并为显式声明的 Agent 获取租约；排队任务会显示队列位置和等待原因。Agent 可声明主 Provider 与备用 Provider，CLI 失败会在同一工序内回退并记录事件。尚未实现工作区池、磁盘配额、任务优先级和 Provider 级费用预算，详见路线图。
+同一进程内可以并行运行多个任务，每个任务使用独立工作区。全局 Scheduler 会限制同时运行的任务数，按 Provider 计算并发配额，并为显式声明的 Agent 获取租约；排队任务会显示队列位置和等待原因。Agent 可声明主 Provider 与备用 Provider，CLI 失败会在同一工序内回退并记录事件。
+
+工作区池默认关闭：Profile / Agent 显式设置 `workspacePolicy.crossTask=true` 后才可使用项目根下的 `Shared/` 或 `Agents/<agentId>/`；任务级 worktree 仍优先。跨任务池目录不会被任务删除回收，租约记录在工作区 `.agentforge/pool/leases.json`。磁盘配额、任务优先级和 Provider 级费用预算仍未实现。
 
 ## 界面
 
@@ -266,7 +274,7 @@ Git 隔离支持两种模式：
 | **左栏** | 五个执行席位 + 工具池（在线状态、`SIM 演示` / `✓ CLI 可用` / `! 不可用`）、本机 CLI 扫描结果、「体检并换真实席位」、历史任务 |
 | **中栏** | 工作流阶段条（讨论 → 拆解 → 架构与实施 → 评审 → 交付，实时高亮负责人，可点击跳转）、按阶段分隔的协作时间线、流式输出、方案 / 质询 / 裁决标签、底部群聊输入框 |
 | **右栏** | 上下文包、方案讨论（提案人 / 评分 / 票数 / 胜出方案 / 质询记录）、DAG 链路（依赖 / 并行 / 尝试次数 / 返工）、产物源码、统计与 Bot Hook |
-| **全屏工作区控制台** | 左侧工作树与变更；中间六视图：文件 / 执行轨迹 / 计划版本 / 协作消息 / 工具审计 / Diff；右侧上下文与 Agent 工具策略；桌面和移动端都可直接进入 |
+| **全屏工作区控制台** | 左侧工作树与变更；中间视图：文件 / 执行轨迹 / 计划版本 / 协作消息 / 工具审计 / DAG / 回放 / 总览 / Diff；右侧上下文与 Agent 工具策略；桌面和移动端都可直接进入 |
 | **统计面板** | 每个数字都来自落库事实：累计 TOKENS = 各成员 token 之和（输入与输出分开记账，`tokensIn` / `tokensOut`，不把成本低估一个数量级）；协作轮次 = 真实调用成员次数 `stats.agentRuns`；产物文件 = 产物清单条数；返工轮次 = `repairRound`；总耗时 = 各工序实际耗时之和（墙钟含排队与重试等待，只作悬浮提示）；质量门 = `passed / failed / timeout / no-test-entry / running / skipped / not-run` 等状态，中断的任务不会永远停在「待执行」 |
 | **顶栏** | 状态、⚙ 工作流设置、`SHIFT` 切换配色 |
 
@@ -289,18 +297,26 @@ Git 隔离支持两种模式：
 
 所有接口都在 `http://127.0.0.1:8787` 下，JSON in / JSON out。默认只监听本机回环，因此本地零配置即可使用；绑定非回环地址时必须设置至少 16 个字符的 `AGENTFORGE_API_TOKEN`，或显式设置 `AGENTFORGE_ALLOW_INSECURE_REMOTE=1` 接受风险。
 
-启用服务 Token 后，普通 API 请求使用 `Authorization: Bearer <token>` 或 `X-AgentForge-Token: <token>`；浏览器 SSE 可用 `/api/stream?token=<token>`。`/api/health` 保持公开，Bot Hook 继续使用自己的 `settings.hookToken`。这里的 Token 是**共享服务边界**，不是用户身份、账号体系或租户隔离。
+启用服务 Token 后，普通 API 请求使用 `Authorization: Bearer <token>` 或 `X-AgentForge-Token: <token>`；浏览器 SSE 可用 `/api/stream?token=<token>`。`/api/health` 保持公开，Bot Hook 继续使用自己的 `settings.hookToken`。
+
+Token 已带最小主体和作用域：`AGENTFORGE_API_TOKEN` 是跨租户 owner；`AGENTFORGE_OPERATOR_TOKEN` 绑定单一租户并可按 `AGENTFORGE_OPERATOR_SCOPES` 收窄；`AGENTFORGE_AGENT_TOKENS` 接受 JSON 数组或映射，默认只给 Agent `read / tool:execute / command:request`。任务、Automation、审批和状态列表按主体租户过滤，任务创建受租户配额约束。它仍不是完整账号、RBAC、SSO 或按用户权限系统。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `GET` | `/api/state` | 全量状态（团队 / Provider / 任务 / 设置 / Scheduler / 当前任务） |
+| `GET` | `/api/state` | 状态（团队 / Provider / Profile / 任务 / 设置 / Scheduler / OTLP / 存储 / 总览）；`limit`、`cursor`、`fields`、`includeActiveTask` 可选，无参数时保持旧的全量响应 |
 | `GET` | `/api/scheduler` | 全局队列、运行任务、Provider 配额和 Agent 租约 |
 | `GET` | `/api/security` | 服务安全摘要与最近拒绝 / 访问审计 |
+| `GET` | `/api/overview` | 按租户过滤的跨任务运行、阻塞和项目总览 |
 | `GET` `POST` | `/api/automations` | Automation 列表 / 创建定时任务 |
 | `GET` `PATCH` `DELETE` | `/api/automations/:id` | 查看、修改、暂停 / 恢复或删除 Automation |
 | `POST` | `/api/automations/:id/run` | 立即触发一次 Automation |
 | `GET` `POST` | `/api/providers` | Provider Profile 列表 / 新增 |
 | `PATCH` `DELETE` | `/api/providers/:id` | 修改 / 删除 Profile（`local-default` 不可删除） |
+| `GET` `POST` | `/api/profiles` | 可复用 Agent Profile 列表 / 创建 |
+| `GET` `PATCH` `DELETE` | `/api/profiles/:id` | 查看、修改或删除 Profile |
+| `GET` `POST` | `/api/mcp/servers` | 只读 MCP server 列表 / 新增（密钥只存环境变量引用） |
+| `GET` `POST` | `/api/commands` | 固定命令目录与配置 |
+| `GET` `POST` | `/api/approvals` | 审批列表与 Agent 命令申请 |
 | `GET` | `/api/tools` | 工具目录、输入 Schema、执行策略与 CLI 适配能力 |
 | `GET` | `/api/cli-policy?policy=&command=&tools=` | 预览某组工具和命令能否被严格强制 |
 | `PATCH` | `/api/settings` | 工作流参数（白名单字段 + 范围夹紧） |
@@ -318,6 +334,8 @@ Git 隔离支持两种模式：
 | `GET` | `/api/tasks/:id/search?q=` | 工作区全文搜索 |
 | `GET` | `/api/tasks/:id/events?limit=` | 任务事件流（工具调用 / 文件变更 / 运行结果） |
 | `GET` | `/api/tasks/:id/changes` | 文件变更账本 |
+| `GET` | `/api/tasks/:id/graph` | 只读 DAG 节点、依赖边与并行层 |
+| `GET` | `/api/tasks/:id/replay` | 消息、事件和文件变更的时间回放 |
 | `GET` | `/api/tasks/:id/diff?path=` | 对比 `HEAD` 的 unified diff（含未跟踪文件） |
 | `POST` | `/api/tasks/:id/fs` | `{ op: "write"\|"mkdir"\|"move"\|"delete", path/from/to, content?, agentId? }` |
 | `POST` | `/api/context-preview` | `{ goal, workspace? }` 预览上下文包 |
@@ -328,7 +346,7 @@ Git 隔离支持两种模式：
 | `POST` | `/api/agents/rebalance` | 按角色偏好重新分派席位 |
 | `POST` | `/api/team/ensure` | 探测 + 体检 + 换真实席位（幂等） |
 | `POST` | `/api/team/refresh` | 强制重新体检并重组 |
-| `GET` | `/api/probe` | 扫描本机 CLI |
+| `GET` | `/api/probe` | 扫描本机 CLI，并显式失效可执行文件解析缓存 |
 | `GET` | `/api/fs?path=` | 浏览本机目录（「选文件夹开工」） |
 | `GET` | `/api/stream` | SSE 事件流 |
 | `GET` | `/api/health` | 健康检查（含 Scheduler 快照） |
@@ -357,10 +375,15 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 | `HOST` | `127.0.0.1` | 监听地址；局域网共享设 `0.0.0.0` 并配置服务 Token |
 | `AGENTFORGE_DATA_DIR` | `<repo>/data` | 数据目录，测试与多套数据隔离时用 |
 | `AGENTFORGE_MODEL` | `trae-cn/glm-5.3-flash` | 全局模型名兜底；Agent 绑定的 Provider Profile 可覆盖模型和 Base URL |
-| `AGENTFORGE_API_TOKEN` | 空 | 共享服务 Token，至少 16 个字符；非回环监听时必需 |
+| `AGENTFORGE_API_TOKEN` | 空 | 跨租户 owner Token，至少 16 个字符；非回环监听时必需 |
+| `AGENTFORGE_OPERATOR_TOKEN` | 空 | 单租户 operator Token；可配 `AGENTFORGE_OPERATOR_ID`、`AGENTFORGE_OPERATOR_TENANT`、`AGENTFORGE_OPERATOR_TASK_LIMIT`、`AGENTFORGE_OPERATOR_SCOPES` |
+| `AGENTFORGE_AGENT_TOKENS` | 空 | Agent Token 的 JSON 数组或映射；每项可带 `id`、`tenantId`、`scopes`、`taskLimit` |
 | `AGENTFORGE_CORS_ORIGINS` | 空 | 逗号分隔的额外允许来源；同源请求始终允许，`*` 不会自动变成放开 |
 | `AGENTFORGE_ALLOW_INSECURE_REMOTE` | `0` | 显式设为 `1` 才允许无 Token 的非回环监听，仅用于受控实验环境 |
 | `AGENTFORGE_SKIP_TEAM_BOOTSTRAP` | `0` | 设为 `1` 时跳过启动时自动体检组队，便于部署、测试和外部编排 |
+| `AGENTFORGE_OTLP_ENDPOINT` | 空 | OTLP/HTTP JSON trace 接收地址，例如 `http://127.0.0.1:4318/v1/traces` |
+| `AGENTFORGE_OTLP_HEADERS` | 空 | OTLP 请求头 JSON；敏感值不会进入 `/api/state` |
+| `AGENTFORGE_OTLP_TIMEOUT_MS` | `5000` | OTLP 单次导出超时，最小 100ms |
 
 工作流参数（讨论开关与规模、工序并发、全局任务并发、返工轮次）在界面 ⚙ 里改，落 `data/db.json` 的 `settings`。Provider Profile 在左栏「Provider 配置」或 `/api/providers` 管理；`apiKeyRef` 只保存环境变量名，真实值由服务进程环境提供。`cliBindings` 按命令名保存参数模板，可用 `{{model}}`、`{{baseUrl}}`、`{{apiKey}}`、`{{providerId}}`、`{{providerName}}` 和 `{{env:NAME}}`；Agent 的 `fallbackProviderIds` 决定备用顺序。
 
@@ -374,9 +397,14 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 │   ├── scheduler.mjs     全局任务队列、Provider 配额与 Agent 租约
 │   ├── providers.mjs     Provider Profile、密钥引用解析与执行环境
 │   ├── cli-policy.mjs    工具能力推导、CLI 沙箱映射与严格策略预检
-│   ├── store.mjs         状态、席位、持久化、事件总线、trace 与恢复
+│   ├── store.mjs         状态、席位、增量持久化、多实例锁 / 租约、事件总线、trace 与恢复
 │   ├── security.mjs      Token、CORS、监听边界与安全摘要
-│   ├── automation.mjs    定时任务、重试、历史与启动恢复
+│   ├── automation.mjs    定时任务、重试、历史、幂等与启动恢复
+│   ├── approvals.mjs     固定命令白名单、一次性审批与执行审计
+│   ├── mcp.mjs           只读 MCP 配置、白名单与调用审计
+│   ├── profiles.mjs      Agent Profile 归一化、导入导出与脱敏
+│   ├── overview.mjs      DAG、时间回放与跨任务总览
+│   ├── otlp.mjs          OTLP/HTTP JSON trace 导出
 │   ├── collaboration.mjs 计划版本、消息信封与路由差异
 │   ├── tool-gateway.mjs  工具白名单、主体校验与调用审计
 │   ├── workspace.mjs     工作区树、读写、搜索、回收站、Diff、路径边界
@@ -398,7 +426,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 │   ├── design-io-image-context.md
 │   ├── agent-platform-roadmap.md
 │   └── agentforge-openbot-plan.md
-├── tests/                19 个测试文件、101 个测试
+├── tests/                27 个测试文件、160 个测试
 ├── 安装到桌面.bat
 ├── 卸载桌面快捷方式.bat
 └── data/                 运行时数据（gitignore）
@@ -410,18 +438,18 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 npm test
 ```
 
-101 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、结构化评审结论与字段校验、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `no-test-entry` 判定、真实 CLI 任务同样执行质量门、独立评审与自审身份判定、目录快照复用、上游瞬时故障（ECONNRESET / 429 / socket hang up）只重试一次且不掩盖真实失败、上下文预算（段序稳定性、中文 token 估算、原子写版本、spill 可还原）、工作区文件闭环与路径/敏感文件边界、Agent 工具策略、CLI 强制沙箱映射与拒绝事件、计划版本与已完成工序保留、消息路由、Tool Gateway 权限与审计、Provider Profile 持久化与迁移、CLI 参数模板渲染、Provider 路由与真实子进程回退、全局任务并发、Provider 配额、Agent 租约与排队取消、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计（只累加结束过的工序，不拿墙钟冒充）、输出完整性判定（半截提案 / 缺段质询 / 空步骤都会判不合格）、提案宽松解析（`A=7`、`B：8分`、`方案 C 7/10`）、退出码分类（超时 / 已停止 / 命令缺失 / 策略拒绝 / `0xC0000142`）与参数拼装、dirty 窗口合并落盘、退出前 flush、可执行文件解析缓存、项目技能发现与边界保护、运行记录导出与脱敏、服务 Token / CORS / 安全审计、trace / span 链路、Automation 调度与重试、重启任务恢复。
+160 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、结构化评审结论与字段校验、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `no-test-entry` 判定、真实 CLI 任务同样执行质量门、独立评审与自审身份判定、目录快照复用、上游瞬时故障只重试一次且不掩盖真实失败、上下文预算与可审计压缩、工作区文件闭环与路径/敏感文件边界、工作区池与事务回滚、读后写守卫、Agent 工具策略、CLI 强制沙箱映射与拒绝事件、计划版本与已完成工序保留、消息路由、Tool Gateway 权限与审计、Provider Profile 持久化与迁移、Provider 用量账本、CLI 参数模板渲染、Provider 路由与真实子进程回退、全局任务并发、Provider 配额、Agent 租约与排队取消、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计、输出完整性判定、提案宽松解析、退出码分类与参数拼装、dirty 窗口合并落盘与退出前 flush、可执行文件解析缓存、项目技能发现与边界保护、运行记录导出与脱敏、服务 Token / 作用域 / CORS / 安全审计、MCP 只读边界、命令审批与一次性执行、trace / span / OTLP 链路、Automation 调度 / 重试 / 幂等 / 恢复、租户隔离与配额、多实例锁与租约、目录懒加载、`/api/state` 分页。
 
 ## 已知边界
 
-- **单机单进程**：状态存 JSON 文件，适合本地开发和小团队内网单实例；Automation 与 Scheduler 都只在当前进程内运行。要多实例，需要先替换持久化、队列和锁实现。
-- **共享服务 Token，不是用户身份**：所有持有 Token 的调用者拥有同一套服务权限；没有账号、RBAC、SSO、按用户审计或租户隔离。面向团队的正式部署需要在这些边界上继续补齐，不能把当前 Token 当作多租户安全模型。
+- **零依赖多实例，但不是分布式队列**：多个进程可共享同一 `db.json`，通过 `.db.lock` 合并写、通过 `.leases.json` 互斥任务和 Automation；Automation 与 Scheduler 仍由各进程内调度器驱动，没有 Redis、SQLite 或消息队列。
+- **租户隔离已落地，但账号体系未完成**：owner / operator / agent Token 已有作用域、租户绑定、任务 / Automation / 审批过滤和任务配额；没有用户注册、完整 RBAC、SSO 或按用户计费。
 - **`kimi` 只适合单行任务**：`-p` 与 `--auto` 互斥，只能走 argv，多行 prompt 会被 `cmd.exe` 截断。
 - **`trae-cli` 的行为取决于模型**：工具齐全（bash / 编辑 / 顺序思考），但某些模型只肯调顺序思考而不落盘——这是模型行为，不是配置问题。
 - **模拟模式**：一个可用 CLI 都没有时才会启用，产出仍是可运行的代码（`tests/*.test.js` 能直接 `node` 执行），但成员会明确标注 `SIM 演示`。
-- **CLI 严格策略是原生能力映射，不是内核级代理**：`strict` 只放行 Codex / DSH / Claude 能明确表达的组合，并覆盖参数里的危险开关；`inherit` 仍允许 CLI 使用自身工具。真正的网络代理、文件租约和跨进程系统调用拦截仍待后续。
+- **CLI 严格策略是原生能力映射，不是内核级代理**：`strict` 只放行 Codex / DSH / Claude 能明确表达的组合，并覆盖参数里的危险开关；`inherit` 仍允许 CLI 使用自身工具。真正的网络代理和跨进程系统调用拦截仍待后续。
 - **Magpie 只是默认网关**：项目不依赖 Magpie 框架；Provider Profile、密钥引用、CLI 参数模板、自动回退和 CLI 严格策略已落地。
-- **调度粒度仍是任务级**：全局任务并发、Provider 配额和显式 Agent 租约已生效；Provider 配额按绑定该 Provider 的活跃任务计数，不按每次 CLI 调用计数。工作区/磁盘配额和任务优先级仍在路线图中。
+- **调度粒度仍是任务级**：全局任务并发、Provider 配额和显式 Agent 租约已生效；Provider 配额按绑定该 Provider 的活跃任务计数，不按每次 CLI 调用计数。磁盘配额和任务优先级仍在路线图中。
 
 ## Roadmap
 
@@ -430,13 +458,13 @@ npm test
 - [x] 独立评审（禁止实现者自审）
 - [x] dirty 窗口增量持久化与退出前 flush
 - [x] CLI 可执行文件解析缓存
-- [x] 上下文预算（段序 / token 估算 / 原子写 / spill）
+- [x] 上下文预算（段序 / token 估算 / 原子写 / spill / 可审计压缩）
 - [x] 工作区文件闭环、全屏控制台、执行泳道与 Diff
 - [x] Agent 工具白名单与 Git worktree/clone 隔离
 - [x] 计划版本、有限重规划、带路由消息与 Tool Gateway 第一层
 - [x] CLI 严格策略网关（Codex / DSH 原生沙箱、Claude 只读白名单、无法强制时拒绝）
-- [ ] 内核级 CLI 代理网关（统一网络、文件租约与系统调用审计）
-- [ ] 文件租约、跨 Agent 写冲突检测与事务级回滚
+- [ ] 内核级 CLI 代理网关（统一网络与系统调用审计）
+- [x] 工作区池、事务回滚与读后写版本守卫
 - [x] Provider Profile（自定义网关、密钥环境引用、Agent 绑定与并发配额）
 - [x] 全局 Scheduler（任务并发、Provider 配额、Agent 租约）
 - [x] Provider 自动路由与回退、CLI 参数模板
@@ -447,14 +475,19 @@ npm test
 - [x] trace / span 事件契约、任务详情与导出可见
 - [x] Automation（周期 / 每日、暂停恢复、立即运行、历史、重试）
 - [x] 服务重启恢复（中断任务、`run.recovered`、Automation 对账）
-- [ ] 工作区池、磁盘配额与任务优先级
-- [ ] 跨任务工作区总览、DAG 图与时间回放
+- [ ] 磁盘配额与任务优先级
+- [x] 跨任务工作区总览、DAG 图与时间回放
 - [ ] 附件与读图（把截图交给视觉模型看 UI）
-- [ ] 读后写守卫（改动未经读取的文件时要求先读，防盲改）
-- [ ] 正规压缩（长任务的摘要式上下文压缩）
-- [ ] 用户账号、RBAC、按租户隔离与配额
-- [ ] OTLP / OpenTelemetry 导出
-- [ ] 多实例持久化后端
+- [x] 正规压缩（长任务的摘要式上下文压缩）
+- [x] 租户隔离与任务配额（不含完整账号 / RBAC / SSO）
+- [x] OTLP / OpenTelemetry 导出
+- [x] 多实例 JSON 持久化 + 文件锁 + 任务 / Automation 租约
+- [x] 目录懒加载与 `/api/state` cursor 分页
+- [ ] P1-9 spill 推广（事件 / 工具输出 / 导出附件）
+- [ ] P1-10 超时配置化
+- [ ] Automation durable `await_event`
+- [ ] 完整用户账号、RBAC、SSO
+- [ ] 外部数据库或分布式队列
 
 ## 常见问题
 
@@ -492,7 +525,7 @@ gemini -p "Reply with exactly: OK" --skip-trust
 <details>
 <summary><b>能局域网多人用吗？</b></summary>
 
-先设置至少 16 个字符的 `AGENTFORGE_API_TOKEN`，再运行 `HOST=0.0.0.0 npm start`。首次在浏览器打开时输入同一个 Token，之后可通过 Bearer 或 `X-AgentForge-Token` 调用 API。没有 Token 时服务会拒绝启动；`AGENTFORGE_ALLOW_INSECURE_REMOTE=1` 只用于临时受控实验。当前仍没有用户账号、RBAC 或多租户隔离，多实例共享状态也需要替换 `store.mjs` 的持久化实现。
+先设置至少 16 个字符的 `AGENTFORGE_API_TOKEN`，再运行 `HOST=0.0.0.0 npm start`。首次在浏览器打开时输入 Token，之后可通过 Bearer 或 `X-AgentForge-Token` 调用 API。需要隔离团队时，再配置单租户 `AGENTFORGE_OPERATOR_TOKEN` 和 `AGENTFORGE_AGENT_TOKENS`；owner Token 默认跨租户。多个进程可以共享同一数据目录，依靠文件锁和租约避免互相覆盖或重复执行。当前仍没有用户账号、完整 RBAC 或 SSO。
 </details>
 
 <details>
