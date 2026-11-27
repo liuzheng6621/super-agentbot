@@ -1111,6 +1111,19 @@ const server = http.createServer(async (req, res) => {
       if (action === 'fs' && method === 'POST') {
         const body = await readBody(req);
         const op = String(body.op || '').trim();
+        if (op === 'transaction') {
+          const call = await toolGateway.invokeTool({
+            taskId: task.id,
+            toolId: 'workspace.transaction',
+            operation: 'apply',
+            args: { op: 'apply', operations: body.operations },
+            agentId: typeof body.agentId === 'string' ? body.agentId : '',
+            principal,
+            stepId: typeof body.stepId === 'string' ? body.stepId : '',
+            source: body.agentId ? 'api.agent' : 'api.owner',
+          });
+          return json(res, 200, { ok: true, result: call.result, callId: call.callId });
+        }
         const toolId =
           op === 'move'
             ? 'workspace.move'

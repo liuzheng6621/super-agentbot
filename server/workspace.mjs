@@ -792,6 +792,219 @@ export function deleteWorkspaceEntry(task, relPath, meta = {}, agent = null) {
   return { path: target.rel, directory: isDirectory, trashPath: trashRel };
 }
 
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value ?? null));
+}
+
+function restoreJson(target, snapshot) {
+  for (const key of Object.keys(target)) delete target[key];
+  Object.assign(target, cloneJson(snapshot));
+}
+
+function restorePath(from, to) {
+  if (!fs.existsSync(from)) return;
+  fs.mkdirSync(path.dirname(to), { recursive: true });
+  if (fs.existsSync(to)) {
+    fail(`事务回滚失败：目标路径已存在 ${to}`, 409);
+  }
+  fs.renameSync(from, to);
+}
+
+/**
+ * Applies a batch as one logical operation. Validation happens before the
+ * first mutation; runtime failures restore both real paths and task metadata.
+ */
+export function applyWorkspaceTransaction(task, operations, meta = {}, agent = null) {
+  if (!Array.isArray(operations) || !operations.length) {
+    fail('事务至少需要一个操作', 400);
+  }
+  if (operations.length > 100) fail('事务最多支持 100 个操作', 413);
+  const transactionId = String(meta.transactionId || randomUUID());
+  const plan = operations.map((raw, index) => {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      fail(`事务第 ${index + 1} 步必须是对象`, 400);
+    }
+    const op = String(raw.op || '');
+    if (!['write', 'mkdir', 'move', 'delete'].includes(op)) {
+      fail(`事务第 ${index + 1} 步不支持操作：${op || '(empty)'}`, 400);
+    }
+    const stepMeta = {
+      ...meta,
+      expectedVersion: String(raw.expectedVersion || '').trim(),
+      transactionId,
+      transactionIndex: index + 1,
+    };
+    const resolvePath = (rel) => {
+      const pooled = agent ? pooledPath(task, rel, agent) : null;
+      return pooled || safePath(task, rel);
+    };
+    return { raw, index, op, stepMeta };
+  });
+  const preflight = plan.map(({ raw, index, op, stepMeta }) => {
+    const resolvePath = (rel) => {
+      const pooled = agent ? pooledPath(task, rel, agent) : null;
+      return pooled || safePath(task, rel);
+    };
+    if (op === 'move') {
+      if (!String(raw.from || '').trim() || !String(raw.to || '').trim()) {
+        fail(`事务第 ${index + 1} 步缺少 from/to`, 400);
+      }
+      const from = resolvePath(raw.from);
+      const to = resolvePath(raw.to);
+      if (from.abs === to.abs) fail(`事务第 ${index + 1} 步源和目标相同`, 400);
+      if (fs.existsSync(to.abs)) fail(`事务第 ${index + 1} 步目标路径已存在：${raw.to}`, 409);
+      return {
+        op,
+        index,
+        from,
+        to,
+        rawFrom: String(raw.from),
+        rawTo: String(raw.to),
+        meta: stepMeta,
+      };
+    }
+    if (!String(raw.path || '').trim()) fail(`事务第 ${index + 1} 步缺少 path`, 400);
+    const target = resolvePath(raw.path);
+    if (op === 'delete' && target.abs === target.root) {
+      fail('不能删除工作区根目录', 403);
+    }
+    if (op === 'mkdir' && fs.existsSync(target.abs) && !fs.statSync(target.abs).isDirectory()) {
+      fail(`事务第 ${index + 1} 步同名路径不是目录`, 409);
+    }
+    if (op === 'write') {
+      if (isSensitive(target.rel)) fail('该文件被标记为敏感文件，禁止平台写入', 403);
+      const bytes = Buffer.byteLength(String(raw.content ?? ''));
+      if (bytes > MAX_WRITE_BYTES) fail(`事务第 ${index + 1} 步写入超过 2MB`, 413);
+      if (fs.existsSync(target.abs) && fs.statSync(target.abs).isDirectory()) {
+        fail(`事务第 ${index + 1} 步目标是目录，不能写入文件`, 400);
+      }
+      if (fs.existsSync(target.abs)) {
+        verifyWriteVersion({
+          task,
+          rel: target.rel,
+          abs: target.abs,
+          beforeVersion: versionOf(target.abs) || '',
+          meta: stepMeta,
+          agent,
+        });
+      }
+    }
+    return {
+      op,
+      index,
+      target,
+      rawPath: String(raw.path),
+      content: String(raw.content ?? ''),
+      meta: stepMeta,
+    };
+  });
+
+  for (const step of preflight) {
+    if (step.op === 'move' && !fs.existsSync(step.from.abs)) {
+      fail(`事务第 ${step.index + 1} 步源路径不存在：${step.rawFrom}`, 404);
+    }
+  }
+  const artifactsBefore = cloneJson(task.artifacts || []);
+  const changesBefore = cloneJson(task.fileChanges || []);
+  const statsBefore = cloneJson(task.stats || {});
+  const receiptsBefore = new Map(
+    [...readReceipts.entries()].filter(([key]) => key.startsWith(`${task.id}:`)),
+  );
+  const undo = [];
+  const applied = [];
+  const txMeta = { ...meta, transactionId };
+  const runStep = (step) => {
+    if (step.op === 'write') {
+      const existing = fs.existsSync(step.target.abs);
+      if (existing && fs.statSync(step.target.abs).isDirectory()) {
+        fail(`事务第 ${step.index + 1} 步目标是目录，不能写入文件`, 400);
+      }
+      const before = existing ? fs.readFileSync(step.target.abs) : null;
+      const existedBefore = existing;
+      const result = writeWorkspaceEntry(
+        task,
+        step.rawPath,
+        step.content,
+        step.meta,
+        agent,
+      );
+      undo.push(() => {
+        if (before) {
+          fs.mkdirSync(path.dirname(step.target.abs), { recursive: true });
+          fs.writeFileSync(step.target.abs, before);
+        } else if (!existedBefore) fs.rmSync(step.target.abs, { force: true });
+      });
+      return result;
+    }
+    if (step.op === 'mkdir') {
+      const existed = fs.existsSync(step.target.abs);
+      const result = makeWorkspaceDir(task, step.rawPath, step.meta, agent);
+      if (!existed) undo.push(() => fs.rmSync(step.target.abs, { recursive: true, force: true }));
+      return result;
+    }
+    if (step.op === 'move') {
+      const result = moveWorkspaceEntry(task, step.rawFrom, step.rawTo, step.meta, agent);
+      undo.push(() => restorePath(step.to.abs, step.from.abs));
+      return result;
+    }
+    const result = deleteWorkspaceEntry(task, step.rawPath, step.meta, agent);
+    undo.push(() => restorePath(path.resolve(step.target.root, result.trashPath), step.target.abs));
+    return result;
+  };
+
+  try {
+    for (const step of preflight) {
+      applied.push({ op: step.op, result: runStep(step) });
+    }
+  } catch (err) {
+    if (!applied.length && err?.status && err.status < 500) {
+      // All preflight checks run before the first mutation, so validation
+      // failures need no rollback and must not create a misleading audit entry.
+      throw err;
+    }
+    const rollbackErrors = [];
+    for (const restore of undo.reverse()) {
+      try {
+        restore();
+      } catch (rollbackError) {
+        rollbackErrors.push(rollbackError.message);
+      }
+    }
+    restoreJson(task.artifacts, artifactsBefore);
+    restoreJson(task.fileChanges, changesBefore);
+    restoreJson(task.stats, statsBefore);
+    if (!Array.isArray(task.events)) task.events = [];
+    task.events = task.events.filter(
+      (event) => String(event.data?.transactionId || '') !== transactionId,
+    );
+    for (const key of [...readReceipts.keys()]) {
+      if (key.startsWith(`${task.id}:`)) readReceipts.delete(key);
+    }
+    for (const [key, receipt] of receiptsBefore) readReceipts.set(key, receipt);
+    store.save({ tasks: [task.id] });
+    recordOperation(task, 'fs.transaction.rollback', {
+      ...txMeta,
+      transactionId,
+      failedAt: applied.length + 1,
+      error: err.message,
+      rolledBack: applied.length,
+      rollbackErrors,
+    });
+    if (rollbackErrors.length) {
+      fail(`事务失败且回滚不完整：${rollbackErrors.join('; ')}`, 500);
+    }
+    throw err;
+  }
+
+  recordOperation(task, 'fs.transaction.commit', {
+    ...txMeta,
+    transactionId,
+    operations: applied.length,
+  });
+  store.save({ tasks: [task.id] });
+  return { transactionId, operations: applied };
+}
+
 export function workspaceDiff(task, relPath) {
   const info = workspaceInfo(task);
   const { rel } = safePath(task, relPath, { mustExist: false, allowEmpty: true });

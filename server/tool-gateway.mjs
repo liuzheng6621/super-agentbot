@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { store, TOOL_CATALOG, redactTranscriptText } from './store.mjs';
 import {
   WorkspaceError,
+  applyWorkspaceTransaction,
   deleteWorkspaceEntry,
   makeWorkspaceDir,
   moveWorkspaceEntry,
@@ -21,6 +22,7 @@ const DEFAULT_OPERATION = {
   'workspace.write': 'write',
   'workspace.move': 'move',
   'workspace.delete': 'delete',
+  'workspace.transaction': 'apply',
   history_search: 'search',
   history_read: 'read',
   'mcp.call': 'call',
@@ -167,6 +169,13 @@ function resultSummary(operation, result) {
   }
   if (operation === 'delete') {
     return { path: result?.path || '', trashPath: result?.trashPath || '' };
+  }
+  if (operation === 'apply') {
+    return {
+      transactionId: result?.transactionId || '',
+      operations: result?.operations?.length || 0,
+      results: result?.operations || [],
+    };
   }
   if (operation === 'search') {
     return {
@@ -395,6 +404,9 @@ function executeWorkspaceTool(task, toolId, operation, args, meta) {
   }
   if (toolId === 'workspace.delete') {
     return deleteWorkspaceEntry(task, args.path, meta, agent);
+  }
+  if (toolId === 'workspace.transaction') {
+    return applyWorkspaceTransaction(task, args.operations, meta, agent);
   }
   if (toolId === 'history_search') return historySearch(task, args);
   if (toolId === 'history_read') return historyRead(task, args);

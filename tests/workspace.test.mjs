@@ -10,6 +10,7 @@ process.env.AGENTFORGE_DATA_DIR = temp;
 
 const { store, toolsForRole } = await import('../server/store.mjs');
 const {
+  applyWorkspaceTransaction,
   deleteWorkspaceEntry,
   makeWorkspaceDir,
   moveWorkspaceEntry,
@@ -321,6 +322,84 @@ test('workspace pool policy rejects traversal and reserved directories', () => {
   });
   assert.throws(() => writeWorkspaceEntry(task, 'x.txt', 'x', {}, traversal), /越出工作区/);
   assert.throws(() => writeWorkspaceEntry(task, 'x.txt', 'x', {}, reserved), /内部目录/);
+  store.removeTask(task.id);
+});
+
+test('transactional workspace operations commit as one auditable unit', async () => {
+  const { toolGateway } = await import('../server/tool-gateway.mjs');
+  const task = store.createTask({ goal: 'transaction commit' });
+  fs.writeFileSync(path.join(task.workspace, 'source.txt'), 'source\n');
+  const owner = { kind: 'owner', id: 'owner', name: 'Owner UI' };
+  const call = await toolGateway.invokeTool({
+    taskId: task.id,
+    toolId: 'workspace.transaction',
+    operation: 'apply',
+    args: {
+      op: 'apply',
+      operations: [
+        { op: 'mkdir', path: 'archive' },
+        { op: 'move', from: 'source.txt', to: 'archive/source.txt' },
+        { op: 'write', path: 'archive/index.txt', content: 'moved\n' },
+      ],
+    },
+    principal: owner,
+    source: 'test.owner',
+  });
+  assert.equal(call.ok, true);
+  assert.equal(call.result.operations.length, 3);
+  assert.match(call.result.transactionId, /^[\w-]+$/);
+  assert.equal(fs.existsSync(path.join(task.workspace, 'source.txt')), false);
+  assert.equal(
+    fs.readFileSync(path.join(task.workspace, 'archive', 'source.txt'), 'utf8'),
+    'source\n',
+  );
+  assert.equal(
+    fs.readFileSync(path.join(task.workspace, 'archive', 'index.txt'), 'utf8'),
+    'moved\n',
+  );
+  const events = store.getTask(task.id).events;
+  assert.ok(
+    events.some(
+      (event) =>
+        event.type === 'fs.transaction.commit' &&
+        event.data.transactionId === call.result.transactionId,
+    ),
+  );
+  store.removeTask(task.id);
+});
+
+test('transactional workspace operations roll back real files and metadata after a mid-batch failure', () => {
+  const task = store.createTask({ goal: 'transaction rollback' });
+  writeWorkspaceEntry(task, 'keep.txt', 'before\n');
+  writeWorkspaceEntry(task, 'move-me.txt', 'move me\n');
+  const beforeTask = store.getTask(task.id);
+  const beforeChanges = JSON.stringify(beforeTask.fileChanges);
+  const beforeArtifacts = JSON.stringify(beforeTask.artifacts);
+
+  assert.throws(
+    () =>
+      applyWorkspaceTransaction(
+        task,
+        [
+          { op: 'write', path: 'keep.txt', content: 'after\n', expectedVersion: readWorkspaceFile(task, 'keep.txt').version },
+          { op: 'mkdir', path: 'runtime-block' },
+          { op: 'write', path: 'runtime-block', content: 'cannot write a directory' },
+        ],
+        { agentId: 'test-agent' },
+      ),
+    /目标是目录/,
+  );
+
+  assert.equal(fs.readFileSync(path.join(task.workspace, 'keep.txt'), 'utf8'), 'before\n');
+  assert.equal(fs.existsSync(path.join(task.workspace, 'move-me.txt')), true);
+  assert.equal(fs.existsSync(path.join(task.workspace, 'runtime-block')), false);
+  const current = store.getTask(task.id);
+  assert.equal(JSON.stringify(current.fileChanges), beforeChanges);
+  assert.equal(JSON.stringify(current.artifacts), beforeArtifacts);
+  assert.ok(
+    current.events.some((event) => event.type === 'fs.transaction.rollback'),
+    'rollback must be visible in the task audit',
+  );
   store.removeTask(task.id);
 });
 
