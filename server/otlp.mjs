@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { APP_VERSION } from './version.mjs';
 
 const DEFAULT_TIMEOUT_MS = 5000;
 const MAX_BATCH_SPANS = 256;
@@ -120,14 +121,14 @@ export function otlpPayload(spans = []) {
         resource: {
           attributes: attributes({
             'service.name': 'agentforge',
-            'service.version': '1.0.0',
+            'service.version': APP_VERSION,
           }),
         },
         scopeSpans: [
           {
             scope: {
               name: 'agentforge.trace',
-              version: '1.0.0',
+              version: APP_VERSION,
             },
             spans,
           },

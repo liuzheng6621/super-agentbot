@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { APP_VERSION } from './version.mjs';
 
 const MCP_ID = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -132,7 +133,7 @@ export class McpClient {
     await this.request('initialize', {
       protocolVersion: '2024-11-05',
       capabilities: {},
-      clientInfo: { name: 'AgentForge', version: '1.0.0' },
+      clientInfo: { name: 'AgentForge', version: APP_VERSION },
     }, this.server.startTimeoutMs);
     this._send({
       jsonrpc: '2.0',

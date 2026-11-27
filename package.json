@@ -1,6 +1,6 @@
 {
   "name": "agentforge",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "AgentForge - 多智能体开发协作平台（可接入本机 codex / dsh / workbuddy / claude 等 CLI）",
