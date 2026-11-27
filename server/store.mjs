@@ -372,6 +372,8 @@ function emptyDb() {
       debateConcurrency: 2,
       automations: [],
       mcpServers: [],
+      approvals: [],
+      commandWhitelist: [],
       securityAudit: [],
     },
   };
@@ -599,6 +601,10 @@ class Store {
         };
         if (!Array.isArray(this.db.settings.automations)) this.db.settings.automations = [];
         if (!Array.isArray(this.db.settings.mcpServers)) this.db.settings.mcpServers = [];
+        if (!Array.isArray(this.db.settings.approvals)) this.db.settings.approvals = [];
+        if (!Array.isArray(this.db.settings.commandWhitelist)) {
+          this.db.settings.commandWhitelist = [];
+        }
         if (!Array.isArray(this.db.settings.securityAudit)) this.db.settings.securityAudit = [];
         // 运行状态不跨进程保留
         normalizeSeats(this.db.agents);
@@ -982,6 +988,20 @@ class Store {
     return true;
   }
 
+  get commandWhitelist() {
+    if (!Array.isArray(this.db.settings.commandWhitelist)) {
+      this.db.settings.commandWhitelist = [];
+    }
+    return this.db.settings.commandWhitelist;
+  }
+
+  setCommandWhitelist(entries = []) {
+    this.db.settings.commandWhitelist = Array.isArray(entries) ? entries : [];
+    this.save({ settings: true });
+    this.broadcast({ type: 'commands.changed' });
+    return this.commandWhitelist;
+  }
+
   getAgent(id) {
     return this.db.agents.find((a) => a.id === id);
   }
@@ -999,9 +1019,16 @@ class Store {
 
   addAgent(patch) {
     const role = patch.role || 'coder';
+    const requestedId = String(patch.id || '').trim();
+    if (requestedId && !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(requestedId)) {
+      throw new Error('Agent ID 只能包含字母、数字、下划线和连字符，且必须以字母或数字开头');
+    }
+    if (requestedId && this.getAgent(requestedId)) {
+      throw new Error(`Agent ID 已存在：${requestedId}`);
+    }
     const hasSeat = this.db.agents.some((a) => a.role === role && a.seat !== false);
     const agent = {
-      id: randomUUID(),
+      id: requestedId || randomUUID(),
       name: patch.name || 'Agent',
       role,
       title: patch.title || '自定义智能体',

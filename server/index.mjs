@@ -60,6 +60,18 @@ import {
   stopAutomationRunner,
   updateAutomation,
 } from './automation.mjs';
+import { CommandRunner, CommandError, publicCommand } from './command-runner.mjs';
+import {
+  approvalsForPrincipal,
+  approvalsSnapshot,
+  cancelApproval,
+  createApprovalRequest,
+  decideApproval,
+  executeApproval,
+  expireApprovals,
+  getApproval,
+  recoverInterruptedApprovals,
+} from './approvals.mjs';
 
 const PORT = Number(process.env.PORT || 8787);
 // 本地桌面场景只监听回环；被托管平台注入 PORT 时（容器 / 云沙箱）需要对外绑定
@@ -72,6 +84,17 @@ if (!LISTEN_SECURITY.ok) {
 }
 if (LISTEN_SECURITY.warning) console.warn(`  !  ${LISTEN_SECURITY.warning}`);
 const PUBLIC_DIR = path.join(ROOT, 'public');
+const commandRunner = new CommandRunner({
+  workspaceRoot: WORKSPACE_DIR,
+  dataRoot: DATA_DIR,
+  getTask: (taskId) => store.getTask(taskId),
+});
+commandRunner.configure(store.commandWhitelist);
+recoverInterruptedApprovals();
+expireApprovals();
+store.subscribe((event) => {
+  if (event?.type === 'commands.changed') commandRunner.configure(store.commandWhitelist);
+});
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -129,6 +152,18 @@ function agentView(agent) {
     ...agent,
     cliPolicy: resolveCliPolicy(agent),
   };
+}
+
+function stateSettings() {
+  const {
+    approvals: _approvals,
+    commandWhitelist: _commandWhitelist,
+    securityAudit: _securityAudit,
+    mcpServers: _mcpServers,
+    automations: _automations,
+    ...settings
+  } = store.db.settings;
+  return settings;
 }
 
 function taskDetail(task) {
@@ -317,8 +352,10 @@ const server = http.createServer(async (req, res) => {
         agents: store.agents.map(agentView),
         providers: store.providers.map(redactProvider),
         tasks,
-        settings: { ...store.db.settings },
+        settings: stateSettings(),
         mcpServers: store.mcpServers.map(redactMcpServer),
+        commands: principal?.kind === 'agent' ? [] : commandRunner.snapshot(),
+        approvals: approvalsForPrincipal(principal),
         scheduler: schedulerSnapshot(),
         automations: automationSnapshot(),
         automationRunner: automationRunnerSnapshot(),
@@ -408,6 +445,150 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/scheduler' && method === 'GET') {
       return json(res, 200, { scheduler: schedulerSnapshot() });
     }
+    if (pathname === '/api/commands' && method === 'GET') {
+      return json(res, 200, {
+        commands: principal?.kind === 'agent' ? [] : commandRunner.snapshot(),
+        approvals: approvalsForPrincipal(principal),
+      });
+    }
+    if (pathname === '/api/commands' && method === 'PATCH') {
+      const body = await readBody(req);
+      try {
+        const entries = store.setCommandWhitelist(body.commands || []);
+        commandRunner.configure(entries);
+        return json(res, 200, { commands: commandRunner.snapshot() });
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    const commandMatch = pathname.match(/^\/api\/commands\/([\w-]+)\/run$/);
+    if (commandMatch && method === 'POST') {
+      if (principal?.kind === 'agent') {
+        return json(res, 403, {
+          error: 'Agent 不能直接执行固定命令，请先申请审批',
+          code: 'command-approval-required',
+        });
+      }
+      const body = await readBody(req);
+      const task = store.getTask(String(body.taskId || ''));
+      if (!task) return json(res, 404, { error: '任务不存在' });
+      const commandEntry = commandRunner.get(commandMatch[1]);
+      if (commandEntry?.requireApproval) {
+        return json(res, 409, {
+          error: '该命令需要审批，请先提交审批申请',
+          code: 'command-approval-required',
+        });
+      }
+      try {
+        const request = commandRunner.normalizeRequest({
+          commandId: commandMatch[1],
+          workingDirectory: body.workingDirectory,
+        });
+        const result = await commandRunner.execute({
+          task,
+          request,
+          principal,
+        });
+        return json(res, 200, { ok: result.code === 0, result });
+      } catch (err) {
+        store.addTaskEvent(task.id, {
+          type: 'command.rejected',
+          data: {
+            commandId: commandMatch[1],
+            reason: err.message,
+            principal,
+          },
+        });
+        return json(res, Number(err?.status) || 400, { ok: false, error: err.message });
+      }
+    }
+    if (pathname === '/api/approvals' && method === 'GET') {
+      expireApprovals();
+      return json(res, 200, {
+        approvals: approvalsForPrincipal(principal),
+        commands: principal?.kind === 'agent' ? [] : commandRunner.snapshot(),
+      });
+    }
+    if (pathname === '/api/approvals' && method === 'POST') {
+      const body = await readBody(req);
+      if (
+        principal?.kind === 'agent' &&
+        body.agentId !== undefined &&
+        String(body.agentId) !== String(principal.id)
+      ) {
+        return json(res, 403, { error: 'Agent 只能为自己的身份申请审批' });
+      }
+      try {
+        const approval = createApprovalRequest({
+          taskId: body.taskId,
+          agentId: body.agentId,
+          commandId: body.commandId,
+          workingDirectory: body.workingDirectory || '',
+          requestedBy: principal,
+          reason: body.reason || '',
+          ttlMs: body.ttlMs,
+          runner: commandRunner,
+        });
+        return json(res, 201, { approval });
+      } catch (err) {
+        return json(res, Number(err?.status) || 400, { ok: false, error: err.message });
+      }
+    }
+    const approvalMatch = pathname.match(
+      /^\/api\/approvals\/([\w-]+)(\/execute|\/cancel)?$/,
+    );
+    if (approvalMatch) {
+      const approval = getApproval(approvalMatch[1]);
+      if (!approval) return json(res, 404, { error: '审批不存在' });
+      if (
+        principal?.kind === 'agent' &&
+        String(approval.agentId) !== String(principal.id)
+      ) {
+        return json(res, 404, { error: '审批不存在' });
+      }
+      if (approvalMatch[2] === '/cancel' && method === 'POST') {
+        try {
+          const updated = cancelApproval(approval.id, {
+            principal,
+            runner: commandRunner,
+          });
+          return json(res, updated.status === 'executing' ? 202 : 200, {
+            approval: updated,
+            cancelRequested: updated.status === 'executing',
+          });
+        } catch (err) {
+          return json(res, Number(err?.status) || 400, { ok: false, error: err.message });
+        }
+      }
+      if (approvalMatch[2] === '/execute' && method === 'POST') {
+        try {
+          const result = await executeApproval(approval.id, {
+            principal,
+            runner: commandRunner,
+          });
+          return json(res, result.result.code === 0 ? 200 : 409, {
+            ...result,
+            ok: result.result.code === 0,
+          });
+        } catch (err) {
+          return json(res, Number(err?.status) || 400, { ok: false, error: err.message });
+        }
+      }
+      if (method === 'PATCH') {
+        const body = await readBody(req);
+        try {
+          const updated = decideApproval(approval.id, {
+            decision: body.decision,
+            principal,
+            runner: commandRunner,
+          });
+          return json(res, 200, { approval: updated });
+        } catch (err) {
+          return json(res, Number(err?.status) || 400, { ok: false, error: err.message });
+        }
+      }
+      if (method === 'GET') return json(res, 200, { approval });
+    }
     if (pathname === '/api/providers' && method === 'GET') {
       return json(res, 200, { providers: store.providers.map(redactProvider) });
     }
@@ -489,7 +670,11 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/agents' && method === 'POST') {
       const body = await readBody(req);
       if (!body.name) return json(res, 400, { error: '缺少 name' });
-      return json(res, 201, { agent: agentView(store.addAgent(body)) });
+      try {
+        return json(res, 201, { agent: agentView(store.addAgent(body)) });
+      } catch (err) {
+        return json(res, 409, { error: err.message });
+      }
     }
     if (pathname === '/api/probe' && method === 'GET') {
       clearResolveCache();
@@ -713,6 +898,7 @@ const server = http.createServer(async (req, res) => {
       if (!action && method === 'GET') return json(res, 200, { task: taskDetail(task) });
       if (!action && method === 'DELETE') {
         stopTask(task.id);
+        commandRunner.cancelTask(task.id);
         return json(res, 200, { ok: store.removeTask(task.id) });
       }
       if (action === 'run' && method === 'POST') {
@@ -734,6 +920,7 @@ const server = http.createServer(async (req, res) => {
         });
       }
       if (action === 'stop' && method === 'POST') {
+        commandRunner.cancelTask(task.id);
         return json(res, 200, { ok: stopTask(task.id) });
       }
       if (action === 'chat' && method === 'POST') {

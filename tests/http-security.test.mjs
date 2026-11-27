@@ -388,3 +388,187 @@ test('HTTP MCP endpoints keep env references redacted and allow only read calls'
     }
   }
 });
+
+test('HTTP command approvals keep agents request-only and execute approved commands once', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-http-approval-'));
+  const port = await availablePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const agentToken = ['agentforge', 'approval', 'agent', '0123456789'].join('-');
+  const child = spawn(process.execPath, ['server/index.mjs'], {
+    cwd: path.resolve('.'),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: '127.0.0.1',
+      AGENTFORGE_DATA_DIR: temp,
+      AGENTFORGE_API_TOKEN: TOKEN,
+      AGENTFORGE_AGENT_TOKENS: JSON.stringify([
+        { token: agentToken, id: 'tester-1', name: 'Tester One' },
+      ]),
+      AGENTFORGE_SKIP_TEAM_BOOTSTRAP: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+
+  try {
+    await waitForHealth(baseUrl, child);
+    const ownerHeaders = {
+      Authorization: `Bearer ${TOKEN}`,
+      'Content-Type': 'application/json',
+    };
+    const createdTester = await fetch(`${baseUrl}/api/agents`, {
+      method: 'POST',
+      headers: ownerHeaders,
+      body: JSON.stringify({
+        id: 'tester-1',
+        name: 'Tester One',
+        role: 'tester',
+        mode: 'sim',
+      }),
+    });
+    assert.equal(createdTester.status, 201);
+    assert.equal((await createdTester.json()).agent.id, 'tester-1');
+
+    const fixture = path.resolve('tests/fixtures/command-fixture.mjs');
+    const configured = await fetch(`${baseUrl}/api/commands`, {
+      method: 'PATCH',
+      headers: ownerHeaders,
+      body: JSON.stringify({
+        commands: [
+          {
+            id: 'fixture-ok',
+            label: 'Fixture OK',
+            command: process.execPath,
+            args: [fixture, 'ok'],
+            requireApproval: false,
+            maxPerMinute: 30,
+          },
+          {
+            id: 'fixture-gated',
+            label: 'Fixture Gated',
+            command: process.execPath,
+            args: [fixture, 'ok'],
+            requireApproval: true,
+            maxPerMinute: 30,
+          },
+        ],
+      }),
+    });
+    assert.equal(configured.status, 200);
+
+    const task = await fetch(`${baseUrl}/api/tasks`, {
+      method: 'POST',
+      headers: ownerHeaders,
+      body: JSON.stringify({ goal: 'HTTP approval task', autoRun: false }),
+    }).then((response) => response.json());
+    const taskId = task.task.id;
+
+    const directAgent = await fetch(`${baseUrl}/api/commands/fixture-ok/run`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${agentToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ taskId }),
+    });
+    assert.equal(directAgent.status, 403);
+    assert.match((await directAgent.json()).error, /command:execute/);
+
+    const requested = await fetch(`${baseUrl}/api/approvals`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${agentToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        taskId,
+        agentId: 'tester-1',
+        commandId: 'fixture-gated',
+      }),
+    });
+    assert.equal(requested.status, 201);
+    const approval = (await requested.json()).approval;
+    assert.equal(approval.status, 'pending');
+
+    const crossAgentRequest = await fetch(`${baseUrl}/api/approvals`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${agentToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        taskId,
+        agentId: 'other-agent',
+        commandId: 'fixture-gated',
+      }),
+    });
+    assert.equal(crossAgentRequest.status, 403);
+
+    const selfApprove = await fetch(`${baseUrl}/api/approvals/${approval.id}`, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${agentToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ decision: 'approved' }),
+    });
+    assert.equal(selfApprove.status, 403);
+    assert.match((await selfApprove.json()).error, /command:approve/);
+
+    const approved = await fetch(`${baseUrl}/api/approvals/${approval.id}`, {
+      method: 'PATCH',
+      headers: ownerHeaders,
+      body: JSON.stringify({ decision: 'approved' }),
+    });
+    assert.equal(approved.status, 200);
+
+    const executed = await fetch(`${baseUrl}/api/approvals/${approval.id}/execute`, {
+      method: 'POST',
+      headers: ownerHeaders,
+    });
+    assert.equal(executed.status, 200);
+    const executedBody = await executed.json();
+    assert.equal(executedBody.ok, true);
+    assert.equal(executedBody.result.code, 0);
+    assert.match(executedBody.result.stdout, /fixture:ok/);
+
+    const replay = await fetch(`${baseUrl}/api/approvals/${approval.id}/execute`, {
+      method: 'POST',
+      headers: ownerHeaders,
+    });
+    assert.equal(replay.status, 409);
+
+    const state = await fetch(`${baseUrl}/api/state`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    }).then((response) => response.json());
+    const record = state.approvals.find((item) => item.id === approval.id);
+    assert.equal(record.status, 'executed');
+    assert.ok(record.result);
+    const event = state.activeTask?.events?.find((item) => item.type === 'command.end');
+    assert.ok(event);
+    assert.equal(event.data.code, 0);
+  } catch (err) {
+    throw new Error(`${err.message}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  } finally {
+    if (child.exitCode === null) child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+      setTimeout(resolve, 2000).unref();
+    });
+    try {
+      fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
+    } catch {
+      /* Windows can hold the data directory briefly. */
+    }
+  }
+});

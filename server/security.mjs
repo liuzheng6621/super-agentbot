@@ -7,14 +7,20 @@ export const API_SCOPES = Object.freeze([
   'task:write',
   'automation:write',
   'tool:execute',
+  'command:execute',
+  'command:request',
+  'command:approve',
   'operator:admin',
 ]);
-const DEFAULT_AGENT_SCOPES = Object.freeze(['read', 'tool:execute']);
+const DEFAULT_AGENT_SCOPES = Object.freeze(['read', 'tool:execute', 'command:request']);
 const DEFAULT_OPERATOR_SCOPES = Object.freeze([
   'read',
   'task:write',
   'automation:write',
   'tool:execute',
+  'command:execute',
+  'command:request',
+  'command:approve',
 ]);
 
 export function isLoopbackHost(host = '') {
@@ -209,6 +215,11 @@ function requiredScope(method, pathname) {
   ) {
     return 'operator:admin';
   }
+  if (pathname === '/api/approvals' && method === 'POST') return 'command:request';
+  if (/^\/api\/commands\/[^/]+\/run$/.test(pathname)) return 'command:execute';
+  if (pathname.startsWith('/api/commands')) {
+    return method === 'GET' ? 'read' : 'operator:admin';
+  }
   if (
     pathname.startsWith('/api/providers') ||
     pathname.startsWith('/api/agents') ||
@@ -222,6 +233,9 @@ function requiredScope(method, pathname) {
   }
   if (pathname.startsWith('/api/tasks')) {
     return method === 'GET' ? 'read' : 'task:write';
+  }
+  if (pathname.startsWith('/api/approvals')) {
+    return method === 'GET' ? 'read' : 'command:approve';
   }
   if (pathname.startsWith('/api/tools')) return method === 'GET' ? 'read' : 'tool:execute';
   if (method === 'GET') return 'read';

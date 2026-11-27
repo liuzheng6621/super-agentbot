@@ -387,7 +387,7 @@ function executeWorkspaceTool(task, toolId, operation, args, meta) {
   if (toolId === 'history_search') return historySearch(task, args);
   if (toolId === 'history_read') return historyRead(task, args);
   if (toolId === 'shell') {
-    fail('平台 Shell 执行入口尚未开放；请使用受控 CLI 运行器。', 501);
+    fail('Shell 只接受固定命令白名单；请使用 /api/commands 或审批队列。', 501);
   }
   fail(`未实现的工具：${toolId}`, 501);
 }

@@ -58,6 +58,7 @@
             <button class="link-btn" id="realTeamBtn">体检并换真实席位</button>
             <button class="link-btn" id="providerBtn">Provider 配置</button>
             <button class="link-btn" id="automationBtn">Automation 定时任务</button>
+            <button class="link-btn" id="approvalBtn">命令审批</button>
           </section>
 
           <section class="rail-section grow">
@@ -799,6 +800,21 @@
                 <button type="submit" class="btn btn-primary sm" id="automationSave">保存自动化</button>
               </div>
             </form>
+          </div>
+        </div>
+      </dialog>
+
+      <dialog class="modal approval-modal" id="approvalModal">
+        <div class="modal-inner">
+          <header class="modal-head">
+            <h3>命令审批</h3>
+            <button type="button" class="icon-btn" id="approvalModalClose" aria-label="关闭">×</button>
+          </header>
+          <div class="modal-body">
+            <p class="hint" id="approvalHint">
+              审批只允许执行固定命令白名单中的条目。申请、批准、执行和取消都会写入任务事件；申请 Agent 不能处理自己的审批。
+            </p>
+            <div class="approval-list" id="approvalList"></div>
           </div>
         </div>
       </dialog>

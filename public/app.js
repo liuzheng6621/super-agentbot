@@ -17,6 +17,8 @@ const S = {
   scheduler: null,
   automations: [],
   automationRunner: null,
+  commands: [],
+  approvals: [],
   security: null,
   probe: [],
   dir: "",
@@ -2518,6 +2520,127 @@ async function openAutomationModal() {
   }
 }
 
+const APPROVAL_STATUS_TEXT = {
+  pending: "待审批",
+  approved: "已批准",
+  rejected: "已拒绝",
+  expired: "已过期",
+  cancelled: "已取消",
+  executing: "执行中",
+  executed: "已执行",
+  failed: "失败",
+};
+
+function approvalCommandText(approval) {
+  return [approval.command, ...(approval.args || [])].filter(Boolean).join(" ");
+}
+
+function renderApprovals() {
+  const list = $("#approvalList");
+  if (!list) return;
+  const hint = $("#approvalHint");
+  if (hint) {
+    const pending = S.approvals.filter((item) => item.status === "pending").length;
+    const executing = S.approvals.filter((item) => item.status === "executing").length;
+    hint.textContent = `${pending} 个待审批，${executing} 个执行中。审批只允许执行固定命令白名单；申请 Agent 不能处理自己的审批。`;
+  }
+  if (!S.approvals.length) {
+    list.innerHTML = '<p class="hint">还没有审批记录。Agent 通过 /api/approvals 申请固定命令后，会在这里出现。</p>';
+    return;
+  }
+  list.innerHTML = S.approvals
+    .map((approval) => {
+      const status = approval.status || "pending";
+      const canDecide = status === "pending";
+      const canExecute = status === "approved";
+      const canCancel = ["pending", "approved", "executing"].includes(status);
+      const result = approval.result || {};
+      const output = result.stdout || result.stderr || result.error || "";
+      const meta = [
+        approval.agentName ? `申请 ${approval.agentName}` : "",
+        approval.requesterIsImplementer ? "实现者本人" : "",
+        approval.taskId ? `任务 ${approval.taskId.slice(0, 8)}` : "",
+        approval.workingDirectory ? `目录 ${approval.workingDirectory}` : "目录 .",
+      ].filter(Boolean);
+      return `<article class="approval-row" data-approval-id="${escapeHtml(approval.id)}">
+        <div class="approval-row-head">
+          <div class="approval-row-main">
+            <b>${escapeHtml(approvalCommandText(approval))}</b>
+            <span>${escapeHtml(meta.join(" · "))}</span>
+          </div>
+          <span class="approval-state" data-status="${escapeHtml(status)}">${escapeHtml(
+            APPROVAL_STATUS_TEXT[status] || status,
+          )}</span>
+        </div>
+        ${approval.reason ? `<p class="approval-reason">${escapeHtml(approval.reason)}</p>` : ""}
+        <div class="approval-meta">
+          <span>申请 ${escapeHtml(fmtDateTime(approval.createdAt))}</span>
+          <span>${approval.expiresAt ? `有效至 ${escapeHtml(fmtDateTime(approval.expiresAt))}` : "无期限"}</span>
+          ${approval.decidedBy ? `<span>处理 ${escapeHtml(approval.decidedBy.name || approval.decidedBy.id || "operator")}</span>` : ""}
+          ${Number.isFinite(Number(result.code)) ? `<span>退出码 ${escapeHtml(result.code)}</span>` : ""}
+          ${result.elapsed ? `<span>耗时 ${escapeHtml(fmtMs(result.elapsed))}</span>` : ""}
+          ${result.timedOut ? '<span class="approval-warn">已超时</span>' : ""}
+        </div>
+        ${output ? `<pre class="approval-output">${escapeHtml(output)}</pre>` : ""}
+        <div class="approval-actions">
+          ${
+            canDecide
+              ? `<button type="button" class="btn btn-primary sm" data-approval-action="approved">批准</button>
+                 <button type="button" class="btn btn-ghost sm danger" data-approval-action="rejected">拒绝</button>`
+              : ""
+          }
+          ${canExecute ? '<button type="button" class="btn btn-primary sm" data-approval-action="execute">执行一次</button>' : ""}
+          ${canCancel ? '<button type="button" class="btn btn-ghost sm" data-approval-action="cancel">取消</button>' : ""}
+        </div>
+      </article>`;
+    })
+    .join("");
+}
+
+async function refreshApprovals() {
+  const data = await api("/api/approvals");
+  S.commands = data.commands || [];
+  S.approvals = data.approvals || [];
+  renderApprovals();
+}
+
+async function openApprovalModal() {
+  renderApprovals();
+  $("#approvalModal").showModal();
+  try {
+    await refreshApprovals();
+  } catch (err) {
+    toast(`读取审批失败：${err.message}`, "err");
+  }
+}
+
+async function actOnApproval(id, action) {
+  const approval = S.approvals.find((item) => item.id === id);
+  if (!approval) return;
+  const path = `/api/approvals/${encodeURIComponent(id)}${
+    action === "execute" || action === "cancel" ? `/${action}` : ""
+  }`;
+  try {
+    if (action === "execute" || action === "cancel") {
+      const result = await api(path, { method: "POST", body: {} });
+      if (result.approval) {
+        const index = S.approvals.findIndex((item) => item.id === result.approval.id);
+        if (index >= 0) S.approvals[index] = result.approval;
+      }
+      toast(action === "cancel" ? "已请求取消" : "命令已执行一次", "ok");
+    } else {
+      const result = await api(path, { method: "PATCH", body: { decision: action } });
+      const index = S.approvals.findIndex((item) => item.id === result.approval.id);
+      if (index >= 0) S.approvals[index] = result.approval;
+      toast(action === "approved" ? "审批已批准" : "审批已拒绝", "ok");
+    }
+    renderApprovals();
+  } catch (err) {
+    toast(`审批操作失败：${err.message}`, "err");
+    await refreshApprovals().catch(() => {});
+  }
+}
+
 function renderAll() {
   renderAgents();
   renderTasks();
@@ -2530,6 +2653,7 @@ function renderAll() {
   renderStats();
   renderContext();
   renderAutomations();
+  renderApprovals();
   renderFlow();
 }
 
@@ -2742,6 +2866,15 @@ function handleEvent(ev) {
     case "automations.changed": {
       S.automations = ev.automations || [];
       renderAutomations();
+      break;
+    }
+    case "approvals.changed": {
+      S.approvals = ev.approvals || [];
+      renderApprovals();
+      break;
+    }
+    case "commands.changed": {
+      refreshApprovals().catch(() => {});
       break;
     }
     case "security.audit": {
@@ -3699,6 +3832,17 @@ function bind() {
   $("#automationModal").addEventListener("click", (e) => {
     if (e.target === e.currentTarget) e.currentTarget.close();
   });
+  $("#approvalBtn").addEventListener("click", openApprovalModal);
+  $("#approvalModalClose").addEventListener("click", () => $("#approvalModal").close());
+  $("#approvalList").addEventListener("click", (e) => {
+    const button = e.target.closest("[data-approval-action]");
+    const row = e.target.closest("[data-approval-id]");
+    if (!button || !row) return;
+    actOnApproval(row.dataset.approvalId, button.dataset.approvalAction);
+  });
+  $("#approvalModal").addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) e.currentTarget.close();
+  });
   $("#authSave").addEventListener("click", () => {
     const token = String($("#authTokenInput").value || "").trim();
     setAuthToken(token);
@@ -3922,6 +4066,8 @@ async function boot() {
     S.scheduler = state.scheduler || null;
     S.automations = state.automations || [];
     S.automationRunner = state.automationRunner || null;
+    S.commands = state.commands || [];
+    S.approvals = state.approvals || [];
     S.security = state.security || null;
     if (state.activeTask) S.task = state.activeTask;
     S.openStep = "";
