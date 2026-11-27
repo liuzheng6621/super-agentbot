@@ -543,6 +543,12 @@ class Store {
         }
         for (const t of this.db.tasks) {
           if (!Array.isArray(t.usageLedger)) t.usageLedger = [];
+          t.contextState = {
+            contextWindow: null,
+            autoCompactAt: null,
+            compaction: null,
+            ...(t.contextState || {}),
+          };
           if (t.status === 'running' || t.status === 'stopping' || t.status === 'queued') {
             const previousStatus = t.status;
             const recoveredAt = Date.now();
@@ -1085,6 +1091,11 @@ class Store {
       skillActivations: [],
       stats: { tokens: 0, tokensIn: 0, tokensOut: 0, agentRuns: 0, files: 0, ms: 0 },
       usageLedger: [],
+      contextState: {
+        contextWindow: null,
+        autoCompactAt: null,
+        compaction: null,
+      },
       workspace: root,
       sourceWorkspace: worktree?.source || root,
       worktree,
@@ -1336,6 +1347,22 @@ class Store {
     this.broadcast({ type: 'usage.recorded', taskId: task.id, entry: { ...saved } });
     this.save({ tasks: [task.id] });
     return saved;
+  }
+
+  updateContextState(taskId, patch = {}) {
+    const task = this.getTask(taskId);
+    if (!task) return null;
+    task.contextState = {
+      contextWindow: null,
+      autoCompactAt: null,
+      compaction: null,
+      ...(task.contextState || {}),
+      ...patch,
+      updatedAt: Date.now(),
+    };
+    this.broadcast({ type: 'task.context', taskId, contextState: task.contextState });
+    this.save({ tasks: [taskId] });
+    return task.contextState;
   }
 
   appendMessage(taskId, messageId, delta) {

@@ -236,8 +236,71 @@ function knownFiles(task) {
   return cached ? [...cached.values()] : snapshotFiles(task);
 }
 
+const CONTEXT_SUMMARY_HEAD = 180;
+const CONTEXT_SUMMARY_LIMIT = 24;
+const CONTEXT_SUMMARY_SOURCE_LIMIT = 40;
+
+function compactContextMessages(messages, { beforeIndex = 0, maxMessages = 8 } = {}) {
+  const candidates = messages
+    .slice(0, Math.max(0, beforeIndex))
+    .filter((message) => String(message.text || '').trim());
+  if (!candidates.length) return null;
+  const selected = candidates.slice(-CONTEXT_SUMMARY_SOURCE_LIMIT);
+  const lines = selected
+    .slice(-CONTEXT_SUMMARY_LIMIT)
+    .map((message) => {
+      const name = message.name || message.role || 'AI';
+      const text = String(message.text || '').replace(/\s+/g, ' ').trim();
+      const clipped = text.length > CONTEXT_SUMMARY_HEAD
+        ? `${text.slice(0, CONTEXT_SUMMARY_HEAD)}…`
+        : text;
+      return `- ${name}: ${clipped}`;
+    });
+  const sourceMessages = candidates.length;
+  const sourceTokens = candidates.reduce(
+    (sum, message) => sum + estimateTokens(message.text || ''),
+    0,
+  );
+  const text = [
+    `（早先 ${sourceMessages} 条协作消息的摘要；完整原文仍保存在任务消息中）`,
+    ...lines,
+  ].join('\n');
+  return {
+    text,
+    sourceMessages,
+    sourceTokens,
+    tokens: estimateTokens(text),
+    generatedAt: Date.now(),
+    coversThroughIndex: Math.max(0, beforeIndex - 1),
+    originalPreserved: true,
+  };
+}
+
 export function buildContextPack(task, { maxMessages = 8, maxFiles = 80, files } = {}) {
   const allFiles = files || listWorkspaceFiles(task);
+  const messages = Array.isArray(task.messages) ? task.messages : [];
+  const visibleMessages = messages.filter((message) => message.text);
+  const recentStart = Math.max(0, visibleMessages.length - maxMessages);
+  const beforeIndex = messages.findIndex((message) => message === visibleMessages[recentStart]);
+  const compaction = task.contextState?.compaction || null;
+  const recent = visibleMessages
+    .slice(-maxMessages)
+    .map((m) => ({
+      name: m.name || m.role || 'AI',
+      role: m.role || '',
+      kind: m.kind || 'text',
+      from: m.from?.name || m.name || '',
+      to: (m.to || []).map((recipient) => recipient.name || recipient.id).join(', '),
+      correlationId: m.correlationId || '',
+      stepId: m.stepId || '',
+      text: String(m.text).replace(/\s+/g, ' ').slice(0, 300),
+    }));
+  const selectedFiles = allFiles.filter((f) => f.bytes > 0).slice(0, maxFiles);
+  const estimate = estimateTokens(
+    [task.goal, task.workspace, compaction?.summary || '', ...recent.map((m) => m.text)]
+      .filter(Boolean)
+      .join('\n'),
+  );
   return {
     goal: task.goal,
     workspace: task.workspace,
@@ -252,22 +315,19 @@ export function buildContextPack(task, { maxMessages = 8, maxFiles = 80, files }
       status: s.status,
       round: s.round || 0,
     })),
-    files: allFiles
-      .filter((f) => f.bytes > 0)
-      .slice(0, maxFiles),
-    messages: task.messages
-      .filter((m) => m.text)
-      .slice(-maxMessages)
-      .map((m) => ({
-        name: m.name || m.role || 'AI',
-        role: m.role || '',
-        kind: m.kind || 'text',
-        from: m.from?.name || m.name || '',
-        to: (m.to || []).map((recipient) => recipient.name || recipient.id).join(', '),
-        correlationId: m.correlationId || '',
-        stepId: m.stepId || '',
-        text: String(m.text).replace(/\s+/g, ' ').slice(0, 300),
-      })),
+    files: selectedFiles,
+    messages: recent,
+    compaction,
+    contextState: {
+      estimatedTokens: estimate,
+      messages: visibleMessages.length,
+      files: allFiles.length,
+      budget: { maxMessages, maxFiles },
+      contextWindow: numericOrNull(task.contextState?.contextWindow),
+      autoCompactAt: numericOrNull(task.contextState?.autoCompactAt),
+      lastCompactionAt: numericOrNull(compaction?.generatedAt),
+      compaction: compaction || null,
+    },
     budget: {
       maxMessages,
       maxFiles,
@@ -275,6 +335,73 @@ export function buildContextPack(task, { maxMessages = 8, maxFiles = 80, files }
       filesAvailable: allFiles.length,
     },
   };
+}
+
+function numericOrNull(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+export function compactTaskContext(taskId, { maxMessages = 8, force = false } = {}) {
+  const task = store.getTask(taskId);
+  if (!task) return null;
+  const messages = Array.isArray(task.messages) ? task.messages : [];
+  const visible = messages.filter((message) => String(message.text || '').trim());
+  const keepFrom = Math.max(0, visible.length - maxMessages);
+  const source = visible.slice(0, keepFrom);
+  if (!source.length) {
+    return {
+      compacted: false,
+      reason: 'not-enough-history',
+      contextState: task.contextState || null,
+    };
+  }
+  const sourceTokens = source.reduce((sum, message) => sum + estimateTokens(message.text || ''), 0);
+  const compacted = compactContextMessages(messages, {
+    beforeIndex: messages.findIndex((message) => message === source.at(-1)) + 1,
+    maxMessages,
+  });
+  if (!compacted) {
+    return {
+      compacted: false,
+      reason: 'not-enough-history',
+      contextState: task.contextState || null,
+    };
+  }
+  if (!force && compacted.sourceMessages <= maxMessages) {
+    return {
+      compacted: false,
+      reason: 'already-within-budget',
+      contextState: task.contextState || null,
+    };
+  }
+  const previous = task.contextState?.compaction || null;
+  const summary = compacted.text;
+  const state = store.updateContextState(task.id, {
+    compaction: {
+      summary,
+      generatedAt: compacted.generatedAt,
+      sourceMessages: compacted.sourceMessages,
+      sourceTokens,
+      tokens: compacted.tokens,
+      coversThroughIndex: compacted.coversThroughIndex,
+      previousGeneratedAt: previous?.generatedAt || null,
+      originalPreserved: true,
+    },
+  });
+  store.addTaskEvent(task.id, {
+    type: 'context.compacted',
+    runId: task.runId || null,
+    data: {
+      sourceMessages: compacted.sourceMessages,
+      sourceTokens,
+      summaryTokens: compacted.tokens,
+      coversThroughIndex: compacted.coversThroughIndex,
+      originalPreserved: true,
+    },
+  });
+  return { compacted: true, reason: 'compacted', contextState: state };
 }
 
 /**
@@ -305,6 +432,7 @@ export function volatileBlock(context, step = '') {
       : '- 暂无',
     '',
     '# 最近协作摘要',
+    context.compaction?.summary ? `- 早先上下文：${context.compaction.summary}` : '',
     context.messages.length
       ? context.messages.map((m) => `- ${m.name}: ${m.text}`).join('\n')
       : '- 暂无',

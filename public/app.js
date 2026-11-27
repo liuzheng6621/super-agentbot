@@ -1341,6 +1341,8 @@ function workspaceConsoleContextHtml() {
   const files = context.files || [];
   const messages = context.messages || [];
   const budget = context.budget || {};
+  const state = context.contextState || {};
+  const compaction = state.compaction;
   return `
     <div class="wc-context-card">
       <b>GOAL / 当前目标</b>
@@ -1348,7 +1350,9 @@ function workspaceConsoleContextHtml() {
     </div>
     <div class="wc-context-card">
       <b>BUDGET / 注入预算</b>
-      <p>消息 ${messages.length}/${budget.messagesAvailable ?? messages.length} · 文件 ${files.length}/${budget.filesAvailable ?? files.length}</p>
+      <p>消息 ${messages.length}/${budget.messagesAvailable ?? messages.length} · 文件 ${files.length}/${budget.filesAvailable ?? files.length} · 估算 ${Number(state.estimatedTokens || 0).toLocaleString()} tok</p>
+      <p>${state.contextWindow == null ? "窗口未知" : `窗口 ${Number(state.contextWindow).toLocaleString()} tok`} · ${state.autoCompactAt == null ? "自动压缩阈值未知" : `阈值 ${Number(state.autoCompactAt).toLocaleString()} tok`}</p>
+      <p>${compaction ? `已压缩 ${compaction.sourceMessages} 条早先消息 · 原文保留` : "尚未压缩"}</p>
     </div>
     <div class="wc-context-card">
       <b>RECENT / 最近协作</b>
@@ -2106,6 +2110,8 @@ function renderContext() {
   const files = context.files || [];
   const messages = context.messages || [];
   const skillActivations = t?.skillActivations || [];
+  const state = context.contextState || {};
+  const compaction = state.compaction;
   if (hint) {
     hint.textContent = `工作区 ${shortPath(context.workspace || "")} · ${messages.length} 条近期对话 · ${files.length} 个已知文件`;
     hint.title = context.workspace || "";
@@ -2120,6 +2126,11 @@ function renderContext() {
     </div>
     <div class="ctx-block">
       <div class="ctx-label">RECENT</div>
+      ${
+        compaction
+          ? `<div class="ctx-message"><b>早先摘要</b><span>${escapeHtml(compaction.summary || "")}</span></div>`
+          : ""
+      }
       ${
         contextMessages.length
           ? contextMessages

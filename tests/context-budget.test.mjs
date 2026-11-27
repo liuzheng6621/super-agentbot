@@ -8,7 +8,14 @@ import path from 'node:path';
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-budget-'));
 process.env.AGENTFORGE_DATA_DIR = temp;
 
-const { stableBlock, volatileBlock, buildPrompt } = await import('../server/orchestrator.mjs');
+const { store } = await import('../server/store.mjs');
+const {
+  stableBlock,
+  volatileBlock,
+  buildPrompt,
+  buildContextPack,
+  compactTaskContext,
+} = await import('../server/orchestrator.mjs');
 const { estimateTokens } = await import('../server/tokens.mjs');
 const { writeFileAtomic, versionOf, spillText } = await import('../server/fs.mjs');
 
@@ -103,4 +110,49 @@ test('超长上游产物落盘成句柄，原文可完整取回', () => {
   // 同样的内容重复落盘不产生第二个文件
   const again = spillText({ taskId: 't-1', name: 'coder-implement', content: text });
   assert.equal(again.locator, ref.locator);
+});
+
+test('contextStates 区分未知窗口，压缩保留原文且摘要可审计', () => {
+  const workspaceDir = path.join(temp, 'context-ws');
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const task = store.createTask({
+    goal: '验证上下文压缩',
+    workspace: workspaceDir,
+  });
+  for (let index = 0; index < 18; index += 1) {
+    store.addMessage(task.id, {
+      agentId: 'system',
+      name: index % 2 ? '测试' : '实现',
+      role: index % 2 ? 'tester' : 'coder',
+      title: 'MEM',
+      kind: 'text',
+      done: true,
+      text: `第 ${index + 1} 条历史消息：${'细节'.repeat(40)}`,
+    });
+  }
+  const before = buildContextPack(store.getTask(task.id), { files: [] });
+  assert.equal(before.contextState.contextWindow, null, '未知窗口必须返回 null');
+  assert.equal(before.contextState.autoCompactAt, null, '未知阈值必须返回 null');
+  assert.equal(before.contextState.lastCompactionAt, null);
+  assert.equal(before.messages.length, 8);
+  assert.equal(before.contextState.messages, 18);
+  assert.ok(before.contextState.estimatedTokens > 0);
+
+  const original = store.getTask(task.id).messages.map((message) => message.id);
+  const result = compactTaskContext(task.id, { maxMessages: 4 });
+  assert.equal(result.compacted, true);
+  const after = buildContextPack(store.getTask(task.id), { files: [] });
+  assert.ok(after.contextState.lastCompactionAt > 0);
+  assert.ok(after.contextState.compaction.sourceMessages > after.messages.length);
+  assert.equal(after.contextState.compaction.originalPreserved, true);
+  assert.ok(after.contextState.compaction.summary.includes('完整原文仍保存在任务消息中'));
+  assert.deepEqual(
+    store.getTask(task.id).messages.map((message) => message.id),
+    original,
+    '压缩不能覆盖或删除原始消息',
+  );
+  assert.ok(
+    store.getTask(task.id).events.some((event) => event.type === 'context.compacted'),
+    '压缩必须留下审计事件',
+  );
 });

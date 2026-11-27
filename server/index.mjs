@@ -20,6 +20,7 @@ import {
   stopTask,
   chat,
   buildContextPack,
+  compactTaskContext,
   isRunning,
   replanTask,
   workMsOf,
@@ -455,6 +456,18 @@ const server = http.createServer(async (req, res) => {
         messages: [],
       }, { maxMessages: 0 });
       return json(res, 200, { context });
+    }
+
+    const contextCompactMatch = pathname.match(/^\/api\/tasks\/([\w-]+)\/context\/compact$/);
+    if (contextCompactMatch && method === 'POST') {
+      const task = store.getTask(contextCompactMatch[1]);
+      if (!task) return json(res, 404, { error: '任务不存在' });
+      const body = await readBody(req).catch(() => ({}));
+      const result = compactTaskContext(task.id, {
+        maxMessages: Math.max(2, Math.min(40, Number(body.maxMessages) || 8)),
+        force: body.force === true,
+      });
+      return json(res, 200, result);
     }
 
     /* ---- 目录选择器（本机服务，供「选文件夹开工」用） ---- */
