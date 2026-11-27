@@ -41,6 +41,7 @@ import {
   workspacePoolInfo,
   workspaceInfo,
 } from './workspace.mjs';
+import { crossTaskOverview, taskGraph, taskReplay } from './overview.mjs';
 import {
   authenticateApi,
   authorizeApi,
@@ -377,7 +378,12 @@ const server = http.createServer(async (req, res) => {
         roleTools: ROLE_TOOLS,
         executionPolicies: executionPolicyCatalog(),
         activeTask: active ? taskDetail(active) : null,
+        overview: crossTaskOverview(),
       });
+    }
+
+    if (pathname === '/api/overview' && method === 'GET') {
+      return json(res, 200, crossTaskOverview());
     }
 
     if (pathname === '/api/security' && method === 'GET') {
@@ -955,7 +961,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     const taskMatch = pathname.match(
-      /^\/api\/tasks\/([\w-]+)(?:\/(run|stop|chat|replan|files|file|workspace|search|events|changes|diff|fs|tools))?$/,
+      /^\/api\/tasks\/([\w-]+)(?:\/(run|stop|chat|replan|files|file|workspace|search|events|changes|diff|fs|tools|graph|replay))?$/,
     );
     if (taskMatch) {
       const task = store.getTask(taskMatch[1]);
@@ -1028,6 +1034,12 @@ const server = http.createServer(async (req, res) => {
             })
             .slice(-240),
         });
+      }
+      if (action === 'graph' && method === 'GET') {
+        return json(res, 200, taskGraph(task));
+      }
+      if (action === 'replay' && method === 'GET') {
+        return json(res, 200, taskReplay(task));
       }
       if (action === 'files' && method === 'GET') {
         const call = await toolGateway.invokeTool({

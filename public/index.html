@@ -67,6 +67,7 @@
               <em id="taskCount">00</em>
             </header>
             <div class="task-list" id="taskList"></div>
+            <button class="link-btn" id="overviewBtn">跨任务总览</button>
           </section>
 
           <div class="rail-foot">
@@ -365,6 +366,9 @@
                 <button class="wc-view-tab" type="button" data-wc-view="messages">协作消息</button>
                 <button class="wc-view-tab" type="button" data-wc-view="audit">工具审计</button>
                 <button class="wc-view-tab" type="button" data-wc-view="diff">DIFF</button>
+                <button class="wc-view-tab" type="button" data-wc-view="overview">总览</button>
+                <button class="wc-view-tab" type="button" data-wc-view="graph">DAG</button>
+                <button class="wc-view-tab" type="button" data-wc-view="replay">回放</button>
               </div>
               <span class="wc-file-state" id="wcFileState">选择一个文件开始</span>
             </div>
@@ -447,6 +451,50 @@
                 <button class="btn btn-ghost sm" id="wcDiffRefresh" type="button">刷新 Diff</button>
               </div>
               <pre class="wc-diff" id="wcDiff">当前工作区不是 Git 仓库，或还没有选择文件。</pre>
+            </section>
+
+            <section class="wc-view" id="wcOverviewView" hidden>
+              <div class="wc-lanes-head">
+                <div>
+                  <span class="wc-eyebrow">CROSS-TASK OVERVIEW</span>
+                  <h3>所有任务现在卡在哪</h3>
+                </div>
+                <div class="wc-view-actions">
+                  <span class="wc-run-status" id="wcOverviewCount">00</span>
+                  <button class="btn btn-ghost sm" id="wcOverviewRefresh" type="button">刷新总览</button>
+                </div>
+              </div>
+              <div class="wc-overview-summary" id="wcOverviewSummary"></div>
+              <div class="wc-overview-list" id="wcOverviewList"></div>
+            </section>
+
+            <section class="wc-view" id="wcGraphView" hidden>
+              <div class="wc-lanes-head">
+                <div>
+                  <span class="wc-eyebrow">TASK DAG</span>
+                  <h3>依赖、并行层与当前状态</h3>
+                </div>
+                <div class="wc-view-actions">
+                  <span class="wc-run-status" id="wcGraphCount">00</span>
+                  <button class="btn btn-ghost sm" id="wcGraphRefresh" type="button">刷新图谱</button>
+                </div>
+              </div>
+              <div class="wc-graph-summary" id="wcGraphSummary"></div>
+              <div class="wc-dag" id="wcGraph"></div>
+            </section>
+
+            <section class="wc-view" id="wcReplayView" hidden>
+              <div class="wc-lanes-head">
+                <div>
+                  <span class="wc-eyebrow">TIME REPLAY</span>
+                  <h3>消息、事件与文件变更的时间线</h3>
+                </div>
+                <div class="wc-view-actions">
+                  <span class="wc-run-status" id="wcReplayCount">00</span>
+                  <button class="btn btn-ghost sm" id="wcReplayRefresh" type="button">刷新回放</button>
+                </div>
+              </div>
+              <div class="wc-replay" id="wcReplay"></div>
             </section>
           </main>
 

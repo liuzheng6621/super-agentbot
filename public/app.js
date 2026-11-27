@@ -36,6 +36,10 @@ const S = {
   workspaceRefreshTimer: null,
   workspaceConsoleOpen: false,
   workspaceConsoleView: "file",
+  overview: null,
+  graph: null,
+  replay: null,
+  overviewLoading: false,
   workspaceDiffPath: "",
   workspaceDiff: null,
   agentPolicyPreviewTimer: null,
@@ -1638,6 +1642,160 @@ function workspaceConsoleAuditHtml() {
     .join("");
 }
 
+function graphNodeHtml(node) {
+  const agent = S.agents.find((item) => item.id === node.agentId);
+  return `<article class="wc-dag-node" data-status="${escapeHtml(node.status)}">
+    <div class="wc-dag-node-head">
+      <span>${escapeHtml(node.role || "step")}</span>
+      <em>${escapeHtml(STEP_STATUS_TEXT[node.status] || node.status)}</em>
+    </div>
+    <b>${escapeHtml(node.title || node.id)}</b>
+    <p>${escapeHtml(agent?.name || node.agentId || "未分配")}${node.needs.length ? ` · 依赖 ${node.needs.join(" / ")}` : ""}</p>
+    ${
+      node.lastEvent
+        ? `<span class="wc-dag-event">${escapeHtml(node.lastEvent.type)} · ${escapeHtml(node.lastEvent.summary || "—")} · ${fmtTime(node.lastEvent.at)}</span>`
+        : ""
+    }
+  </article>`;
+}
+
+function workspaceConsoleGraphHtml() {
+  const graph = S.graph;
+  if (!graph) return '<p class="wc-empty-line">正在读取任务图谱…</p>';
+  if (!graph.nodes?.length) return '<p class="wc-empty-line">任务还没有计划，暂无 DAG。</p>';
+  return (graph.layers || [])
+    .map(
+      (layer, index) => `<section class="wc-dag-layer">
+        <header><b>L${index}</b><span>${layer.length} 个工序${layer.length > 1 ? " · 可并行" : ""}</span></header>
+        <div class="wc-dag-layer-nodes">
+          ${layer
+            .map((id) => graphNodeHtml(graph.nodes.find((node) => node.id === id)))
+            .join("")}
+        </div>
+      </section>`,
+    )
+    .join("");
+}
+
+function workspaceConsoleReplayHtml() {
+  const replay = S.replay;
+  if (!replay) return '<p class="wc-empty-line">正在读取时间回放…</p>';
+  if (!replay.frames?.length) return '<p class="wc-empty-line">任务还没有可回放的记录。</p>';
+  return `${replay.truncated ? `<p class="wc-empty-line">只显示最近 ${replay.frames.length} / ${replay.total} 帧。</p>` : ""}
+    <div class="wc-replay-timeline">
+      ${replay.frames
+        .map(
+          (frame) => `<article class="wc-replay-frame" data-kind="${escapeHtml(frame.kind)}">
+            <div class="wc-replay-index">${String(frame.index).padStart(3, "0")}</div>
+            <div class="wc-replay-body">
+              <div class="wc-replay-head">
+                <b>${escapeHtml(frame.label)}</b>
+                <span>${escapeHtml(frame.stepId || frame.agentId || "task")}</span>
+                <em>${fmtTime(frame.at)}</em>
+              </div>
+              <p>${escapeHtml(frame.summary || "—")}</p>
+            </div>
+          </article>`,
+        )
+        .join("")}
+    </div>`;
+}
+
+function workspaceConsoleOverviewHtml() {
+  const overview = S.overview;
+  if (!overview) return '<p class="wc-empty-line">正在读取跨任务总览…</p>';
+  if (!overview.tasks?.length) return '<p class="wc-empty-line">还没有任务。</p>';
+  return overview.tasks
+    .map((task) => {
+      const current = task.currentStep;
+      const blockers = task.blockers || [];
+      return `<article class="wc-overview-row" data-status="${escapeHtml(task.status)}" data-task-id="${escapeHtml(task.id)}">
+        <div class="wc-overview-main">
+          <b>${escapeHtml(task.title)}</b>
+          <span>${escapeHtml(STATUS_TEXT[task.status] || task.status)} · ${task.doneSteps}/${task.steps} 工序 · ${task.files} 文件</span>
+        </div>
+        <div class="wc-overview-step">
+          <em>CURRENT</em>
+          <span>${escapeHtml(current ? `${current.title} · ${current.role}` : "无运行工序")}</span>
+        </div>
+        <div class="wc-overview-blocker" data-blocked="${blockers.length > 0}">
+          <em>BLOCKED</em>
+          <span>${escapeHtml(blockers.length ? blockers.map((item) => `${item.title}: ${item.note || item.status}`).join("；") : "无")}</span>
+        </div>
+      </article>`;
+    })
+    .join("");
+}
+
+function renderWorkspaceOverview() {
+  const overview = S.overview;
+  if (!overview) return;
+  $("#wcOverviewCount").textContent = pad2(overview.summary?.total || 0);
+  $("#wcOverviewSummary").innerHTML = [
+    ["ACTIVE", overview.summary?.active || 0],
+    ["BLOCKED", overview.summary?.blocked || 0],
+    ["PROJECTS", overview.summary?.projects || 0],
+    ["TASKS", overview.summary?.total || 0],
+  ]
+    .map(([label, value]) => `<div><b>${pad2(value)}</b><span>${label}</span></div>`)
+    .join("");
+  $("#wcOverviewList").innerHTML = workspaceConsoleOverviewHtml();
+}
+
+function renderWorkspaceGraph() {
+  const graph = S.graph;
+  $("#wcGraphCount").textContent = graph ? pad2(graph.summary?.total || 0) : "00";
+  $("#wcGraphSummary").innerHTML = graph
+    ? [
+        ["DONE", graph.summary.done],
+        ["RUNNING", graph.summary.running],
+        ["BLOCKED", graph.summary.blocked],
+        ["PARALLEL", graph.summary.parallel ? "YES" : "NO"],
+      ]
+        .map(([label, value]) => `<div><b>${escapeHtml(String(value))}</b><span>${label}</span></div>`)
+        .join("")
+    : "";
+  $("#wcGraph").innerHTML = workspaceConsoleGraphHtml();
+}
+
+function renderWorkspaceReplay() {
+  $("#wcReplayCount").textContent = S.replay ? pad2(S.replay.frames?.length || 0) : "00";
+  $("#wcReplay").innerHTML = workspaceConsoleReplayHtml();
+}
+
+async function loadWorkspaceOverview({ force = false } = {}) {
+  if (S.overviewLoading && !force) return;
+  S.overviewLoading = true;
+  try {
+    S.overview = await api("/api/overview");
+    renderWorkspaceOverview();
+  } catch (err) {
+    $("#wcOverviewList").innerHTML = `<p class="wc-empty-line">总览加载失败：${escapeHtml(err.message)}</p>`;
+  } finally {
+    S.overviewLoading = false;
+  }
+}
+
+async function loadWorkspaceGraph() {
+  if (!S.task) return;
+  try {
+    S.graph = await api(`/api/tasks/${S.task.id}/graph`);
+    renderWorkspaceGraph();
+  } catch (err) {
+    $("#wcGraph").innerHTML = `<p class="wc-empty-line">图谱加载失败：${escapeHtml(err.message)}</p>`;
+  }
+}
+
+async function loadWorkspaceReplay() {
+  if (!S.task) return;
+  try {
+    S.replay = await api(`/api/tasks/${S.task.id}/replay`);
+    renderWorkspaceReplay();
+  } catch (err) {
+    $("#wcReplay").innerHTML = `<p class="wc-empty-line">回放加载失败：${escapeHtml(err.message)}</p>`;
+  }
+}
+
 function renderWorkspaceConsoleFile() {
   const empty = $("#wcFileEmpty");
   const codeBlock = $("#wcCodeBlock");
@@ -1678,6 +1836,8 @@ function renderWorkspaceConsole() {
     S.workspace = null;
     S.workspacePreviewPath = "";
     S.workspacePreviewData = null;
+    S.graph = null;
+    S.replay = null;
     S.workspaceDiffPath = "";
     S.workspaceDiff = null;
     $("#wcTitle").textContent = "未选择任务";
@@ -1693,6 +1853,8 @@ function renderWorkspaceConsole() {
     $("#wcPlanVersions").innerHTML = '<p class="wc-empty-line">选择任务后显示计划版本。</p>';
     $("#wcMessageRoutes").innerHTML = '<p class="wc-empty-line">选择任务后显示协作消息。</p>';
     $("#wcAudit").innerHTML = '<p class="wc-empty-line">选择任务后显示工具审计。</p>';
+    $("#wcGraph").innerHTML = '<p class="wc-empty-line">选择任务后显示 DAG。</p>';
+    $("#wcReplay").innerHTML = '<p class="wc-empty-line">选择任务后显示时间回放。</p>';
     $("#wcContext").innerHTML = "";
     $("#wcPolicy").innerHTML = "";
     $("#wcSummary").innerHTML = "";
@@ -1706,6 +1868,9 @@ function renderWorkspaceConsole() {
     $("#wcPlanCount").textContent = "V0";
     $("#wcMessageCount").textContent = "00";
     $("#wcAuditCount").textContent = "00";
+    $("#wcGraphCount").textContent = "00";
+    $("#wcReplayCount").textContent = "00";
+    $("#wcGraphSummary").innerHTML = "";
     renderWorkspaceConsoleFile();
     return;
   }
@@ -1760,6 +1925,8 @@ function renderWorkspaceConsole() {
   $("#wcPlanVersions").innerHTML = workspaceConsolePlanVersionsHtml();
   $("#wcMessageRoutes").innerHTML = workspaceConsoleMessagesHtml();
   $("#wcAudit").innerHTML = workspaceConsoleAuditHtml();
+  renderWorkspaceGraph();
+  renderWorkspaceReplay();
   $("#wcRunStatus").textContent = STATUS_TEXT[S.task.status] || S.task.status || "—";
   $("#wcPlanCount").textContent = `V${S.task.planVersion || 0}`;
   $("#wcMessageCount").textContent = pad2((S.task.messages || []).length);
@@ -1768,11 +1935,12 @@ function renderWorkspaceConsole() {
   $("#wcPolicy").innerHTML = workspaceConsolePolicyHtml();
   $("#wcSummary").innerHTML = workspaceConsoleSummaryHtml();
   renderWorkspaceConsoleFile();
+  if (S.overview) renderWorkspaceOverview();
   setWorkspaceConsoleView(S.workspaceConsoleView, { render: false });
 }
 
 function setWorkspaceConsoleView(view, { render = true } = {}) {
-  const next = ["file", "execution", "plan", "messages", "audit", "diff"].includes(view) ? view : "file";
+  const next = ["file", "execution", "plan", "messages", "audit", "diff", "overview", "graph", "replay"].includes(view) ? view : "file";
   S.workspaceConsoleView = next;
   $$("#wcViewTabs [data-wc-view]").forEach((button) => {
     button.classList.toggle("active", button.dataset.wcView === next);
@@ -1783,16 +1951,25 @@ function setWorkspaceConsoleView(view, { render = true } = {}) {
   $("#wcMessagesView").hidden = next !== "messages";
   $("#wcAuditView").hidden = next !== "audit";
   $("#wcDiffView").hidden = next !== "diff";
+  $("#wcOverviewView").hidden = next !== "overview";
+  $("#wcGraphView").hidden = next !== "graph";
+  $("#wcReplayView").hidden = next !== "replay";
   const stateLabel = {
     execution: "按成员查看工序、依赖与运行事件",
     plan: `计划版本 V${S.task?.planVersion || 0} · 快照不可变`,
     messages: "消息保留来源、目标、关联工序与产物",
     audit: "策略校验、参数摘要与执行结果",
     diff: "对比当前工作区与 Git 基线",
+    overview: "跨任务状态、当前工序与阻塞原因",
+    graph: "按依赖分层展示可并行工序",
+    replay: "按时间合并消息、事件与文件变更",
   }[next];
   if (stateLabel) $("#wcFileState").textContent = stateLabel;
   else renderWorkspaceConsoleFile();
   if (render && next === "diff") loadWorkspaceConsoleDiff();
+  if (render && next === "overview") loadWorkspaceOverview({ force: true });
+  if (render && next === "graph") loadWorkspaceGraph();
+  if (render && next === "replay") loadWorkspaceReplay();
 }
 
 async function loadWorkspaceConsoleDiff() {
@@ -4044,6 +4221,21 @@ function bind() {
 
   /* 全屏工作区控制台 */
   $("#workspaceExpand").addEventListener("click", openWorkspaceConsole);
+  $("#overviewBtn").addEventListener("click", async () => {
+    if (!S.task) {
+      const latest = S.tasks[0];
+      if (!latest) {
+        toast("还没有任务可查看", "err");
+        return;
+      }
+      await selectTask(latest.id);
+    }
+    S.workspaceConsoleOpen = true;
+    $("#workspaceConsole").hidden = false;
+    document.body.classList.add("workspace-console-open");
+    renderWorkspaceConsole();
+    setWorkspaceConsoleView("overview");
+  });
   $("#wcClose").addEventListener("click", closeWorkspaceConsole);
   $("#wcRefresh").addEventListener("click", async () => {
     await syncCurrentTask();
@@ -4062,6 +4254,15 @@ function bind() {
   $("#wcViewTabs").addEventListener("click", (e) => {
     const button = e.target.closest("[data-wc-view]");
     if (button) setWorkspaceConsoleView(button.dataset.wcView);
+  });
+  $("#wcOverviewRefresh").addEventListener("click", () => loadWorkspaceOverview({ force: true }));
+  $("#wcGraphRefresh").addEventListener("click", loadWorkspaceGraph);
+  $("#wcReplayRefresh").addEventListener("click", loadWorkspaceReplay);
+  $("#wcOverviewList").addEventListener("click", async (e) => {
+    const row = e.target.closest("[data-task-id]");
+    if (!row) return;
+    await selectTask(row.dataset.taskId);
+    setWorkspaceConsoleView("graph");
   });
   $("#wcTree").addEventListener("click", (e) => {
     const file = e.target.closest("[data-workspace-file]");
@@ -4208,6 +4409,7 @@ async function boot() {
     S.roleTools = state.roleTools || {};
     S.executionPolicies = state.executionPolicies || [];
     S.tasks = state.tasks;
+    S.overview = state.overview || null;
     S.settings = state.settings || {};
     S.scheduler = state.scheduler || null;
     S.automations = state.automations || [];
