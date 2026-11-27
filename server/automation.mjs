@@ -255,6 +255,19 @@ function recordScheduleFailure(automation, trigger, now, task, reason) {
 function scheduleAutomation(automation, trigger, now, dependencies = {}) {
   const create = dependencies.createTask || ((input) => store.createTask(input));
   const schedule = dependencies.scheduleTask || scheduleTask;
+  const clientMessageId = String(dependencies.clientMessageId || '').trim().slice(0, 200);
+  const idempotencyScope = `automation:${automation.id}`;
+  if (clientMessageId) {
+    const existing = store.findIdempotentTask(clientMessageId, idempotencyScope, now);
+    if (existing) {
+      return {
+        ok: true,
+        task: existing,
+        scheduled: { accepted: true, replay: true },
+        idempotentReplay: true,
+      };
+    }
+  }
   if (automation.lastTaskId && isScheduled(automation.lastTaskId)) {
     automation.lastStatus = 'waiting';
     automation.lastError = '上一轮任务仍在排队或运行';
@@ -269,6 +282,8 @@ function scheduleAutomation(automation, trigger, now, dependencies = {}) {
       workspace: automation.workspace,
       isolation: automation.isolation,
       debate: automation.flowMode,
+      clientMessageId,
+      clientMessageScope: idempotencyScope,
     });
   } catch (err) {
     return recordScheduleFailure(automation, trigger, now, null, err.message);

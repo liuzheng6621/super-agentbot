@@ -159,6 +159,87 @@ test('failed automation runs enter retry-waiting and are re-scheduled by the run
   assert.equal(getAutomation(automation.id).history.at(-1).status, 'scheduled');
 });
 
+test('automation manual runs reuse a task for the same clientMessageId inside 24 hours', () => {
+  clearAutomations();
+  const automation = createAutomation({
+    name: 'Idempotent run',
+    goal: 'Only create one task',
+    schedule: { kind: 'interval', everyMinutes: 60 },
+  });
+  let creates = 0;
+  let schedules = 0;
+  const dependencies = {
+    clientMessageId: 'manual-message-1',
+    createTask(input) {
+      creates += 1;
+      return store.createTask({
+        goal: input.goal,
+        clientMessageId: input.clientMessageId,
+        clientMessageScope: input.clientMessageScope,
+      });
+    },
+    scheduleTask() {
+      schedules += 1;
+      return { accepted: true };
+    },
+  };
+  const first = runAutomationNow(automation.id, dependencies);
+  const second = runAutomationNow(automation.id, dependencies);
+  assert.equal(first.ok, true);
+  assert.equal(first.idempotentReplay, undefined);
+  assert.equal(second.ok, true);
+  assert.equal(second.idempotentReplay, true);
+  assert.equal(second.task.id, first.task.id);
+  assert.equal(creates, 1);
+  assert.equal(schedules, 1);
+  assert.equal(getAutomation(automation.id).runCount, 1);
+
+  const otherAutomation = createAutomation({
+    name: 'Another idempotent run',
+    goal: 'Different automation scope',
+    schedule: { kind: 'interval', everyMinutes: 60 },
+  });
+  const scoped = runAutomationNow(otherAutomation.id, dependencies);
+  assert.equal(scoped.ok, true);
+  assert.equal(scoped.idempotentReplay, undefined);
+  assert.notEqual(scoped.task.id, first.task.id);
+});
+
+test('idempotency expires after the 24 hour window', () => {
+  const first = store.createTask({
+    goal: 'expiring idempotency key',
+    clientMessageId: 'expiring-message',
+    clientMessageScope: 'task:create',
+  });
+  const inside = store.findIdempotentTask(
+    'expiring-message',
+    'task:create',
+    first.createdAt + 23 * 60 * 60 * 1000,
+  );
+  const expired = store.findIdempotentTask(
+    'expiring-message',
+    'task:create',
+    first.createdAt + 24 * 60 * 60 * 1000 + 1,
+  );
+  assert.equal(inside.id, first.id);
+  assert.equal(expired, null);
+});
+
+test('task creation checks the persisted idempotency key before allocating a workspace', () => {
+  const first = store.createTask({
+    goal: 'dedupe before workspace allocation',
+    clientMessageId: 'dedupe-before-allocate',
+    clientMessageScope: 'task:create',
+  });
+  const second = store.createTask({
+    goal: 'dedupe before workspace allocation',
+    clientMessageId: 'dedupe-before-allocate',
+    clientMessageScope: 'task:create',
+  });
+  assert.equal(second.id, first.id);
+  assert.equal(store.tasks.filter((task) => task.clientMessageId === 'dedupe-before-allocate').length, 1);
+});
+
 test.after(() => {
   store.flush();
   try {

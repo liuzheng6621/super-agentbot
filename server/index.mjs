@@ -356,7 +356,13 @@ const server = http.createServer(async (req, res) => {
       const automation = getAutomation(automationId);
       if (!automation) return json(res, 404, { error: '自动化不存在' });
       if (automationMatch[2] && method === 'POST') {
-        const result = runAutomationNow(automationId);
+        const body = await readBody(req).catch(() => ({}));
+        const clientMessageId =
+          typeof body.clientMessageId === 'string' ? body.clientMessageId.trim() : '';
+        if (clientMessageId.length > 200) {
+          return json(res, 400, { error: 'clientMessageId 不能超过 200 个字符' });
+        }
+        const result = runAutomationNow(automationId, { clientMessageId });
         return json(res, result.ok ? 202 : 409, result);
       }
       if (method === 'PATCH') {
@@ -571,6 +577,20 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const goal = String(body.goal || '').trim();
       if (goal.length < 2) return json(res, 400, { error: '目标太短，至少 2 个字' });
+      const clientMessageId =
+        typeof body.clientMessageId === 'string' ? body.clientMessageId.trim() : '';
+      if (clientMessageId.length > 200) {
+        return json(res, 400, { error: 'clientMessageId 不能超过 200 个字符' });
+      }
+      const existing = clientMessageId
+        ? store.findIdempotentTask(clientMessageId, 'task:create')
+        : null;
+      if (existing) {
+        return json(res, 200, {
+          task: taskDetail(existing),
+          idempotentReplay: true,
+        });
+      }
       let task;
       try {
         task = store.createTask({
@@ -579,6 +599,8 @@ const server = http.createServer(async (req, res) => {
           workspace: typeof body.workspace === 'string' ? body.workspace : '',
           isolation: body.isolation === 'worktree' ? 'worktree' : 'direct',
           debate: body.flowMode === 'direct' || body.flowMode === 'debate' ? body.flowMode : null,
+          clientMessageId,
+          clientMessageScope: clientMessageId ? 'task:create' : '',
         });
       } catch (err) {
         return json(res, 400, { error: err.message });

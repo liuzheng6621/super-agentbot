@@ -215,3 +215,70 @@ test('HTTP API rejects agent tokens from operator endpoints and audits the princ
     }
   }
 });
+
+test('HTTP task creation returns the same task for a repeated clientMessageId', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-idempotency-'));
+  const port = await availablePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const child = spawn(process.execPath, ['server/index.mjs'], {
+    cwd: path.resolve('.'),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: '127.0.0.1',
+      AGENTFORGE_DATA_DIR: temp,
+      AGENTFORGE_API_TOKEN: TOKEN,
+      AGENTFORGE_SKIP_TEAM_BOOTSTRAP: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+
+  try {
+    await waitForHealth(baseUrl, child);
+    const headers = {
+      Authorization: `Bearer ${TOKEN}`,
+      'Content-Type': 'application/json',
+    };
+    const body = JSON.stringify({
+      goal: 'idempotent HTTP task',
+      autoRun: false,
+      clientMessageId: 'http-message-1',
+    });
+    const first = await fetch(`${baseUrl}/api/tasks`, { method: 'POST', headers, body });
+    assert.equal(first.status, 201);
+    const firstBody = await first.json();
+    const second = await fetch(`${baseUrl}/api/tasks`, { method: 'POST', headers, body });
+    assert.equal(second.status, 200);
+    const secondBody = await second.json();
+    assert.equal(secondBody.idempotentReplay, true);
+    assert.equal(secondBody.task.id, firstBody.task.id);
+
+    const state = await fetch(`${baseUrl}/api/state`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    }).then((response) => response.json());
+    assert.equal(state.tasks.filter((task) => task.clientMessageId === 'http-message-1').length, 1);
+  } catch (err) {
+    throw new Error(`${err.message}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  } finally {
+    if (child.exitCode === null) child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+      setTimeout(resolve, 2000).unref();
+    });
+    try {
+      fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
+    } catch {
+      /* Windows can hold the data directory briefly. */
+    }
+  }
+});

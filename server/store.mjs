@@ -1091,7 +1091,36 @@ class Store {
     return this.db.tasks.find((t) => t.id === id);
   }
 
-  createTask({ goal, mode = 'auto', workspace = '', debate = null, isolation = 'direct' }) {
+  findIdempotentTask(clientMessageId, scope = '', now = Date.now(), windowMs = 24 * 60 * 60 * 1000) {
+    const key = String(clientMessageId || '').trim();
+    if (!key) return null;
+    const normalizedScope = String(scope || '');
+    const cutoff = now - Math.max(1, Number(windowMs) || 24 * 60 * 60 * 1000);
+    return (
+      this.db.tasks.find(
+        (task) =>
+          task.clientMessageId === key &&
+          String(task.clientMessageScope || '') === normalizedScope &&
+          Number(task.createdAt) >= cutoff,
+      ) || null
+    );
+  }
+
+  createTask({
+    goal,
+    mode = 'auto',
+    workspace = '',
+    debate = null,
+    isolation = 'direct',
+    clientMessageId = '',
+    clientMessageScope = '',
+  }) {
+    const idempotencyKey = String(clientMessageId || '').trim().slice(0, 200);
+    const idempotencyScope = String(clientMessageScope || '').trim().slice(0, 120);
+    if (idempotencyKey) {
+      const existing = this.findIdempotentTask(idempotencyKey, idempotencyScope);
+      if (existing) return existing;
+    }
     const id = randomUUID();
     let root = path.join(WORKSPACE_DIR, id);
     let external = false;
@@ -1122,6 +1151,9 @@ class Store {
       flowMode: debate === 'direct' || debate === 'debate' ? debate : null,
       status: 'idle',
       createdAt: Date.now(),
+      clientMessageId: idempotencyKey || '',
+      clientMessageScope: idempotencyKey ? idempotencyScope : '',
+      clientMessageAt: idempotencyKey ? Date.now() : null,
       endedAt: null,
       queuedAt: null,
       startedAt: null,
@@ -1177,6 +1209,8 @@ class Store {
       worktree: task.worktree ? { ...task.worktree } : null,
       status: task.status,
       createdAt: task.createdAt,
+      clientMessageId: task.clientMessageId || '',
+      clientMessageScope: task.clientMessageScope || '',
       endedAt: task.endedAt,
       queuedAt: task.queuedAt || null,
       startedAt: task.startedAt || null,
