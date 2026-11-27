@@ -17,6 +17,7 @@ const S = {
   loadingMoreTasks: false,
   task: null,
   settings: {},
+  timeoutCatalog: [],
   scheduler: null,
   otlp: null,
   automations: [],
@@ -191,12 +192,29 @@ async function downloadTaskTranscript(format = "markdown") {
 
 /* ---------------- Markdown ---------------- */
 
+function safeMarkdownHref(value) {
+  const href = String(value || "").trim();
+  if (!href) return "";
+  let parsed;
+  try {
+    parsed = new URL(href, "https://agentforge.invalid/");
+  } catch {
+    return "";
+  }
+  return ["http:", "https:", "mailto:"].includes(parsed.protocol) ? href : "";
+}
+
 function inlineMd(s) {
   let t = escapeHtml(s);
   t = t.replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`);
   t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   t = t.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-  t = t.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+  t = t.replace(/\[([^\]]+)\]\(((?:[^()\s]|\([^()\s]*\))+)\)/g, (_, label, href) => {
+    const safeHref = safeMarkdownHref(href);
+    return safeHref
+      ? `<a href="${safeHref}" target="_blank" rel="noopener noreferrer">${label}</a>`
+      : label;
+  });
   return t;
 }
 
@@ -2652,10 +2670,26 @@ function timeoutMillisecondsFromForm(form, prefix = "timeout") {
   const output = {};
   for (const [, key] of TIMEOUT_FIELDS) {
     const fieldName = `${prefix}${key[0].toUpperCase()}${key.slice(1)}`;
-    const value = Number(form.elements.namedItem(fieldName)?.value);
-    if (Number.isFinite(value) && value > 0) output[key] = Math.round(value * 1000);
+    const raw = form.elements.namedItem(fieldName)?.value;
+    const value = Number(raw);
+    if (String(raw ?? "").trim() && Number.isFinite(value) && value > 0) {
+      output[key] = Math.round(value * 1000);
+    }
   }
   return output;
+}
+
+function timeoutPatchFromForm(form) {
+  const patch = {};
+  for (const [, key] of TIMEOUT_FIELDS) {
+    const fieldName = `timeout${key[0].toUpperCase()}${key.slice(1)}`;
+    const raw = form.elements.namedItem(fieldName)?.value;
+    const value = Number(raw);
+    patch[key] = String(raw ?? "").trim() && Number.isFinite(value) && value > 0
+      ? Math.round(value * 1000)
+      : null;
+  }
+  return patch;
 }
 
 function fillTimeoutFields(values = {}, form = null) {
@@ -4912,6 +4946,7 @@ async function boot() {
     S.pagination = state.pagination || null;
     S.overview = state.overview || null;
     S.settings = state.settings || {};
+    S.timeoutCatalog = state.timeoutCatalog || [];
     S.scheduler = state.scheduler || null;
     S.otlp = state.otlp || null;
     S.automations = state.automations || [];
