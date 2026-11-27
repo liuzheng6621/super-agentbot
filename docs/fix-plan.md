@@ -2,7 +2,7 @@
 
 > 核查日期：2026-11-27
 > 核查对象：`E:\SKIl.1\bot` 当前工作树
-> 文档同步基线：`3ec33cd 3.11 extract test entry detection`
+> 文档同步基线：`2aa62d2 P2-11 agent-web acceptance adapter`
 > 本文性质：修复与验收文档；每项状态以“当前状态”和对应提交 / 测试为准
 
 ## 1. 目的与边界
@@ -40,10 +40,10 @@ node --test tests/*.test.mjs
 
 | 原问题 | 当前状态 | 仍需注意 |
 | --- | --- | --- |
-| `node --test tests/` 在 Node 22 上把目录当模块 | 已改为显式 glob，不再传目录 | glob 与探测范围不一致，见 3.1 |
-| 命令路径跨平台归一化 | 新增 `server/command-key.mjs`，主要执行链已接入 | `server/adopt.mjs` 仍保留旧的 `path.basename` |
-| 阶段超时固定 | 新增 `server/timeouts.mjs`，支持设置、Provider、Agent/Profile 分层覆盖 | 前端和真实 CLI 仍需人工冒烟，见 3.8 |
-| 超长产物 spill | 已覆盖事件、消息、工具输出和导出 | 仍需大任务端到端验证 |
+| `node --test tests/` 在 Node 22 上把目录当模块 | 已改为递归枚举测试文件并传真实路径 | `tests/quality.test.mjs` 覆盖 `.spec`、嵌套目录和空目录 |
+| 命令路径跨平台归一化 | `server/adopt.mjs` 已接入共享 `command-key` | 路径、扩展名、引号和带参数命令均有测试 |
+| 阶段超时固定 | 新增 `server/timeouts.mjs`，支持设置、Provider、Agent/Profile 分层覆盖 | 前端字段与真实 CLI 超时冒烟已验收，见 3.8 |
+| 超长产物 spill | 已覆盖事件、消息、工具输出和导出 | 已有自动化回归；大任务端到端压测仍建议保留 |
 | 工作区文件闭环 | 读、写、增、删、移、查、事务与审计均有测试 | 跨进程 CLI 的强制边界仍有限 |
 
 ## 3. 仍需修复的问题
@@ -262,14 +262,14 @@ node --test tests/**/*.test.{js,mjs,cjs}
 
 | 文件 | 行数 |
 | --- | ---: |
-| `public/app.js` | 4665 |
-| `public/styles.css` | 6000 |
-| `server/store.mjs` | 3084 |
-| `server/orchestrator.mjs` | 3199 |
+| `public/app.js` | 4984 |
+| `public/styles.css` | 6093 |
+| `server/store.mjs` | 3164 |
+| `server/orchestrator.mjs` | 3130 |
 | `server/workspace.mjs` | 1118 |
 | `server/tool-gateway.mjs` | 607 |
 
-当前已开始按稳定职责拆，不做一次性重写。`server/test-entry.mjs` 已从 `server/orchestrator.mjs` 提取，保留原导出兼容；后续继续按小步提交：
+当前已开始按稳定职责拆，不做一次性重写。`server/test-entry.mjs`、`server/review-independence.mjs`、`server/review-analysis.mjs` 和 `server/debate-analysis.mjs` 已从 `server/orchestrator.mjs` 提取，保留原导出兼容；后续继续按小步提交：
 
 - `orchestrator`：run controller、step runner、debate、quality gate、review、plan。
 - `store`：持久化、租户、任务查询、租约、迁移。
@@ -571,7 +571,6 @@ node bin/agent-web.mjs verify E:\SKIl.1\bot\tests\fixtures\agent-web\cases `
 以下结论目前没有足够证据，不能写成已修复：
 
 - Linux / macOS 的完整测试矩阵。
-- Windows `.cmd/.bat` 在恶意特殊字符下的真实行为。
 - 文件夹选择按钮在桌面端不可见的具体根因。
 - 截图乱码的根因。
 - Markdown 危险协议的浏览器利用链。

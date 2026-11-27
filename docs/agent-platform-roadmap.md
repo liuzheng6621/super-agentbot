@@ -265,13 +265,13 @@ M3 不包含：自由 shell、Agent 自审批、MCP 写工具、Provider fill-fi
 
 > OpenBot 融合计划的执行拆分与验收标准见 [agentforge-openbot-plan.md](agentforge-openbot-plan.md)；当前缺陷与验收进度见 [fix-plan.md](fix-plan.md)。本表只保留能力边界和尚未实施项，不重复给出另一套优先级。
 
-以下条目来自本轮与 OpenHands / OpenBot 能力对照，M3-M5 已完成项已移出：
+以下条目来自本轮与 OpenHands / OpenBot 能力对照，M3-M5 已完成项和已完成的 agent-web 开发期验收已移出：
 
 | 优先级 | 条目 | 现状 | 建议 |
 | --- | --- | --- | --- |
 | P2 | 完整账号 / RBAC / SSO | 已有 Token 主体、作用域、租户过滤和任务配额 | 需要用户身份、角色权限、SSO 和按用户计费时再做 |
 | P2 | 外部数据库 / 分布式队列 | 当前是 JSON + 文件锁 + 租约，多实例可共享同一数据目录 | SQLite 或队列引入前先做架构决策，保持零依赖承诺清楚 |
-| P2 | agent-web 开发期验收适配器 | 已完成；固定提交 `fe543ea`，10 个核心案例通过，见 `tests/agent-web-compat.test.mjs` | 保持可选测试工具，不复制源码、不进入生产依赖 |
+| 已完成 | agent-web 开发期验收适配器 | 固定提交 `fe543ea`，10 个核心案例通过，见 `tests/agent-web-compat.test.mjs` | 保持可选测试工具，不复制源码、不进入生产依赖 |
 
 ## 后续 backlog
 
