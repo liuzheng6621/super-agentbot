@@ -14,6 +14,7 @@ const MAX_SEARCH_BYTES = 512 * 1024;
 const MAX_SEARCH_RESULTS = 120;
 const TRASH_DIR = '.agentforge/trash';
 const RESERVED_DIRS = new Set(['.git', '.agentforge']);
+const POOL_DIR = '.agentforge/pool';
 const SKIP_DIRS = new Set([
   '.git',
   '.agentforge',
@@ -46,6 +47,135 @@ function fail(message, status = 400) {
 function rootOf(task) {
   if (!task?.workspace) fail('任务没有工作区', 400);
   return path.resolve(task.workspace);
+}
+
+function poolRootOf(task) {
+  const explicit = String(task?.workspacePoolRoot || '').trim();
+  if (explicit) return path.resolve(explicit);
+  // Managed workspaces are task-private and are removed with the task. Reusing
+  // them as a cross-task pool would make the data disappear with that task.
+  if (!task?.external && !task?.worktree) return '';
+  const source = String(task?.sourceWorkspace || '').trim();
+  return source ? path.resolve(source) : '';
+}
+
+function poolPolicy(agent) {
+  const policy = agent?.workspacePolicy || {};
+  if (policy.crossTask !== true) return null;
+  const mode = policy.mode === 'private' ? 'private' : 'shared';
+  const sharedDir = normalizeRelPath(policy.sharedDir || 'Shared');
+  const privateDir = normalizeRelPath(policy.privateDir || 'Agents');
+  for (const rel of [sharedDir, privateDir]) {
+    if (RESERVED_DIRS.has(rel.split('/')[0].toLowerCase())) {
+      fail('工作区池不能使用内部目录', 403);
+    }
+  }
+  const relative = mode === 'private' ? `${privateDir}/${agent.id}` : sharedDir;
+  return { mode, relative, sharedDir, privateDir, agentId: agent.id };
+}
+
+function poolPath(task, agent) {
+  const policy = poolPolicy(agent);
+  if (!policy) return null;
+  const root = poolRootOf(task);
+  if (!root) return null;
+  const abs = path.resolve(root, policy.relative);
+  assertInside(root, abs);
+  if (path.basename(abs) === '.git' || policy.relative.split('/').includes('.git')) {
+    fail('工作区池不能指向 Git 元数据目录', 403);
+  }
+  const metadataDir = path.join(root, POOL_DIR);
+  const leaseFile = path.join(metadataDir, 'leases.json');
+  return {
+    root,
+    abs,
+    relative: policy.relative,
+    mode: policy.mode,
+    agentId: agent.id,
+    leaseFile,
+  };
+}
+
+function ensurePoolPath(task, agent) {
+  const pool = poolPath(task, agent);
+  if (!pool) return null;
+  fs.mkdirSync(pool.abs, { recursive: true });
+  fs.mkdirSync(path.dirname(pool.leaseFile), { recursive: true });
+  let leases = [];
+  try {
+    leases = JSON.parse(fs.readFileSync(pool.leaseFile, 'utf8'));
+    if (!Array.isArray(leases)) leases = [];
+  } catch {
+    leases = [];
+  }
+  const key = `${pool.relative}:${task.id}:${agent.id}`;
+  if (!leases.some((lease) => lease.key === key)) {
+    leases.push({
+      key,
+      taskId: task.id,
+      agentId: agent.id,
+      path: pool.relative,
+      mode: pool.mode,
+      createdAt: Date.now(),
+    });
+    fs.writeFileSync(pool.leaseFile, JSON.stringify(leases.slice(-500), null, 2));
+  }
+  return {
+    ...pool,
+    leaseFile: path.relative(pool.root, pool.leaseFile).replace(/\\/g, '/'),
+  };
+}
+
+function pooledPath(task, rel, agent) {
+  const pool = ensurePoolPath(task, agent);
+  if (!pool) return null;
+  const normalized = normalizeRelPath(rel);
+  const abs = path.resolve(pool.abs, normalized);
+  assertInside(pool.abs, abs);
+  assertNoSymlink(pool.abs, abs);
+  return { ...pool, rel: path.posix.join(pool.relative, normalized), abs };
+}
+
+export function workspacePoolPath(task, relPath, agent = null) {
+  const pooled = pooledPath(task, relPath, agent);
+  if (!pooled) fail('该 Agent 未开启可用的跨任务工作区池', 400);
+  return pooled.abs;
+}
+
+export function workspacePoolInfo(task, agent = null) {
+  const policy = agent ? poolPolicy(agent) : null;
+  if (!policy) {
+    return {
+      enabled: false,
+      reason: '当前 Agent 未开启 crossTask 工作区复用',
+      taskWorkspace: rootOf(task),
+    };
+  }
+  const pool = poolPath(task, agent);
+  if (!pool) {
+    return {
+      enabled: false,
+      reason: '任务没有独立源项目，跨任务工作区池未启用',
+      taskWorkspace: rootOf(task),
+      requested: {
+        mode: policy.mode,
+        agentId: policy.agentId,
+      },
+    };
+  }
+  const leaseFile = path.relative(pool.root, pool.leaseFile).replace(/\\/g, '/');
+  return {
+    enabled: true,
+    root: pool.root,
+    path: pool.abs,
+    relativePath: pool.relative,
+    mode: pool.mode,
+    agentId: policy.agentId,
+    leaseFile,
+    initialized: fs.existsSync(pool.abs),
+    leased: fs.existsSync(pool.leaseFile),
+    cleanup: '任务删除不会删除跨任务池目录；租约保留在 .agentforge/pool/leases.json',
+  };
 }
 
 function normalizeRelPath(value, { allowEmpty = false } = {}) {
@@ -315,8 +445,14 @@ export function workspaceInfo(task) {
   return { ...info };
 }
 
-export function readWorkspaceFile(task, relPath, { maxBytes = MAX_PREVIEW_BYTES } = {}) {
-  const { rel, abs } = safePath(task, relPath, { mustExist: true });
+export function readWorkspaceFile(
+  task,
+  relPath,
+  { maxBytes = MAX_PREVIEW_BYTES, agent = null } = {},
+) {
+  const pooled = agent ? pooledPath(task, relPath, agent) : null;
+  const { rel, abs } = pooled || safePath(task, relPath, { mustExist: true });
+  if (pooled && !fs.existsSync(abs)) fail(`路径不存在：${pooled.rel}`, 404);
   if (isSensitive(rel)) fail('该文件被标记为敏感文件，禁止预览', 403);
   const stat = fs.statSync(abs);
   if (!stat.isFile()) fail('路径不是文件', 404);
@@ -403,8 +539,9 @@ function recordOperation(task, type, data = {}) {
   });
 }
 
-export function writeWorkspaceEntry(task, relPath, content, meta = {}) {
-  const { rel, abs } = safePath(task, relPath);
+export function writeWorkspaceEntry(task, relPath, content, meta = {}, agent = null) {
+  const pooled = agent ? pooledPath(task, relPath, agent) : null;
+  const { rel, abs } = pooled || safePath(task, relPath);
   if (isSensitive(rel)) fail('该文件被标记为敏感文件，禁止平台写入', 403);
   const text = String(content ?? '');
   const bytes = Buffer.byteLength(text);
@@ -433,6 +570,15 @@ export function writeWorkspaceEntry(task, relPath, content, meta = {}) {
   store.addArtifact(task.id, artifact);
   recordOperation(task, 'fs.write', {
     ...meta,
+    ...(pooled
+      ? {
+          workspacePool: {
+            mode: pooled.mode,
+            relativePath: pooled.relative,
+            leaseFile: pooled.leaseFile,
+          },
+        }
+      : {}),
     path: rel,
     bytes,
     beforeVersion,
@@ -441,20 +587,27 @@ export function writeWorkspaceEntry(task, relPath, content, meta = {}) {
   return { path: rel, bytes, version: afterVersion, beforeVersion };
 }
 
-export function makeWorkspaceDir(task, relPath, meta = {}) {
-  const { rel, abs } = safePath(task, relPath);
+export function makeWorkspaceDir(task, relPath, meta = {}, agent = null) {
+  const pooled = agent ? pooledPath(task, relPath, agent) : null;
+  const { rel, abs } = pooled || safePath(task, relPath);
   if (fs.existsSync(abs)) {
     if (!fs.statSync(abs).isDirectory()) fail('同名路径已存在且不是目录', 409);
   } else {
     fs.mkdirSync(abs, { recursive: true });
   }
-  recordOperation(task, 'fs.mkdir', { ...meta, path: rel });
+  recordOperation(task, 'fs.mkdir', {
+    ...meta,
+    ...(pooled ? { workspacePool: { mode: pooled.mode, relativePath: pooled.relative } } : {}),
+    path: rel,
+  });
   return { path: rel };
 }
 
-export function moveWorkspaceEntry(task, fromPath, toPath, meta = {}) {
-  const from = safePath(task, fromPath, { mustExist: true });
-  const to = safePath(task, toPath);
+export function moveWorkspaceEntry(task, fromPath, toPath, meta = {}, agent = null) {
+  const fromPooled = agent ? pooledPath(task, fromPath, agent) : null;
+  const toPooled = agent ? pooledPath(task, toPath, agent) : null;
+  const from = fromPooled || safePath(task, fromPath, { mustExist: true });
+  const to = toPooled || safePath(task, toPath);
   if (from.abs === to.abs) fail('源路径和目标路径相同', 400);
   if (fs.existsSync(to.abs)) fail('目标路径已存在', 409);
   fs.mkdirSync(path.dirname(to.abs), { recursive: true });
@@ -498,8 +651,9 @@ export function moveWorkspaceEntry(task, fromPath, toPath, meta = {}) {
   return { from: from.rel, to: to.rel, directory: isDirectory, moved };
 }
 
-export function deleteWorkspaceEntry(task, relPath, meta = {}) {
-  const target = safePath(task, relPath, { mustExist: true });
+export function deleteWorkspaceEntry(task, relPath, meta = {}, agent = null) {
+  const pooled = agent ? pooledPath(task, relPath, agent) : null;
+  const target = pooled || safePath(task, relPath, { mustExist: true });
   const root = target.root;
   if (target.abs === root) fail('不能删除工作区根目录', 403);
   const isDirectory = fs.statSync(target.abs).isDirectory();

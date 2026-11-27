@@ -38,6 +38,7 @@ import {
 import { executionPolicyCatalog, resolveCliPolicy } from './cli-policy.mjs';
 import {
   WorkspaceError,
+  workspacePoolInfo,
   workspaceInfo,
 } from './workspace.mjs';
 import {
@@ -169,6 +170,7 @@ function stateSettings() {
 
 function taskDetail(task) {
   const summary = store.taskSummary(task);
+  const poolAgent = task.plan?.find((step) => step.agentId && store.getAgent(step.agentId));
   // 老任务当时没记工时，按工序时间补算，别拿墙钟（含排队与重试等待）冒充
   if (!summary.stats?.ms) {
     const real = workMsOf(task);
@@ -191,6 +193,10 @@ function taskDetail(task) {
     sourceWorkspace: task.sourceWorkspace || task.workspace,
     worktree: task.worktree || null,
     workspaceInfo: workspaceInfo(task),
+    workspacePool: workspacePoolInfo(
+      task,
+      poolAgent ? store.getAgent(poolAgent.agentId) : null,
+    ),
     external: !!task.external,
     fileChanges: task.fileChanges || [],
     events: (task.events || []).slice(-160),

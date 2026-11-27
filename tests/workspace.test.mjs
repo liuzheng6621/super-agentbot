@@ -16,6 +16,7 @@ const {
   readWorkspaceFile,
   searchWorkspace,
   workspaceDiff,
+  workspacePoolInfo,
   workspaceSnapshot,
   writeWorkspaceEntry,
 } = await import('../server/workspace.mjs');
@@ -222,4 +223,101 @@ test('git isolation falls back to a shared clone when worktree metadata is unava
   );
   store.removeTask(task.id);
   assert.equal(fs.existsSync(isolatedPath), false);
+});
+
+test('cross-task workspace pools are opt-in, project-rooted, and survive task deletion', () => {
+  const project = path.join(temp, 'shared-project');
+  fs.mkdirSync(project, { recursive: true });
+  const agent = store.addAgent({
+    name: 'Shared Pool Agent',
+    role: 'coder',
+    mode: 'sim',
+    seat: false,
+    workspacePolicy: { mode: 'shared', crossTask: true, sharedDir: 'Shared' },
+  });
+  const first = store.createTask({ goal: 'shared pool first', workspace: project });
+  const second = store.createTask({ goal: 'shared pool second', workspace: project });
+
+  const before = workspacePoolInfo(first, agent);
+  assert.equal(before.enabled, true);
+  assert.equal(before.initialized, false);
+  assert.equal(fs.existsSync(path.join(project, 'Shared')), false);
+
+  writeWorkspaceEntry(first, 'notes.txt', 'from first\n', { agentId: agent.id }, agent);
+  assert.equal(readWorkspaceFile(second, 'notes.txt', { agent }).content, 'from first\n');
+  assert.equal(fs.readFileSync(path.join(project, 'Shared', 'notes.txt'), 'utf8'), 'from first\n');
+
+  const leases = JSON.parse(
+    fs.readFileSync(path.join(project, '.agentforge', 'pool', 'leases.json'), 'utf8'),
+  );
+  assert.ok(leases.some((lease) => lease.taskId === first.id && lease.agentId === agent.id));
+  assert.ok(leases.some((lease) => lease.taskId === second.id && lease.agentId === agent.id));
+
+  assert.equal(store.removeTask(first.id), true);
+  assert.equal(fs.existsSync(path.join(project, 'Shared', 'notes.txt')), true);
+  assert.equal(readWorkspaceFile(second, 'notes.txt', { agent }).content, 'from first\n');
+  store.removeTask(second.id);
+});
+
+test('private workspace pools isolate agents and managed tasks cannot reuse their own directory', () => {
+  const project = path.join(temp, 'private-pool-project');
+  fs.mkdirSync(project, { recursive: true });
+  const left = store.addAgent({
+    name: 'Private Left',
+    role: 'coder',
+    mode: 'sim',
+    seat: false,
+    workspacePolicy: { mode: 'private', crossTask: true, privateDir: 'Agents' },
+  });
+  const right = store.addAgent({
+    name: 'Private Right',
+    role: 'tester',
+    mode: 'sim',
+    seat: false,
+    workspacePolicy: { mode: 'private', crossTask: true, privateDir: 'Agents' },
+  });
+  const task = store.createTask({ goal: 'private pool', workspace: project });
+  writeWorkspaceEntry(task, 'state.txt', 'left\n', { agentId: left.id }, left);
+  writeWorkspaceEntry(task, 'state.txt', 'right\n', { agentId: right.id }, right);
+  assert.equal(readWorkspaceFile(task, 'state.txt', { agent: left }).content, 'left\n');
+  assert.equal(readWorkspaceFile(task, 'state.txt', { agent: right }).content, 'right\n');
+  assert.equal(
+    fs.readFileSync(path.join(project, 'Agents', left.id, 'state.txt'), 'utf8'),
+    'left\n',
+  );
+  assert.equal(
+    fs.readFileSync(path.join(project, 'Agents', right.id, 'state.txt'), 'utf8'),
+    'right\n',
+  );
+  store.removeTask(task.id);
+
+  const managed = store.createTask({ goal: 'managed pool must stay disabled' });
+  const info = workspacePoolInfo(managed, left);
+  assert.equal(info.enabled, false);
+  assert.match(info.reason, /源项目/);
+  assert.equal(fs.existsSync(path.join(managed.workspace, 'Agents')), false);
+  store.removeTask(managed.id);
+});
+
+test('workspace pool policy rejects traversal and reserved directories', () => {
+  const project = path.join(temp, 'pool-policy-project');
+  fs.mkdirSync(project, { recursive: true });
+  const task = store.createTask({ goal: 'pool policy', workspace: project });
+  const traversal = store.addAgent({
+    name: 'Traversal Pool',
+    role: 'coder',
+    mode: 'sim',
+    seat: false,
+    workspacePolicy: { mode: 'shared', crossTask: true, sharedDir: '../outside' },
+  });
+  const reserved = store.addAgent({
+    name: 'Reserved Pool',
+    role: 'coder',
+    mode: 'sim',
+    seat: false,
+    workspacePolicy: { mode: 'shared', crossTask: true, sharedDir: '.agentforge/hidden' },
+  });
+  assert.throws(() => writeWorkspaceEntry(task, 'x.txt', 'x', {}, traversal), /越出工作区/);
+  assert.throws(() => writeWorkspaceEntry(task, 'x.txt', 'x', {}, reserved), /内部目录/);
+  store.removeTask(task.id);
 });

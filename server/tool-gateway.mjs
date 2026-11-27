@@ -8,6 +8,7 @@ import {
   readWorkspaceFile,
   searchWorkspace,
   workspaceDiff,
+  workspacePoolInfo,
   workspaceSnapshot,
   writeWorkspaceEntry,
 } from './workspace.mjs';
@@ -349,8 +350,14 @@ function historyRead(task, args = {}) {
 }
 
 function executeWorkspaceTool(task, toolId, operation, args, meta) {
+  const agent = meta.agentId ? store.getAgent(meta.agentId) : null;
   if (toolId === 'workspace.read') {
-    if (operation === 'tree') return workspaceSnapshot(task);
+    if (operation === 'tree') {
+      return {
+        ...workspaceSnapshot(task),
+        pool: workspacePoolInfo(task, agent),
+      };
+    }
     if (operation === 'files') {
       const snapshot = workspaceSnapshot(task);
       return {
@@ -363,7 +370,9 @@ function executeWorkspaceTool(task, toolId, operation, args, meta) {
         })),
       };
     }
-    if (operation === 'file') return readWorkspaceFile(task, args.path);
+    if (operation === 'file') {
+      return readWorkspaceFile(task, args.path, { agent });
+    }
     if (operation === 'events') {
       const limit = Math.max(1, Math.min(800, Number(args.limit) || 160));
       return { events: (task.events || []).slice(-limit) };
@@ -374,15 +383,15 @@ function executeWorkspaceTool(task, toolId, operation, args, meta) {
   if (toolId === 'workspace.search') return searchWorkspace(task, args.query);
   if (toolId === 'workspace.write') {
     if (operation === 'write') {
-      return writeWorkspaceEntry(task, args.path, args.content, meta);
+      return writeWorkspaceEntry(task, args.path, args.content, meta, agent);
     }
-    return makeWorkspaceDir(task, args.path, meta);
+    return makeWorkspaceDir(task, args.path, meta, agent);
   }
   if (toolId === 'workspace.move') {
-    return moveWorkspaceEntry(task, args.from, args.to, meta);
+    return moveWorkspaceEntry(task, args.from, args.to, meta, agent);
   }
   if (toolId === 'workspace.delete') {
-    return deleteWorkspaceEntry(task, args.path, meta);
+    return deleteWorkspaceEntry(task, args.path, meta, agent);
   }
   if (toolId === 'history_search') return historySearch(task, args);
   if (toolId === 'history_read') return historyRead(task, args);

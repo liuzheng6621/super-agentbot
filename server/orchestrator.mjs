@@ -6,6 +6,7 @@ import * as sim from './sim.mjs';
 import { streamText, spawnCli, sleep, classifyCliExit, describeCliResult } from './adapters.mjs';
 import { runDag, throwIfAborted } from './dag.mjs';
 import { versionOf, spillText } from './fs.mjs';
+import { workspacePoolPath } from './workspace.mjs';
 import { estimateTokens } from './tokens.mjs';
 import { toolGateway } from './tool-gateway.mjs';
 import { providerRoute, withProviderProfile } from './providers.mjs';
@@ -155,14 +156,18 @@ export async function writeWorkspaceFile(task, relPath, content, meta = {}) {
     stepId: meta.stepId || '',
     source: 'orchestrator',
   });
-  const abs = path.join(task.workspace, invocation.result.path);
+  const executionAgent = meta.agentId ? store.getAgent(meta.agentId) : null;
+  const abs = executionAgent?.workspacePolicy?.crossTask
+    ? workspacePoolPath(task, relPath, executionAgent)
+    : path.join(task.workspace, invocation.result.path);
   const stat = fs.statSync(abs, { bigint: true });
   const bytes = Buffer.byteLength(content);
   // 自己写的文件立刻记进本任务的目录快照，下一步就不用再全量扫一遍
   const cached = fileIndex.get(task.id);
   if (cached) {
-    cached.set(relPath, {
-      path: relPath,
+    const indexedPath = invocation.result.path;
+    cached.set(indexedPath, {
+      path: indexedPath,
       bytes,
       mtimeMs: Number(stat.mtimeMs),
       mtimeNs: stat.mtimeNs.toString(),
