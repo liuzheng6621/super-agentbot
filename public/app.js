@@ -48,6 +48,8 @@ const S = {
   pendingImage: null,
   agentPolicyPreviewTimer: null,
   agentPolicyPreviewSeq: 0,
+  compactions: [],
+  compactionReplay: null,
 };
 
 /* ---------------- 工具 ---------------- */
@@ -1547,6 +1549,7 @@ function workspaceConsoleContextHtml() {
   const budget = context.budget || {};
   const state = context.contextState || {};
   const compaction = state.compaction;
+  const quality = compaction?.quality;
   return `
     <div class="wc-context-card">
       <b>GOAL / 当前目标</b>
@@ -1556,7 +1559,7 @@ function workspaceConsoleContextHtml() {
       <b>BUDGET / 注入预算</b>
       <p>消息 ${messages.length}/${budget.messagesAvailable ?? messages.length} · 文件 ${files.length}/${budget.filesAvailable ?? files.length} · 估算 ${Number(state.estimatedTokens || 0).toLocaleString()} tok</p>
       <p>${state.contextWindow == null ? "窗口未知" : `窗口 ${Number(state.contextWindow).toLocaleString()} tok`} · ${state.autoCompactAt == null ? "自动压缩阈值未知" : `阈值 ${Number(state.autoCompactAt).toLocaleString()} tok`}</p>
-      <p>${compaction ? `已压缩 ${compaction.sourceMessages} 条早先消息 · 原文保留` : "尚未压缩"}</p>
+      <p>${compaction ? `已压缩 ${compaction.sourceMessages} 条早先消息 · 历史 ${state.compactions || 0} 次 · ${compaction.auto ? "自动" : "手动"} · 质量 ${quality ? `${quality.score} ${quality.label}` : "未评分"}` : "尚未压缩"}</p>
     </div>
     <div class="wc-context-card">
       <b>RECENT / 最近协作</b>
@@ -2485,6 +2488,9 @@ function renderContext() {
 
   if (!context) {
     if (hint) hint.textContent = "选择任务后，这里会显示当前上下文。";
+    $$("#pane-context [data-export-transcript], #pane-context [data-compact-context], #pane-context [data-compaction-history]").forEach((button) => {
+      button.disabled = true;
+    });
     wrap.innerHTML = "";
     return;
   }
@@ -2494,6 +2500,11 @@ function renderContext() {
   const skillActivations = t?.skillActivations || [];
   const state = context.contextState || {};
   const compaction = state.compaction;
+  const compactionQuality = compaction?.quality;
+  const historyButton = $("#pane-context [data-compaction-history]");
+  const compactButton = $("#pane-context [data-compact-context]");
+  if (historyButton) historyButton.disabled = !t?.id;
+  if (compactButton) compactButton.disabled = !t?.id;
   if (hint) {
     hint.textContent = `工作区 ${shortPath(context.workspace || "")} · ${messages.length} 条近期对话 · ${files.length} 个已知文件`;
     hint.title = context.workspace || "";
@@ -2510,7 +2521,8 @@ function renderContext() {
       <div class="ctx-label">RECENT</div>
       ${
         compaction
-          ? `<div class="ctx-message"><b>早先摘要</b><span>${escapeHtml(compaction.summary || "")}</span></div>`
+          ? `<div class="ctx-message"><b>早先摘要</b><span>${escapeHtml(compaction.summary || "")}</span></div>
+             <p class="hint">质量 ${compactionQuality ? `${compactionQuality.score}/100 · ${compactionQuality.label}` : "未评分"} · 来源 ${compaction.sourceMessages} 条 · ${compaction.auto ? "自动压缩" : "手动压缩"} · 历史 ${state.compactions || 0} 次</p>`
           : ""
       }
       ${
@@ -2524,6 +2536,38 @@ function renderContext() {
           : '<p class="hint">暂无近期协作摘要。</p>'
       }
     </div>
+    ${
+      S.compactions.length
+        ? `<div class="ctx-block">
+            <div class="ctx-label">COMPACTIONS</div>
+            ${S.compactions
+              .slice(-5)
+              .reverse()
+              .map(
+                (item) =>
+                  `<div class="ctx-message ctx-message-action"><b>${item.auto ? "自动" : "手动"}</b><span>${escapeHtml(
+                    `${item.quality?.score ?? "—"} 分 · ${item.sourceMessages || 0} 条 · ${new Date(item.generatedAt || 0).toLocaleString()}`,
+                  )}</span><button type="button" class="btn btn-ghost sm" data-compaction-replay="${escapeHtml(item.id)}">回放</button></div>`,
+              )
+              .join("")}
+          </div>`
+        : ""
+    }
+    ${
+      S.compactionReplay
+        ? `<div class="ctx-block">
+            <div class="ctx-label">REPLAY</div>
+            <p class="hint">来源 ${S.compactionReplay.messages?.length || 0} 条，原文保留 ${S.compactionReplay.originalPreserved ? "是" : "否"}</p>
+            ${(S.compactionReplay.messages || [])
+              .slice(0, 6)
+              .map(
+                (message) =>
+                  `<div class="ctx-message"><b>${escapeHtml(message.name || message.role || "AI")}</b><span>${escapeHtml(String(message.text || "").slice(0, 180))}</span></div>`,
+              )
+              .join("")}
+          </div>`
+        : ""
+    }
     <div class="ctx-block">
       <div class="ctx-label">FILES</div>
       ${
@@ -3079,6 +3123,8 @@ async function selectTask(id) {
   try {
     const { task } = await api(`/api/tasks/${id}`);
     S.task = task;
+    S.compactions = [];
+    S.compactionReplay = null;
     S.atBottom = true;
     S.openStep = "";
     S.workspace = null;
@@ -3097,6 +3143,54 @@ async function selectTask(id) {
     loadWorkspace();
   } catch (err) {
     toast(`加载任务失败：${err.message}`, "err");
+  }
+}
+
+async function loadCompactions() {
+  const taskId = S.task?.id;
+  if (!taskId) return;
+  try {
+    const data = await api(`/api/tasks/${taskId}/context/compactions`);
+    if (!S.task || S.task.id !== taskId) return;
+    S.compactions = data.compactions || [];
+    renderContext();
+  } catch (err) {
+    toast(`加载压缩历史失败：${err.message}`, "err");
+  }
+}
+
+async function compactCurrentContext() {
+  const taskId = S.task?.id;
+  if (!taskId) return;
+  const button = $("#pane-context [data-compact-context]");
+  if (button) button.disabled = true;
+  try {
+    const result = await api(`/api/tasks/${taskId}/context/compact`, {
+      method: "POST",
+      body: { force: true },
+    });
+    await syncCurrentTask();
+    await loadCompactions();
+    toast(result.compacted ? "上下文已压缩，原文仍保留" : "当前历史无需压缩", result.compacted ? "ok" : "");
+  } catch (err) {
+    toast(`压缩失败：${err.message}`, "err");
+  } finally {
+    if (button) button.disabled = !S.task?.id;
+  }
+}
+
+async function replayCompaction(compactionId) {
+  const taskId = S.task?.id;
+  if (!taskId || !compactionId) return;
+  try {
+    const replay = await api(
+      `/api/tasks/${taskId}/context/compactions/${encodeURIComponent(compactionId)}/replay`,
+    );
+    if (!S.task || S.task.id !== taskId) return;
+    S.compactionReplay = replay;
+    renderContext();
+  } catch (err) {
+    toast(`回放失败：${err.message}`, "err");
   }
 }
 
@@ -3344,6 +3438,19 @@ function handleEvent(ev) {
     case "settings.changed": {
       S.settings = ev.settings || {};
       renderFlowModeControls();
+      break;
+    }
+    case "task.context": {
+      if (cur && cur.id === ev.taskId) {
+        cur.context = {
+          ...(cur.context || {}),
+          contextState: {
+            ...(cur.context?.contextState || {}),
+            ...(ev.contextState || {}),
+          },
+        };
+        renderContext();
+      }
       break;
     }
     case "automations.changed": {
@@ -4263,6 +4370,21 @@ function bind() {
   $("#agentForm").elements.command.addEventListener("input", renderAgentPolicyPreview);
   $("#agentTools").addEventListener("change", renderAgentPolicyPreview);
   $("#pane-context").addEventListener("click", (e) => {
+    const compactButton = e.target.closest("[data-compact-context]");
+    if (compactButton && !compactButton.disabled) {
+      compactCurrentContext();
+      return;
+    }
+    const historyButton = e.target.closest("[data-compaction-history]");
+    if (historyButton && !historyButton.disabled) {
+      loadCompactions();
+      return;
+    }
+    const replayButton = e.target.closest("[data-compaction-replay]");
+    if (replayButton) {
+      replayCompaction(replayButton.dataset.compactionReplay);
+      return;
+    }
     const button = e.target.closest("[data-export-transcript]");
     if (button && !button.disabled) downloadTaskTranscript(button.dataset.exportTranscript);
   });

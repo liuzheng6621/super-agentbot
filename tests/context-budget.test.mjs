@@ -15,6 +15,8 @@ const {
   buildPrompt,
   buildContextPack,
   compactTaskContext,
+  listTaskCompactions,
+  replayTaskCompaction,
 } = await import('../server/orchestrator.mjs');
 const { estimateTokens } = await import('../server/tokens.mjs');
 const { writeFileAtomic, versionOf, spillText, readSpillText, spillValue } = await import('../server/fs.mjs');
@@ -213,4 +215,97 @@ test('contextStates 区分未知窗口，压缩保留原文且摘要可审计', 
     store.getTask(task.id).events.some((event) => event.type === 'context.compacted'),
     '压缩必须留下审计事件',
   );
+});
+
+test('压缩历史记录质量、来源范围并可回放原始消息', () => {
+  const workspaceDir = path.join(temp, 'context-history-ws');
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const task = store.createTask({
+    goal: '验证压缩历史与回放',
+    workspace: workspaceDir,
+  });
+  for (let index = 0; index < 16; index += 1) {
+    store.addMessage(task.id, {
+      agentId: 'system',
+      name: index % 3 === 0 ? '编排器' : index % 3 === 1 ? '实现' : '测试',
+      role: index % 3 === 0 ? 'system' : index % 3 === 1 ? 'coder' : 'tester',
+      title: 'MEM',
+      kind: 'text',
+      done: true,
+      text: `第 ${index + 1} 条压缩来源：${'内容'.repeat(30)}`,
+    });
+  }
+
+  const result = compactTaskContext(task.id, { maxMessages: 4 });
+  assert.equal(result.compacted, true);
+  const state = store.getTask(task.id).contextState;
+  assert.equal(state.compactions.length, 1);
+  assert.equal(state.compactions[0].id, state.compaction.id);
+  assert.equal(state.compaction.auto, false);
+  assert.ok(state.compaction.quality.score >= 0 && state.compaction.quality.score <= 100);
+  assert.ok(['good', 'fair', 'weak'].includes(state.compaction.quality.label));
+  assert.ok(state.compaction.quality.factors.length >= 3);
+  assert.ok(state.compaction.sections.length >= 2);
+  assert.equal(
+    state.compaction.sourceMessageIds.length,
+    state.compaction.sourceMessages,
+  );
+  assert.ok(state.compaction.sourceRange.fromIndex >= 0);
+  assert.ok(state.compaction.sourceRange.toIndex >= state.compaction.sourceRange.fromIndex);
+  assert.equal(
+    state.compaction.sourceRange.fromMessageId,
+    state.compaction.sourceMessageIds[0],
+  );
+  assert.equal(
+    state.compaction.sourceRange.toMessageId,
+    state.compaction.sourceMessageIds.at(-1),
+  );
+
+  const history = listTaskCompactions(task.id);
+  assert.equal(history.length, 1);
+  const replay = replayTaskCompaction(task.id, state.compaction.id);
+  assert.equal(replay.compaction.id, state.compaction.id);
+  assert.deepEqual(
+    replay.messages.map((message) => message.id),
+    state.compaction.sourceMessageIds,
+  );
+  assert.equal(replay.originalPreserved, true);
+});
+
+test('上下文压力达到阈值时自动压缩，且不会重复压缩同一范围', () => {
+  const workspaceDir = path.join(temp, 'context-auto-ws');
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  const task = store.createTask({
+    goal: '验证自动压缩',
+    workspace: workspaceDir,
+  });
+  for (let index = 0; index < 20; index += 1) {
+    store.addMessage(task.id, {
+      agentId: 'system',
+      name: index % 2 ? '测试' : '实现',
+      role: index % 2 ? 'tester' : 'coder',
+      title: 'MEM',
+      kind: 'text',
+      done: true,
+      text: `自动压缩样本 ${index + 1}：${'细节'.repeat(50)}`,
+    });
+  }
+  store.updateContextState(task.id, {
+    contextWindow: 200,
+    autoCompactAt: 1,
+  });
+
+  const first = buildContextPack(store.getTask(task.id), { files: [] });
+  assert.equal(first.contextState.compaction.auto, true);
+  assert.equal(first.contextState.compactions, 1);
+  assert.equal(first.contextState.autoCompaction.status, 'compacted');
+
+  const second = buildContextPack(store.getTask(task.id), { files: [] });
+  assert.equal(second.contextState.compactions, 1, '同一来源范围不能被自动重复压缩');
+  assert.ok(
+    ['already-compacted', 'not-enough-history'].includes(
+      second.contextState.autoCompaction.status,
+    ),
+  );
+  assert.equal(store.getTask(task.id).messages.length, 20, '自动压缩不得删除原文');
 });

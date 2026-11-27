@@ -21,6 +21,8 @@ import {
   chat,
   buildContextPack,
   compactTaskContext,
+  listTaskCompactions,
+  replayTaskCompaction,
   isRunning,
   replanTask,
   workMsOf,
@@ -187,6 +189,12 @@ function principalTenant(principal) {
 function requestedTenant(principal, value) {
   if (principal?.kind !== 'owner') return principalTenant(principal) || 'default';
   return String(value || 'default').trim().slice(0, 80) || 'default';
+}
+
+function numericSetting(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
 }
 
 function visibleTasks(principal) {
@@ -1001,6 +1009,47 @@ const server = http.createServer(async (req, res) => {
         force: body.force === true,
       });
       return json(res, 200, result);
+    }
+
+    const contextCompactionsMatch = pathname.match(
+      /^\/api\/tasks\/([\w-]+)\/context\/compactions$/,
+    );
+    if (contextCompactionsMatch && method === 'GET') {
+      const task = store.getTask(contextCompactionsMatch[1]);
+      if (!task) return json(res, 404, { error: '任务不存在' });
+      return json(res, 200, { compactions: listTaskCompactions(task.id) });
+    }
+
+    const contextReplayMatch = pathname.match(
+      /^\/api\/tasks\/([\w-]+)\/context\/compactions\/([\w-]+)\/replay$/,
+    );
+    if (contextReplayMatch && method === 'GET') {
+      const replay = replayTaskCompaction(contextReplayMatch[1], contextReplayMatch[2]);
+      if (!replay) return json(res, 404, { error: '压缩记录不存在' });
+      return json(res, 200, replay);
+    }
+
+    const contextStateMatch = pathname.match(/^\/api\/tasks\/([\w-]+)\/context$/);
+    if (contextStateMatch && method === 'PATCH') {
+      const task = store.getTask(contextStateMatch[1]);
+      if (!task) return json(res, 404, { error: '任务不存在' });
+      const body = await readBody(req);
+      const patch = {};
+      if (Object.prototype.hasOwnProperty.call(body, 'contextWindow')) {
+        patch.contextWindow = numericSetting(body.contextWindow);
+        if (body.contextWindow !== null && body.contextWindow !== '' && patch.contextWindow === null) {
+          return json(res, 400, { error: 'contextWindow 必须是正数或 null' });
+        }
+      }
+      if (Object.prototype.hasOwnProperty.call(body, 'autoCompactAt')) {
+        patch.autoCompactAt = numericSetting(body.autoCompactAt);
+        if (body.autoCompactAt !== null && body.autoCompactAt !== '' && patch.autoCompactAt === null) {
+          return json(res, 400, { error: 'autoCompactAt 必须是正数或 null' });
+        }
+      }
+      return json(res, 200, {
+        contextState: store.updateContextState(task.id, patch),
+      });
     }
 
     /* ---- 目录选择器（本机服务，供「选文件夹开工」用） ---- */

@@ -2054,6 +2054,16 @@ kbd {
   -webkit-box-orient: vertical;
 }
 
+.ctx-message-action {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.ctx-message-action .btn {
+  min-height: 26px;
+  padding: 3px 8px;
+}
+
 .ctx-skill {
   display: grid;
   grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);

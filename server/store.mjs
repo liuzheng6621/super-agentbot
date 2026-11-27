@@ -890,6 +890,8 @@ class Store {
             contextWindow: null,
             autoCompactAt: null,
             compaction: null,
+            compactions: [],
+            autoCompaction: null,
             ...(t.contextState || {}),
           };
           const lease = this.taskLease(t.id, { renew: false });
@@ -2064,6 +2066,8 @@ class Store {
         contextWindow: null,
         autoCompactAt: null,
         compaction: null,
+        compactions: [],
+        autoCompaction: null,
       },
       workspace: root,
       sourceWorkspace: worktree?.source || root,
@@ -2407,6 +2411,8 @@ class Store {
       contextWindow: null,
       autoCompactAt: null,
       compaction: null,
+      compactions: [],
+      autoCompaction: null,
       ...(task.contextState || {}),
       ...patch,
       updatedAt: Date.now(),
