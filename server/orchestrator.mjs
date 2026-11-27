@@ -52,18 +52,6 @@ export function agentRouteForExecution(agent) {
   return route.map((provider) => withProviderProfile(agent, provider));
 }
 
-/**
- * 真实 CLI 的耗时由模型推理、工具调用和网关排队共同决定。
- * 讨论阶段过去固定 150 秒，长提案交叉质询时会稳定触发假超时。
- */
-export const CLI_TIMEOUTS = Object.freeze({
-  proposal: 360000,
-  critique: 360000,
-  decision: 240000,
-  step: 900000,
-  qualityGate: 300000,
-});
-
 /** Resolve phase budgets through settings → Provider → Agent/Profile. */
 export function timeoutsForAgent(agent) {
   const provider = agent?.provider || (agent ? store.providerForAgent(agent) : null);
@@ -2073,7 +2061,7 @@ async function mapPool(items, limit, fn) {
   return results;
 }
 
-async function runProposal(task, agent, { id, index, speed, signal, timeout = CLI_TIMEOUTS.proposal }) {
+async function runProposal(task, agent, { id, index, speed, signal, timeout = timeoutFor(agent, 'proposal') }) {
   const angle = sim.angleByIndex(index);
   store.addProposal(task.id, {
     id,
@@ -2152,7 +2140,7 @@ async function runProposal(task, agent, { id, index, speed, signal, timeout = CL
   }
 }
 
-async function runCritique(task, agent, { index, proposals, speed, signal, timeout = CLI_TIMEOUTS.critique }) {
+async function runCritique(task, agent, { index, proposals, speed, signal, timeout = timeoutFor(agent, 'critique') }) {
   const own = proposals.find((p) => p.agent.id === agent.id);
   const others = proposals.filter((p) => p.agent.id !== agent.id);
   if (!others.length) {
@@ -2801,6 +2789,21 @@ export async function runQualityGate(task, step, signal) {
     round,
   };
   store.updateTask(current.id, { quality });
+  store.addTaskEvent(current.id, {
+    type: status === 'timeout' ? 'quality.gate.timeout' : `quality.gate.${status}`,
+    stepId: step?.id || '',
+    data: {
+      status,
+      command,
+      source: detected.source,
+      code: quality.code,
+      timedOut: quality.timedOut,
+      elapsed: quality.elapsed,
+      timeout: quality.timeout,
+      stdout: quality.stdout,
+      stderr: quality.stderr,
+    },
+  });
 
   const msg = store.addMessage(current.id, {
     agentId: 'system',

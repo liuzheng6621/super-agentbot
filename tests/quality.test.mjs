@@ -265,6 +265,57 @@ test('只有 CLI 成员时也会执行他们产出的测试文件，并记录真
   }
 });
 
+test('质量门真实超时会终止测试进程并留下可审计的失败记录', async () => {
+  const signal = new AbortController().signal;
+  const ws = workspace({
+    'package.json': JSON.stringify({
+      scripts: { test: 'node -e "console.log(\'GATE_TIMEOUT_MARKER\'); setTimeout(() => {}, 30000)"' },
+    }),
+  });
+  const task = store.createTask({ goal: '质量门超时样本', workspace: ws.workspace });
+  const coder = store.findAgentByRole('coder');
+  const tester = store.findAgentByRole('tester');
+  const before = { timeouts: { ...(coder.timeouts || {}) } };
+  try {
+    store.updateAgent(coder.id, { timeouts: { qualityGate: 30_000 } });
+    // 质量门优先取最近完成的实现者；显式构造这道工序，避免继承其他测试留下的计划。
+    store.setPlan(task.id, [
+      { id: 'implement', title: '实现', role: 'coder', agentId: coder.id },
+      { id: 'test-design', title: '测试', role: 'tester', agentId: tester?.id || coder.id },
+    ]);
+    store.updateStep(task.id, 'implement', { status: 'done' });
+    store.updateStep(task.id, 'test-design', { status: 'done' });
+    const quality = await runQualityGate(store.getTask(task.id), { round: 0 }, signal);
+    assert.equal(quality.status, 'timeout', '超时必须显式落库，不能当作通过');
+    assert.equal(quality.timedOut, true);
+    assert.equal(quality.code, -3);
+    assert.equal(quality.timeout, 30_000);
+    assert.match(quality.stdout, /GATE_TIMEOUT_MARKER/);
+    assert.match(quality.stderr, /\[超时\]/);
+    assert.ok(quality.elapsed >= 30_000, '必须记录真实耗时');
+    assert.equal(qualityGateAllowsDelivery(quality), false, '超时不得放行交付');
+
+    const saved = store.getTask(task.id);
+    assert.equal(saved.quality.status, 'timeout');
+    assert.equal(saved.quality.command, quality.command);
+    assert.ok(
+      saved.messages.some((message) => message.kind === 'quality' && /超时/.test(message.text)),
+      '质量门消息必须写明超时',
+    );
+    assert.ok(
+      saved.events.some(
+        (event) =>
+          event.type === 'quality.gate.timeout' &&
+          event.data?.code === -3 &&
+          event.data?.elapsed >= 30_000,
+      ),
+      '超时必须写入任务事件，供状态接口和导出消费',
+    );
+  } finally {
+    store.updateAgent(coder.id, { timeouts: before.timeouts });
+  }
+});
+
 test('workMsOf 只累加真实工序耗时，不拿墙钟冒充', () => {
   assert.equal(workMsOf(undefined), 0);
   assert.equal(workMsOf({ plan: [] }), 0);

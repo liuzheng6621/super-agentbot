@@ -8,6 +8,7 @@ const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-debate-'));
 process.env.AGENTFORGE_DATA_DIR = temp;
 
 const { store } = await import('../server/store.mjs');
+const { defaultTimeouts } = await import('../server/timeouts.mjs');
 const {
   selectDebateRoster,
   parseProposalScores,
@@ -21,7 +22,6 @@ const {
   isCompleteSummaryText,
   isCompleteDecisionText,
   shouldRetryCliResult,
-  CLI_TIMEOUTS,
   chat,
 } = await import('../server/orchestrator.mjs');
 const { classifyCliExit, normalizeCliArgs, spawnCli } = await import('../server/adapters.mjs');
@@ -194,11 +194,12 @@ test('CLI 故障分类和可重试判断能区分 Windows 初始化失败与业�
 });
 
 test('讨论超时预算覆盖真实 CLI 的长推理，不再沿用 150 秒假超时', () => {
-  assert.ok(CLI_TIMEOUTS.proposal >= 300000);
-  assert.ok(CLI_TIMEOUTS.critique >= 300000);
-  assert.ok(CLI_TIMEOUTS.decision >= 180000);
-  assert.ok(CLI_TIMEOUTS.step >= 600000);
-  assert.ok(CLI_TIMEOUTS.qualityGate >= 180000);
+  const defaults = defaultTimeouts();
+  assert.ok(defaults.proposal >= 300000);
+  assert.ok(defaults.critique >= 300000);
+  assert.ok(defaults.decision >= 180000);
+  assert.ok(defaults.step >= 600000);
+  assert.ok(defaults.qualityGate >= 180000);
 });
 
 test('Gemini 自动切换 headless，Trae 自动限制步数，其他 CLI 参数保持不变', () => {

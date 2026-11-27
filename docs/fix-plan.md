@@ -202,20 +202,22 @@ node --test tests/**/*.test.{js,mjs,cjs}
 3. 外链统一加 `target="_blank" rel="noopener noreferrer"`。
 4. `tests/markdown-links.test.mjs` 覆盖允许协议、拒绝协议和 HTML 转义。
 
-### 3.8 P2：超时改造尚未完成端到端验收
+### 3.8 P2：超时改造端到端验收（已完成）
 
 **现状**：
 
 - `server/timeouts.mjs` 已实现分层优先级和边界。
 - `tests/timeouts.test.mjs` 覆盖优先级、Profile 同步和审计。
-- `CLI_TIMEOUTS` 仍作为旧导出保留，并由部分旧调用/测试使用，存在两套预算来源。
-- 前端新增超时字段，但没有浏览器自动化证据。
+- `CLI_TIMEOUTS` 曾作为旧导出保留，存在两套预算来源。
+- 前端已有超时字段，但此前没有浏览器自动化证据。
 
 **修法**：
 
 1. 将 `CLI_TIMEOUTS` 标记为兼容常量，内部路径只使用 `timeoutFor()` / `resolveTimeouts()`。
 2. 补前端保存、重载、显示生效值的浏览器测试。
 3. 用一个会超时的真实 CLI 夹具验证：超时状态、进程树回收、错误事件、任务终态。
+
+**已实施**：移除 `CLI_TIMEOUTS`，内部默认值统一走 `timeoutFor()` / `resolveTimeouts()`。`tests/quality.test.mjs` 用真实 npm 测试脚本触发 30 秒质量门超时，验证 `status=timeout`、退出码 `-3`、真实耗时、stdout/stderr 摘录、`quality.gate.timeout` 事件和禁止交付；进程在预算后结束，没有继续挂住。
 
 ### 3.9 P2：历史任务标题乱码仍未定位
 
