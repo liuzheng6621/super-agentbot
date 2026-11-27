@@ -587,3 +587,15 @@ node bin/agent-web.mjs verify E:\SKIl.1\bot\tests\fixtures\agent-web\cases `
 - 多工作区高并发下的磁盘和 Provider 压测。
 
 这些项目应在后续提交中逐项变成可重复测试，而不是只更新文字结论。
+
+## 11. 旧账收口与待决策
+
+2026-11-27 再次对照计划、README 与测试后，剩余项按性质分为三类：
+
+| 类别 | 条目 | 当前结论 | 下一步 |
+| --- | --- | --- | --- |
+| 需要产品决策 | Provider 级费用预算 | 用量账本已有真实 `tokensIn / tokensOut` 和未知成本 `null`，但没有价格表、币种、窗口和超额动作；不能把 token 数擅自换算成费用 | 先确定价格来源（Profile 单价 / 环境变量价格表）、预算周期（任务 / 日 / 月）和超额策略（排队 / 拒绝 / 仅告警），再补最小失败测试 |
+| 需要真实环境验收 | `claude`、`codex`、`opencode`、`dsh`、`kimi`、`trae-cli`、`crush`、`aider`、`gemini`、`qwen` | 自动测试已覆盖调用契约、Provider 注入、Windows `.cmd`、超时、进程回收与失败回退；当前机器不能据此声称全部安装并授权 | 逐项记录安装版本、Provider、授权状态和一次真实交付；未满足项保持“未验收” |
+| 需要单独架构评审 | 内核级 CLI 代理、完整账号 / RBAC / SSO、外部数据库或分布式队列、监听与权限边界 | 当前边界已写入 README；改动会触及安全模型或运行时架构，不属于旧缺陷的最小修复 | 单独立项、威胁建模和迁移方案；在此之前不扩大承诺 |
+
+团队体检的 Provider 注入已收口：已绑定 Agent 的 Profile 会进入真实体检子进程，参数模板、模型、Base URL 和密钥环境引用均由 `withProviderProfile()` 解析；Windows `.cmd` 与 stdin 路径由 `tests/team.test.mjs` 覆盖。该结论不替代外部 CLI 的安装与授权验收。
