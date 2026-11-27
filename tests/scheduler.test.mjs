@@ -85,6 +85,22 @@ test('provider profile persists, resolves environment and migrates agent binding
   assert.equal(resolved.cli.env.AGENTFORGE_MODEL, 'test-model');
   assert.equal(resolved.cli.env.RESOLVED_FROM_ENV, 'not-a-real-secret');
   assert.deepEqual(resolved.cli.args, ['exec', '-c', 'model=test-model', '{{prompt}}']);
+  store.updateAgent(agent.id, { model: 'agent-override-model' });
+  const overridden = withProviderProfile(
+    store.getAgent(agent.id),
+    store.getProvider('local-test'),
+    { AGENTFORGE_TEST_KEY: 'not-a-real-secret' },
+  );
+  assert.equal(overridden.provider.model, 'agent-override-model');
+  assert.equal(overridden.cli.env.AGENTFORGE_MODEL, 'agent-override-model');
+  assert.equal(overridden.cli.env.OPENAI_MODEL, 'agent-override-model');
+  assert.deepEqual(overridden.cli.args, [
+    'exec',
+    '-c',
+    'model=agent-override-model',
+    '{{prompt}}',
+  ]);
+  store.updateAgent(agent.id, { model: '' });
   const redacted = redactProvider(store.getProvider('local-test'));
   assert.equal(redacted.cliBindings.codex.env.OPENAI_API_KEY, '{{apiKey}}');
   assert.equal(redacted.cliBindings.codex.env.EXTRA_SECRET, '••••••');
@@ -267,4 +283,43 @@ test('agent lease is exclusive across tasks and wakes the waiter on release', as
   await Promise.all([first, second]);
   assert.equal(secondEntered, true);
   assert.equal(schedulerSnapshot().agentLeases.length, 0);
+});
+
+test('agent maxConcurrency allows two tasks and queues the third', async () => {
+  resetScheduler();
+  const agent = store.agents[0];
+  store.updateAgent(agent.id, { maxConcurrency: 2 });
+  const tasks = [1, 2, 3].map((index) =>
+    store.createTask({ goal: `lease limit ${index}` }),
+  );
+  let release;
+  const gate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const entered = [];
+
+  const first = withAgentLease(tasks[0].id, agent.id, null, async () => {
+    entered.push(tasks[0].id);
+    await gate;
+  });
+  const second = withAgentLease(tasks[1].id, agent.id, null, async () => {
+    entered.push(tasks[1].id);
+    await gate;
+  });
+  const third = withAgentLease(tasks[2].id, agent.id, null, async () => {
+    entered.push(tasks[2].id);
+  });
+
+  await wait(20);
+  assert.deepEqual(entered.sort(), [tasks[0].id, tasks[1].id].sort());
+  assert.match(store.getTask(tasks[2].id).waitingReason, /2\/2/);
+  const lease = schedulerSnapshot().agentLeases.find((item) => item.agentId === agent.id);
+  assert.equal(lease.limit, 2);
+  assert.equal(lease.total, 2);
+
+  release();
+  await Promise.all([first, second, third]);
+  assert.ok(entered.includes(tasks[2].id));
+  assert.equal(schedulerSnapshot().agentLeases.length, 0);
+  store.updateAgent(agent.id, { maxConcurrency: 1 });
 });

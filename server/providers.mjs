@@ -249,22 +249,28 @@ export function providerEnv(provider, baseEnv = process.env, command = '') {
 export function withProviderProfile(agent, provider, baseEnv = process.env) {
   if (!agent) return agent;
   if (!provider) return { ...agent, cli: { ...(agent.cli || {}) } };
+  // An Agent-level model is an execution override, not a second provider.
+  // Keep the persisted provider intact and resolve the effective copy here.
+  const effectiveProvider = {
+    ...provider,
+    model: text(agent.model || provider.model, 160),
+  };
   const command = agent.cli?.command || '';
-  const binding = providerCliBinding(provider, command);
-  const context = providerTemplateContext(provider, baseEnv);
+  const binding = providerCliBinding(effectiveProvider, command);
+  const context = providerTemplateContext(effectiveProvider, baseEnv);
   const args = binding?.args?.length
     ? binding.args.map((arg) => renderProviderTemplate(arg, context))
     : agent.cli?.args || [];
   return {
     ...agent,
-    providerId: provider.id,
-    provider: { ...provider },
+    providerId: effectiveProvider.id,
+    provider: effectiveProvider,
     cli: {
       ...(agent.cli || {}),
       args,
       env: {
         ...(agent.cli?.env || {}),
-        ...providerEnv(provider, baseEnv, command),
+        ...providerEnv(effectiveProvider, baseEnv, command),
       },
     },
   };

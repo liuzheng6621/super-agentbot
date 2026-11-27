@@ -222,6 +222,7 @@ function requiredScope(method, pathname) {
   }
   if (
     pathname.startsWith('/api/providers') ||
+    pathname.startsWith('/api/profiles') ||
     pathname.startsWith('/api/agents') ||
     pathname.startsWith('/api/mcp') ||
     pathname === '/api/settings'

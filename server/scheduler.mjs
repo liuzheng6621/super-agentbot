@@ -61,8 +61,8 @@ function providerLimit(providerId) {
   return Math.max(1, Number(provider.maxConcurrency) || 1);
 }
 
-function agentLeaseOwner(agentId) {
-  return agentLeases.get(agentId)?.taskId || '';
+function agentLimit(agentId) {
+  return Math.max(1, Number(store.getAgent(agentId)?.maxConcurrency) || 1);
 }
 
 function agentName(agentId) {
@@ -86,8 +86,13 @@ function waitingReason(entry) {
     if (used >= cap) reasons.push(`等待 Provider「${provider.name}」（${used}/${cap}）`);
   }
   for (const agentId of entry.agentIds) {
-    const owner = agentLeaseOwner(agentId);
-    if (owner && owner !== entry.taskId) reasons.push(`等待 Agent「${agentName(agentId)}」`);
+    const lease = agentLeases.get(agentId);
+    if (!lease) continue;
+    const current = lease.byTask.get(entry.taskId) || 0;
+    const limit = agentLimit(agentId);
+    if (current === 0 && lease.total >= limit) {
+      reasons.push(`等待 Agent「${agentName(agentId)}」（${lease.total}/${limit}）`);
+    }
   }
   return reasons.join('；');
 }
@@ -101,8 +106,10 @@ function canRun(entry) {
     if (providerUsage(providerId) >= providerLimit(providerId)) return false;
   }
   for (const agentId of entry.agentIds) {
-    const owner = agentLeaseOwner(agentId);
-    if (owner && owner !== entry.taskId) return false;
+    const lease = agentLeases.get(agentId);
+    if (!lease) continue;
+    const current = lease.byTask.get(entry.taskId) || 0;
+    if (current === 0 && lease.total >= agentLimit(agentId)) return false;
   }
   return true;
 }
@@ -127,21 +134,26 @@ function refreshQueuePositions() {
 
 function acquireExplicitAgents(entry) {
   for (const agentId of entry.agentIds) {
-    const current = agentLeases.get(agentId);
-    if (!current) {
-      agentLeases.set(agentId, { taskId: entry.taskId, count: 1 });
-    } else if (current.taskId === entry.taskId) {
-      current.count += 1;
-    }
+    const current = agentLeases.get(agentId) || {
+      byTask: new Map(),
+      total: 0,
+    };
+    current.byTask.set(entry.taskId, (current.byTask.get(entry.taskId) || 0) + 1);
+    current.total += 1;
+    agentLeases.set(agentId, current);
   }
 }
 
 function releaseExplicitAgents(entry) {
   for (const agentId of entry.agentIds) {
     const current = agentLeases.get(agentId);
-    if (!current || current.taskId !== entry.taskId) continue;
-    current.count -= 1;
-    if (current.count <= 0) agentLeases.delete(agentId);
+    if (!current) continue;
+    const count = current.byTask.get(entry.taskId) || 0;
+    if (count <= 0) continue;
+    current.total -= 1;
+    if (count === 1) current.byTask.delete(entry.taskId);
+    else current.byTask.set(entry.taskId, count - 1);
+    if (current.total <= 0) agentLeases.delete(agentId);
   }
 }
 
@@ -273,8 +285,9 @@ export function schedulerSnapshot() {
     providers,
     agentLeases: [...agentLeases.entries()].map(([agentId, lease]) => ({
       agentId,
-      taskId: lease.taskId,
-      count: lease.count,
+      limit: agentLimit(agentId),
+      total: lease.total,
+      tasks: [...lease.byTask.entries()].map(([taskId, count]) => ({ taskId, count })),
     })),
   };
 }
@@ -284,9 +297,13 @@ export async function withAgentLease(taskId, agentId, signal, fn) {
   while (true) {
     if (signal?.aborted) throw new DOMException('The operation was aborted', 'AbortError');
     const current = agentLeases.get(agentId);
-    if (!current || current.taskId === taskId) {
-      if (!current) agentLeases.set(agentId, { taskId, count: 1 });
-      else current.count += 1;
+    const taskCount = current?.byTask.get(taskId) || 0;
+    const limit = agentLimit(agentId);
+    if (!current || taskCount > 0 || current.total < limit) {
+      const lease = current || { byTask: new Map(), total: 0 };
+      lease.byTask.set(taskId, taskCount + 1);
+      lease.total += 1;
+      agentLeases.set(agentId, lease);
       const task = store.getTask(taskId);
       if (task?.waitingReason?.startsWith('等待 Agent')) {
         store.updateTask(
@@ -302,18 +319,24 @@ export async function withAgentLease(taskId, agentId, signal, fn) {
         return await fn();
       } finally {
         const lease = agentLeases.get(agentId);
-        if (lease?.taskId === taskId) {
-          lease.count -= 1;
-          if (lease.count <= 0) agentLeases.delete(agentId);
+        if (lease) {
+          const count = lease.byTask.get(taskId) || 0;
+          if (count > 0) {
+            lease.total -= 1;
+            if (count === 1) lease.byTask.delete(taskId);
+            else lease.byTask.set(taskId, count - 1);
+            if (lease.total <= 0) agentLeases.delete(agentId);
+          }
         }
         notifyAgentWaiters();
         dispatch();
       }
     }
+    const used = current?.total || 0;
     store.updateTask(
       taskId,
       {
-        waitingReason: `等待 Agent「${agentName(agentId)}」空闲`,
+        waitingReason: `等待 Agent「${agentName(agentId)}」（${used}/${limit}）`,
         scheduler: {
           ...(store.getTask(taskId)?.scheduler || {}),
           waitingAgentId: agentId,

@@ -18,6 +18,17 @@ import {
 } from './providers.mjs';
 import { normalizeExecutionPolicy } from './cli-policy.mjs';
 import { normalizeMcpServer } from './mcp.mjs';
+import {
+  agentToProfile,
+  defaultAgentWorkspacePolicy,
+  normalizeAgentConcurrency,
+  normalizeAgentModel,
+  normalizeAgentProfile,
+  normalizeAgentProfileId,
+  normalizeAgentWorkspacePolicy,
+  normalizeProfileImport,
+  profileToAgentPatch,
+} from './profiles.mjs';
 
 export const ROOT = path.resolve(import.meta.dirname, '..');
 export const DATA_DIR = process.env.AGENTFORGE_DATA_DIR
@@ -333,6 +344,10 @@ function defaultAgents() {
     mode: 'sim',
     providerId: DEFAULT_PROVIDER_ID,
     fallbackProviderIds: [],
+    profileId: '',
+    model: '',
+    maxConcurrency: 1,
+    workspacePolicy: defaultAgentWorkspacePolicy(),
     // 内置演示席位：服务启动后会用本机真实 CLI 顶替（见 server/team.mjs）
     builtin: true,
     seat: true,
@@ -355,6 +370,7 @@ function emptyDb() {
   return {
     agents: defaultAgents(),
     providers: defaultProviders(),
+    profiles: [],
     tasks: [],
     settings: {
       hookToken: randomUUID().replace(/-/g, '').slice(0, 24),
@@ -537,6 +553,7 @@ class Store {
     this._lastSerialized = null;
     this._serialized = {
       agents: null,
+      profiles: null,
       providers: null,
       tasks: new Map(),
       settings: null,
@@ -544,6 +561,7 @@ class Store {
     this._dirty = {
       all: true,
       agents: false,
+      profiles: false,
       providers: false,
       tasks: new Set(),
       tasksAll: false,
@@ -592,6 +610,7 @@ class Store {
         this.db = {
           agents: Array.isArray(raw.agents) && raw.agents.length ? raw.agents : defaultAgents(),
           providers,
+          profiles: Array.isArray(raw.profiles) ? raw.profiles : [],
           tasks: Array.isArray(raw.tasks) ? raw.tasks : [],
           settings: {
             ...emptyDb().settings,
@@ -606,6 +625,18 @@ class Store {
           this.db.settings.commandWhitelist = [];
         }
         if (!Array.isArray(this.db.settings.securityAudit)) this.db.settings.securityAudit = [];
+        this.db.profiles = this.db.profiles
+          .map((profile) =>
+            normalizeAgentProfile(profile, {}, {
+              providers: this.db.providers,
+              normalizeTools,
+              normalizeSkills,
+            }),
+          )
+          .filter(
+            (profile, index, list) =>
+              list.findIndex((candidate) => candidate.id === profile.id) === index,
+          );
         // 运行状态不跨进程保留
         normalizeSeats(this.db.agents);
         let recovered = !capabilitiesMigrated;
@@ -641,6 +672,18 @@ class Store {
           const mcpServers = normalizeMcpServerIds(a.mcpServers, this.db.settings.mcpServers);
           if (JSON.stringify(mcpServers) !== JSON.stringify(a.mcpServers || [])) recovered = true;
           a.mcpServers = mcpServers;
+          const profileId = normalizeAgentProfileId(a.profileId);
+          if (profileId !== (a.profileId || '')) recovered = true;
+          a.profileId = profileId;
+          a.model = normalizeAgentModel(a.model);
+          const maxConcurrency = normalizeAgentConcurrency(a.maxConcurrency);
+          if (maxConcurrency !== a.maxConcurrency) recovered = true;
+          a.maxConcurrency = maxConcurrency;
+          const workspacePolicy = normalizeAgentWorkspacePolicy(a.workspacePolicy);
+          if (JSON.stringify(workspacePolicy) !== JSON.stringify(a.workspacePolicy || {})) {
+            recovered = true;
+          }
+          a.workspacePolicy = workspacePolicy;
         }
         for (const t of this.db.tasks) {
           if (!Array.isArray(t.usageLedger)) t.usageLedger = [];
@@ -750,6 +793,10 @@ class Store {
       this._dirty.agents = true;
       touched = true;
     }
+    if (dirty.profiles) {
+      this._dirty.profiles = true;
+      touched = true;
+    }
     if (dirty.providers) {
       this._dirty.providers = true;
       touched = true;
@@ -775,6 +822,7 @@ class Store {
     this._dirty = {
       all: false,
       agents: false,
+      profiles: false,
       providers: false,
       tasks: new Set(),
       tasksAll: false,
@@ -790,6 +838,7 @@ class Store {
   _buildSerializedDb() {
     if (this._dirty.all) {
       this._serialized.agents = JSON.stringify(this.db.agents);
+      this._serialized.profiles = JSON.stringify(this.db.profiles);
       this._serialized.providers = JSON.stringify(this.db.providers);
       this._serialized.settings = JSON.stringify(this.db.settings);
       this._serialized.tasks = new Map();
@@ -800,6 +849,9 @@ class Store {
     } else {
       if (this._dirty.agents || this._serialized.agents === null) {
         this._serialized.agents = JSON.stringify(this.db.agents);
+      }
+      if (this._dirty.profiles || this._serialized.profiles === null) {
+        this._serialized.profiles = JSON.stringify(this.db.profiles);
       }
       if (this._dirty.providers || this._serialized.providers === null) {
         this._serialized.providers = JSON.stringify(this.db.providers);
@@ -833,7 +885,7 @@ class Store {
       }
       return fragment;
     });
-    return `{"agents":${this._serialized.agents},"providers":${this._serialized.providers},"tasks":[${taskFragments.join(',')}],"settings":${this._serialized.settings}}`;
+    return `{"agents":${this._serialized.agents},"profiles":${this._serialized.profiles},"providers":${this._serialized.providers},"tasks":[${taskFragments.join(',')}],"settings":${this._serialized.settings}}`;
   }
 
   save(dirty = null) {
@@ -934,14 +986,123 @@ class Store {
         (providerId) => providerId !== id && providerId !== agent.providerId,
       );
     }
-    this.save({ providers: true, agents: true });
+    for (const profile of this.profiles) {
+      if (profile.providerId === id) profile.providerId = DEFAULT_PROVIDER_ID;
+      profile.fallbackProviderIds = (profile.fallbackProviderIds || []).filter(
+        (providerId) => providerId !== id && providerId !== profile.providerId,
+      );
+    }
+    this.save({ providers: true, agents: true, profiles: true });
     this.broadcast({ type: 'providers.changed', providers: this.db.providers.map(redactProvider) });
+    this.broadcast({ type: 'profiles.changed', profiles: this.profiles });
     this.broadcast({ type: 'agents.changed' });
     return true;
   }
 
   get agents() {
     return this.db.agents;
+  }
+
+  get profiles() {
+    if (!Array.isArray(this.db.profiles)) this.db.profiles = [];
+    return this.db.profiles;
+  }
+
+  getProfile(id) {
+    return this.profiles.find((profile) => profile.id === id) || null;
+  }
+
+  profileOptions() {
+    return {
+      providers: this.db.providers,
+      normalizeTools,
+      normalizeSkills,
+    };
+  }
+
+  addProfile(input = {}) {
+    const profile = normalizeAgentProfile(input, {}, this.profileOptions());
+    if (this.getProfile(profile.id)) throw new Error(`Profile ID 已存在：${profile.id}`);
+    this.profiles.push(profile);
+    this.save({ profiles: true });
+    this.broadcast({ type: 'profiles.changed', profiles: this.profiles });
+    return profile;
+  }
+
+  updateProfile(id, patch = {}) {
+    const profile = this.getProfile(id);
+    if (!profile) return null;
+    const changedFields = new Set(Object.keys(patch || {}));
+    const next = normalizeAgentProfile(
+      { ...patch, id: profile.id },
+      profile,
+      this.profileOptions(),
+    );
+    next.updatedAt = Date.now();
+    Object.assign(profile, next);
+    const linked = profileToAgentPatch(profile, this.profileOptions());
+    const linkedFields = [
+      'name',
+      'title',
+      'role',
+      'tagline',
+      'skills',
+      'tools',
+      'mcpServers',
+      'providerId',
+      'model',
+      'fallbackProviderIds',
+      'maxConcurrency',
+      'workspacePolicy',
+      'executionPolicy',
+    ].filter((field) => changedFields.has(field));
+    for (const agent of this.db.agents) {
+      if (agent.profileId !== id) continue;
+      for (const field of linkedFields) agent[field] = linked[field];
+      if (linkedFields.includes('tools') || linkedFields.includes('role')) {
+        agent.tools = normalizeTools(agent.tools, agent.role);
+      }
+      if (linkedFields.includes('mcpServers')) {
+        agent.mcpServers = normalizeMcpServerIds(agent.mcpServers, this.db.settings.mcpServers);
+      }
+    }
+    this.save({ profiles: true, agents: true });
+    this.broadcast({ type: 'profiles.changed', profiles: this.profiles });
+    this.broadcast({ type: 'agents.changed' });
+    return profile;
+  }
+
+  removeProfile(id) {
+    const index = this.profiles.findIndex((profile) => profile.id === id);
+    if (index < 0) return false;
+    this.profiles.splice(index, 1);
+    for (const agent of this.db.agents) {
+      if (agent.profileId === id) agent.profileId = '';
+    }
+    this.save({ profiles: true, agents: true });
+    this.broadcast({ type: 'profiles.changed', profiles: this.profiles });
+    this.broadcast({ type: 'agents.changed' });
+    return true;
+  }
+
+  exportProfile(id) {
+    const profile = this.getProfile(id);
+    return profile ? normalizeProfileImport(profile, this.profileOptions()) : null;
+  }
+
+  importProfile(input = {}) {
+    const profile = normalizeProfileImport(input, this.profileOptions());
+    if (this.getProfile(profile.id)) {
+      throw new Error(`Profile ID 已存在：${profile.id}`);
+    }
+    this.profiles.push(profile);
+    this.save({ profiles: true });
+    this.broadcast({ type: 'profiles.changed', profiles: this.profiles });
+    return profile;
+  }
+
+  agentProfile(agent) {
+    return agent ? agentToProfile(agent, this.profileOptions()) : null;
   }
 
   get mcpServers() {
@@ -982,8 +1143,12 @@ class Store {
     for (const agent of this.db.agents) {
       agent.mcpServers = (agent.mcpServers || []).filter((serverId) => serverId !== id);
     }
-    this.save({ settings: true, agents: true });
+    for (const profile of this.profiles) {
+      profile.mcpServers = (profile.mcpServers || []).filter((serverId) => serverId !== id);
+    }
+    this.save({ settings: true, agents: true, profiles: true });
     this.broadcast({ type: 'mcp.changed' });
+    this.broadcast({ type: 'profiles.changed', profiles: this.profiles });
     this.broadcast({ type: 'agents.changed' });
     return true;
   }
@@ -1026,29 +1191,42 @@ class Store {
     if (requestedId && this.getAgent(requestedId)) {
       throw new Error(`Agent ID 已存在：${requestedId}`);
     }
-    const hasSeat = this.db.agents.some((a) => a.role === role && a.seat !== false);
+    const requestedProfileId = normalizeAgentProfileId(patch.profileId);
+    const requestedProfile = requestedProfileId ? this.getProfile(requestedProfileId) : null;
+    const effectivePatch = requestedProfile
+      ? { ...profileToAgentPatch(requestedProfile, this.profileOptions()), ...patch }
+      : patch;
+    const effectiveRole = effectivePatch.role || role;
+    const hasSeat = this.db.agents.some((a) => a.role === effectiveRole && a.seat !== false);
     const agent = {
       id: requestedId || randomUUID(),
-      name: patch.name || 'Agent',
-      role,
-      title: patch.title || '自定义智能体',
-      color: patch.color || '#818cf8',
-      tagline: patch.tagline || '',
-      skills: normalizeSkills(patch.skills),
-      tools: normalizeTools(patch.tools, role),
-      mcpServers: normalizeMcpServerIds(patch.mcpServers, this.db.settings.mcpServers),
-      executionPolicy: normalizeExecutionPolicy(patch.executionPolicy),
-      mode: patch.mode === 'cli' ? 'cli' : 'sim',
-      providerId: this.getProvider(String(patch.providerId || DEFAULT_PROVIDER_ID))
-        ? String(patch.providerId || DEFAULT_PROVIDER_ID)
+      name: effectivePatch.name || 'Agent',
+      role: effectiveRole,
+      title: effectivePatch.title || '自定义智能体',
+      color: effectivePatch.color || '#818cf8',
+      tagline: effectivePatch.tagline || '',
+      skills: normalizeSkills(effectivePatch.skills),
+      tools: normalizeTools(effectivePatch.tools, effectiveRole),
+      mcpServers: normalizeMcpServerIds(
+        effectivePatch.mcpServers,
+        this.db.settings.mcpServers,
+      ),
+      executionPolicy: normalizeExecutionPolicy(effectivePatch.executionPolicy),
+      mode: effectivePatch.mode === 'cli' ? 'cli' : 'sim',
+      providerId: this.getProvider(String(effectivePatch.providerId || DEFAULT_PROVIDER_ID))
+        ? String(effectivePatch.providerId || DEFAULT_PROVIDER_ID)
         : DEFAULT_PROVIDER_ID,
       fallbackProviderIds: normalizeProviderIds(
-        patch.fallbackProviderIds,
+        effectivePatch.fallbackProviderIds,
         this.db.providers,
-        this.getProvider(String(patch.providerId || DEFAULT_PROVIDER_ID))
-          ? String(patch.providerId || DEFAULT_PROVIDER_ID)
+        this.getProvider(String(effectivePatch.providerId || DEFAULT_PROVIDER_ID))
+          ? String(effectivePatch.providerId || DEFAULT_PROVIDER_ID)
           : DEFAULT_PROVIDER_ID,
       ),
+      profileId: requestedProfileId,
+      model: normalizeAgentModel(effectivePatch.model),
+      maxConcurrency: normalizeAgentConcurrency(effectivePatch.maxConcurrency),
+      workspacePolicy: normalizeAgentWorkspacePolicy(effectivePatch.workspacePolicy),
       builtin: false,
       health: patch.health || null,
       // 同一角色默认只有一个主执行席位，额外接入的 CLI 进入工具池。
@@ -1056,14 +1234,14 @@ class Store {
       status: 'idle',
       activity: '',
       cli: {
-        command: patch.cli?.command || '',
-        args: Array.isArray(patch.cli?.args) ? patch.cli.args : [],
-        cwd: patch.cli?.cwd || '',
+        command: effectivePatch.cli?.command || '',
+        args: Array.isArray(effectivePatch.cli?.args) ? effectivePatch.cli.args : [],
+        cwd: effectivePatch.cli?.cwd || '',
       },
       createdAt: Date.now(),
       stats: { runs: 0, tokens: 0 },
     };
-    if (agent.seat) this.demoteRolePeers(role, agent.id);
+    if (agent.seat) this.demoteRolePeers(effectiveRole, agent.id);
     this.db.agents.push(agent);
     this.save({ agents: true });
     this.broadcast({ type: 'agents.changed' });
@@ -1082,6 +1260,15 @@ class Store {
     const prevRole = agent.role;
     const prevSeat = agent.seat;
     const prevCli = { ...(agent.cli || {}) };
+    if (patch.profileId !== undefined) {
+      const profileId = normalizeAgentProfileId(patch.profileId);
+      const profile = profileId ? this.getProfile(profileId) : null;
+      if (profile) {
+        const linked = profileToAgentPatch(profile, this.profileOptions());
+        const explicit = { ...patch };
+        patch = { ...linked, ...explicit, profileId };
+      }
+    }
     const hasExplicitTools = Array.isArray(patch.tools);
     Object.assign(agent, patch, { id: agent.id });
     if (patch.providerId !== undefined) {
@@ -1100,6 +1287,19 @@ class Store {
         agent.fallbackProviderIds,
         this.db.providers,
         agent.providerId,
+      );
+    }
+    if (patch.profileId !== undefined) {
+      agent.profileId = normalizeAgentProfileId(patch.profileId);
+    }
+    if (patch.model !== undefined) agent.model = normalizeAgentModel(patch.model);
+    if (patch.maxConcurrency !== undefined) {
+      agent.maxConcurrency = normalizeAgentConcurrency(patch.maxConcurrency);
+    }
+    if (patch.workspacePolicy !== undefined) {
+      agent.workspacePolicy = normalizeAgentWorkspacePolicy(
+        patch.workspacePolicy,
+        agent.workspacePolicy,
       );
     }
     // 先把旧 cli 存下来再合并，否则 Object.assign 已经把 agent.cli 覆盖成新对象了

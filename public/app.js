@@ -7,6 +7,7 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 const S = {
   agents: [],
+  profiles: [],
   providers: [],
   toolCatalog: [],
   roleTools: {},
@@ -2827,6 +2828,12 @@ function handleEvent(ev) {
       renderAgents();
       break;
     }
+    case "profiles.changed": {
+      if (Array.isArray(ev.profiles)) S.profiles = ev.profiles;
+      renderProfiles();
+      renderProfileChoices($("#agentProfile")?.value || "");
+      break;
+    }
     case "plan.updated": {
       if (cur && cur.id === ev.taskId) {
         cur.plan = ev.plan;
@@ -3052,6 +3059,7 @@ async function refreshAgents() {
   try {
     const data = await api("/api/agents");
     S.agents = normalizeAgentSeats(data.agents);
+    S.profiles = data.profiles || S.profiles;
     S.providers = data.providers || S.providers;
     S.toolCatalog = data.toolCatalog || S.toolCatalog;
     S.roleTools = data.roleTools || S.roleTools;
@@ -3059,6 +3067,8 @@ async function refreshAgents() {
     renderAgents();
     renderPlan();
     renderProviders();
+    renderProfiles();
+    renderProfileChoices($("#agentProfile")?.value || "");
   } catch {
     /* ignore */
   }
@@ -3327,8 +3337,112 @@ function fillProviderForm(provider = null) {
 
 function openProviderModal(provider = null) {
   renderProviders();
+  renderProfiles();
   fillProviderForm(provider);
   $("#providerModal").showModal();
+}
+
+function renderProfiles() {
+  const list = $("#agentProfileList");
+  if (!list) return;
+  list.innerHTML = S.profiles.length
+    ? S.profiles
+        .map(
+          (profile) => `<div class="provider-row">
+            <div class="provider-row-main">
+              <b>${escapeHtml(profile.name)}</b>
+              <span>${escapeHtml(profile.id)} · ${escapeHtml(profile.role)} · ${escapeHtml(profile.workspacePolicy?.mode || "shared")}${profile.model ? ` · ${escapeHtml(profile.model)}` : ""}${profile.maxConcurrency ? ` · 并发 ${profile.maxConcurrency}` : ""}</span>
+            </div>
+            <button type="button" class="link-btn" data-profile-export="${escapeHtml(profile.id)}">导出</button>
+            <button type="button" class="link-btn" data-profile-delete="${escapeHtml(profile.id)}">删除</button>
+          </div>`,
+        )
+        .join("")
+    : '<p class="hint">还没有 Agent Profile。可导入 JSON，或在 Agent 编辑器中先配置再导出。</p>';
+}
+
+function renderProfileChoices(selected = "") {
+  const select = $("#agentProfile");
+  if (!select) return;
+  select.innerHTML = [
+    '<option value="">不绑定 Profile</option>',
+    ...S.profiles.map(
+      (profile) =>
+        `<option value="${escapeHtml(profile.id)}" ${profile.id === selected ? "selected" : ""}>${escapeHtml(profile.name)} · ${escapeHtml(profile.role)}</option>`,
+    ),
+  ].join("");
+}
+
+function fillAgentFromProfile(profileId) {
+  const profile = S.profiles.find((item) => item.id === profileId);
+  if (!profile) return;
+  const form = $("#agentForm");
+  const f = (name) => form.elements.namedItem(name);
+  f("name").value = profile.name || f("name").value;
+  f("role").value = profile.role || f("role").value;
+  f("skills").value = (profile.skills || []).join(", ");
+  f("providerId").value = profile.providerId || "local-default";
+  f("fallbackProviderIds").value = (profile.fallbackProviderIds || []).join(", ");
+  f("model").value = profile.model || "";
+  f("maxConcurrency").value = profile.maxConcurrency || 1;
+  f("workspaceMode").value = profile.workspacePolicy?.mode || "shared";
+  f("workspaceCrossTask").checked = profile.workspacePolicy?.crossTask === true;
+  f("executionPolicy").value = profile.executionPolicy === "strict" ? "strict" : "inherit";
+  renderAgentToolChoices(profile.tools, profile.role);
+  renderAgentPolicyPreview();
+}
+
+async function exportProfile(id) {
+  try {
+    const result = await api(`/api/profiles/${encodeURIComponent(id)}/export`);
+    const blob = new Blob([JSON.stringify(result.profile, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `agentforge-profile-${id}.json`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast("Profile 已导出", "ok");
+  } catch (err) {
+    toast(`导出失败：${err.message}`, "err");
+  }
+}
+
+async function importProfileFile(file) {
+  if (!file) return;
+  try {
+    const parsed = JSON.parse(await file.text());
+    const result = await api("/api/profiles/import", {
+      method: "POST",
+      body: { profile: parsed },
+    });
+    S.profiles.push(result.profile);
+    renderProfiles();
+    renderProfileChoices($("#agentProfile")?.value || "");
+    toast("Profile 已导入", "ok");
+  } catch (err) {
+    toast(`导入失败：${err.message}`, "err");
+  }
+}
+
+async function deleteProfile(id) {
+  if (!window.confirm("删除这个 Agent Profile？绑定它的成员会保留当前字段并解除绑定。")) return;
+  try {
+    await api(`/api/profiles/${encodeURIComponent(id)}`, { method: "DELETE" });
+    S.profiles = S.profiles.filter((profile) => profile.id !== id);
+    for (const agent of S.agents) {
+      if (agent.profileId === id) agent.profileId = "";
+    }
+    renderProfiles();
+    renderProfileChoices($("#agentProfile")?.value || "");
+    toast("Profile 已删除", "ok");
+  } catch (err) {
+    toast(`删除失败：${err.message}`, "err");
+  }
 }
 
 async function saveProvider() {
@@ -3496,6 +3610,10 @@ function openAgentModal(agent = null, preset = null) {
     f("fallbackProviderIds").value = (agent.fallbackProviderIds || []).join(", ");
     f("skills").value = (agent.skills || []).join(", ");
     f("seat").checked = agent.seat !== false;
+    f("model").value = agent.model || "";
+    f("maxConcurrency").value = agent.maxConcurrency || 1;
+    f("workspaceMode").value = agent.workspacePolicy?.mode || "shared";
+    f("workspaceCrossTask").checked = agent.workspacePolicy?.crossTask === true;
   } else if (preset) {
     f("name").value = preset.name || "";
     f("mode").value = "cli";
@@ -3509,6 +3627,7 @@ function openAgentModal(agent = null, preset = null) {
   }
 
   renderProviderChoices(agent?.providerId || "local-default");
+  renderProfileChoices(agent?.profileId || "");
   $("#agentModalTitle").textContent = agent ? `编辑 · ${agent.name}` : "接入新的智能体";
   $("#agentSubmit").textContent = agent ? "保存修改" : "加入团队";
   $("#agentDelete").hidden = !agent;
@@ -3637,6 +3756,7 @@ function bind() {
   $("#addAgentBtn").addEventListener("click", () => openAgentModal(null));
 
   $("#modeSelect").addEventListener("change", syncAgentMode);
+  $("#agentProfile").addEventListener("change", (e) => fillAgentFromProfile(e.target.value));
   $("#agentForm").elements.role.addEventListener("change", (e) => {
     renderAgentToolChoices(null, e.target.value);
     renderAgentPolicyPreview();
@@ -3682,6 +3802,13 @@ function bind() {
       mode,
       executionPolicy: String(fd.get("executionPolicy") || "inherit"),
       providerId: String(fd.get("providerId") || "local-default"),
+      profileId: String(fd.get("profileId") || ""),
+      model: String(fd.get("model") || "").trim(),
+      maxConcurrency: Number(fd.get("maxConcurrency")) || 1,
+      workspacePolicy: {
+        mode: String(fd.get("workspaceMode") || "shared"),
+        crossTask: fd.get("workspaceCrossTask") === "on",
+      },
       fallbackProviderIds: String(fd.get("fallbackProviderIds") || "")
         .split(",")
         .map((item) => item.trim())
@@ -3793,6 +3920,19 @@ function bind() {
     $("#flowSaveHint").textContent = "已套用预设，点保存后生效";
   });
   $("#providerBtn").addEventListener("click", () => openProviderModal());
+  $("#agentProfileList").addEventListener("click", (e) => {
+    const exportBtn = e.target.closest("[data-profile-export]");
+    if (exportBtn) {
+      exportProfile(exportBtn.dataset.profileExport);
+      return;
+    }
+    const deleteBtn = e.target.closest("[data-profile-delete]");
+    if (deleteBtn) deleteProfile(deleteBtn.dataset.profileDelete);
+  });
+  $("#profileImport").addEventListener("change", (e) => {
+    importProfileFile(e.target.files?.[0]);
+    e.target.value = "";
+  });
   $("#providerModalClose").addEventListener("click", () => $("#providerModal").close());
   $("#providerCancel").addEventListener("click", () => fillProviderForm());
   $("#providerForm").addEventListener("submit", (e) => {
@@ -4057,6 +4197,7 @@ async function boot() {
   try {
     const state = await api("/api/state");
     S.agents = normalizeAgentSeats(state.agents);
+    S.profiles = state.profiles || [];
     S.providers = state.providers || [];
     S.toolCatalog = state.toolCatalog || [];
     S.roleTools = state.roleTools || {};

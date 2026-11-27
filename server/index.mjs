@@ -27,6 +27,7 @@ import {
 } from './orchestrator.mjs';
 import { probeClis, spawnCli, clearResolveCache } from './adapters.mjs';
 import { redactProvider } from './providers.mjs';
+import { redactAgentProfile } from './profiles.mjs';
 import { adoptInstalledClis, rebalanceTeam } from './adopt.mjs';
 import { ensureRealTeam, refreshTeam, judgeHealth } from './team.mjs';
 import { toolGateway } from './tool-gateway.mjs';
@@ -350,6 +351,9 @@ const server = http.createServer(async (req, res) => {
         store.tasks[0];
       return json(res, 200, {
         agents: store.agents.map(agentView),
+        profiles: store.profiles.map((profile) =>
+          redactAgentProfile(profile, store.profileOptions()),
+        ),
         providers: store.providers.map(redactProvider),
         tasks,
         settings: stateSettings(),
@@ -592,6 +596,60 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/providers' && method === 'GET') {
       return json(res, 200, { providers: store.providers.map(redactProvider) });
     }
+    if (pathname === '/api/profiles' && method === 'GET') {
+      return json(res, 200, {
+        profiles: store.profiles.map((profile) =>
+          redactAgentProfile(profile, store.profileOptions()),
+        ),
+      });
+    }
+    if (pathname === '/api/profiles' && method === 'POST') {
+      const body = await readBody(req);
+      try {
+        const profile = store.addProfile(body);
+        return json(res, 201, {
+          profile: redactAgentProfile(profile, store.profileOptions()),
+        });
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    if (pathname === '/api/profiles/import' && method === 'POST') {
+      const body = await readBody(req);
+      try {
+        const profile = store.importProfile(body.profile || body);
+        return json(res, 201, {
+          profile: redactAgentProfile(profile, store.profileOptions()),
+        });
+      } catch (err) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+    const profileMatch = pathname.match(/^\/api\/profiles\/([\w-]+)(\/export)?$/);
+    if (profileMatch) {
+      const profile = store.getProfile(profileMatch[1]);
+      if (!profile) return json(res, 404, { error: 'Profile 不存在' });
+      if (profileMatch[2] && method === 'GET') {
+        return json(res, 200, {
+          profile: redactAgentProfile(store.exportProfile(profile.id), store.profileOptions()),
+        });
+      }
+      if (method === 'GET') {
+        return json(res, 200, {
+          profile: redactAgentProfile(profile, store.profileOptions()),
+        });
+      }
+      if (method === 'PATCH') {
+        const body = await readBody(req);
+        const updated = store.updateProfile(profile.id, body);
+        return json(res, 200, {
+          profile: redactAgentProfile(updated, store.profileOptions()),
+        });
+      }
+      if (method === 'DELETE') {
+        return json(res, 200, { ok: store.removeProfile(profile.id) });
+      }
+    }
     if (pathname === '/api/mcp/servers' && method === 'GET') {
       return json(res, 200, { servers: store.mcpServers.map(redactMcpServer) });
     }
@@ -661,6 +719,9 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/agents' && method === 'GET') {
       return json(res, 200, {
         agents: store.agents.map(agentView),
+        profiles: store.profiles.map((profile) =>
+          redactAgentProfile(profile, store.profileOptions()),
+        ),
         providers: store.providers.map(redactProvider),
         toolCatalog: TOOL_CATALOG,
         roleTools: ROLE_TOOLS,

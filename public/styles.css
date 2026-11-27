@@ -3791,6 +3791,17 @@ kbd {
   margin: 10px 0;
 }
 
+.provider-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 18px 0 10px;
+  padding-top: 14px;
+  border-top: 2px dashed var(--edge);
+  font-weight: 700;
+}
+
 .provider-row {
   display: flex;
   align-items: center;

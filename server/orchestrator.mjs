@@ -960,7 +960,7 @@ async function cliMessage(
         responseTokens += attemptTokensOut;
         store.recordProviderUsage(task.id, {
           providerId: provider?.id || '',
-          model: provider?.model || execAgent.cli?.model || '',
+          model: execAgent.provider?.model || provider?.model || execAgent.cli?.model || '',
           runId: task.runId,
           agentId: agent.id,
           tokensIn: attemptTokens,

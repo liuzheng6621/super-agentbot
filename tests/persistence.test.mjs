@@ -54,7 +54,13 @@ test('appendMessage 使用 dirty 窗口合并写，且只重新序列化变化�
   const savedTask = saved.tasks.find((task) => task.id === changed.id);
   const savedMessage = savedTask.messages.find((item) => item.id === message.id);
   assert.equal(savedMessage.text, 'x'.repeat(200), '窗口到期后数据完整可读');
-  assert.deepEqual(Object.keys(saved).sort(), ['agents', 'providers', 'settings', 'tasks']);
+  assert.deepEqual(Object.keys(saved).sort(), [
+    'agents',
+    'profiles',
+    'providers',
+    'settings',
+    'tasks',
+  ]);
 });
 
 test('进程正常退出前会 flush 尚未到期的 dirty 数据', () => {

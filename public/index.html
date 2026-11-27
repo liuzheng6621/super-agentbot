@@ -525,6 +525,36 @@
               <div class="tool-policy-grid" id="agentTools"></div>
               <p class="hint">平台文件操作会按此策略校验；真实 CLI 子进程仍需独立沙箱约束。</p>
             </div>
+            <label class="field">
+              <span>Agent Profile<em>选择后可复用角色、技能、工具、Provider 与工作区策略</em></span>
+              <select name="profileId" id="agentProfile"></select>
+            </label>
+            <div class="field-row">
+              <label class="field">
+                <span>模型覆盖<em>留空则使用 Provider 模型</em></span>
+                <input name="model" id="agentModel" placeholder="例如 gpt-5.3-codex" />
+              </label>
+              <label class="field">
+                <span>最大并发</span>
+                <input name="maxConcurrency" id="agentMaxConcurrency" type="number" min="1" max="16" value="1" />
+              </label>
+            </div>
+            <div class="field-row">
+              <label class="field">
+                <span>工作区模式</span>
+                <select name="workspaceMode" id="agentWorkspaceMode">
+                  <option value="shared">任务工作区共享</option>
+                  <option value="private">Agent 私有目录</option>
+                </select>
+              </label>
+              <label class="field seat-field">
+                <span>跨任务复用</span>
+                <span class="seat-choice">
+                  <input name="workspaceCrossTask" type="checkbox" />
+                  允许该 Agent 跨任务使用同一目录
+                </span>
+              </label>
+            </div>
             <div class="cli-fields" id="cliFields" hidden>
               <label class="field">
                 <span>Provider Profile</span>
@@ -710,6 +740,12 @@
                 <button type="submit" class="btn btn-primary sm" id="providerSave">保存 Profile</button>
               </div>
             </form>
+            <div class="provider-section-head">
+              <span>Agent Profiles</span>
+              <label class="btn btn-ghost sm" for="profileImport">导入 JSON</label>
+              <input id="profileImport" type="file" accept="application/json,.json" hidden />
+            </div>
+            <div class="provider-list" id="agentProfileList"></div>
           </div>
         </div>
       </dialog>

@@ -389,6 +389,127 @@ test('HTTP MCP endpoints keep env references redacted and allow only read calls'
   }
 });
 
+test('HTTP profiles are readable by agents, writable only by operators, and export without credentials', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-http-profiles-'));
+  const port = await availablePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const agentToken = ['agentforge', 'profile', 'agent', '0123456789'].join('-');
+  const child = spawn(process.execPath, ['server/index.mjs'], {
+    cwd: path.resolve('.'),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: '127.0.0.1',
+      AGENTFORGE_DATA_DIR: temp,
+      AGENTFORGE_OPERATOR_TOKEN: TOKEN,
+      AGENTFORGE_OPERATOR_SCOPES: 'read,task:write,operator:admin',
+      AGENTFORGE_AGENT_TOKENS: JSON.stringify([
+        { token: agentToken, id: 'profile-reader', name: 'Profile Reader' },
+      ]),
+      AGENTFORGE_SKIP_TEAM_BOOTSTRAP: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+
+  try {
+    await waitForHealth(baseUrl, child);
+    const ownerHeaders = {
+      Authorization: `Bearer ${TOKEN}`,
+      'Content-Type': 'application/json',
+    };
+    const agentHeaders = {
+      Authorization: `Bearer ${agentToken}`,
+      'Content-Type': 'application/json',
+    };
+
+    const created = await fetch(`${baseUrl}/api/profiles`, {
+      method: 'POST',
+      headers: ownerHeaders,
+      body: JSON.stringify({
+        id: 'http-review-profile',
+        name: 'HTTP Review Profile',
+        role: 'reviewer',
+        model: 'review-model',
+        maxConcurrency: 2,
+        workspacePolicy: { mode: 'private', crossTask: false },
+        apiKey: 'must-not-leak',
+        token: 'must-not-leak',
+      }),
+    });
+    assert.equal(created.status, 201);
+    assert.equal((await created.json()).profile.id, 'http-review-profile');
+
+    const agentRead = await fetch(`${baseUrl}/api/profiles`, { headers: agentHeaders });
+    assert.equal(agentRead.status, 200);
+    assert.equal((await agentRead.json()).profiles.length, 1);
+
+    const agentWrite = await fetch(`${baseUrl}/api/profiles`, {
+      method: 'POST',
+      headers: agentHeaders,
+      body: JSON.stringify({ id: 'agent-write', name: 'Forbidden' }),
+    });
+    assert.equal(agentWrite.status, 403);
+    assert.equal((await agentWrite.json()).requiredScope, 'operator:admin');
+
+    const patched = await fetch(`${baseUrl}/api/profiles/http-review-profile`, {
+      method: 'PATCH',
+      headers: ownerHeaders,
+      body: JSON.stringify({ tagline: 'operator updated' }),
+    });
+    assert.equal(patched.status, 200);
+    assert.equal((await patched.json()).profile.tagline, 'operator updated');
+
+    const exported = await fetch(`${baseUrl}/api/profiles/http-review-profile/export`, {
+      headers: ownerHeaders,
+    });
+    assert.equal(exported.status, 200);
+    const exportedProfile = (await exported.json()).profile;
+    const serialized = JSON.stringify(exportedProfile);
+    assert.equal(serialized.includes('must-not-leak'), false);
+    assert.equal(serialized.includes('"apiKey"'), false);
+    assert.equal(exportedProfile.schemaVersion, 1);
+
+    const imported = await fetch(`${baseUrl}/api/profiles/import`, {
+      method: 'POST',
+      headers: ownerHeaders,
+      body: JSON.stringify({
+        profile: { ...exportedProfile, id: 'http-imported-profile', name: 'Imported' },
+      }),
+    });
+    assert.equal(imported.status, 201);
+    assert.equal((await imported.json()).profile.id, 'http-imported-profile');
+
+    const state = await fetch(`${baseUrl}/api/state`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    }).then((response) => response.json());
+    assert.equal(state.profiles.length, 2);
+    assert.equal(JSON.stringify(state).includes('must-not-leak'), false);
+  } catch (err) {
+    throw new Error(`${err.message}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  } finally {
+    if (child.exitCode === null) child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+      setTimeout(resolve, 2000).unref();
+    });
+    try {
+      fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
+    } catch {
+      /* Windows can hold the data directory briefly. */
+    }
+  }
+});
+
 test('HTTP command approvals keep agents request-only and execute approved commands once', async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-http-approval-'));
   const port = await availablePort();
