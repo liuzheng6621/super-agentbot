@@ -154,11 +154,51 @@ export const TOOL_CATALOG = [
       additionalProperties: false,
     },
   },
+  {
+    id: 'history_search',
+    label: '搜索历史',
+    description: '只读检索当前任务的消息、事件和摘要；可选跨任务检索。',
+    risk: 'read',
+    scope: 'history',
+    audit: true,
+    operations: ['search'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        op: { const: 'search' },
+        query: { type: 'string', minLength: 2 },
+        scope: { enum: ['task', 'all'] },
+        cursor: { type: 'string' },
+        limit: { type: 'integer', minimum: 1, maximum: 50 },
+      },
+      required: ['op', 'query'],
+      additionalProperties: false,
+    },
+  },
+  {
+    id: 'history_read',
+    label: '读取历史',
+    description: '按 cursor 分页读取历史命中项的原始消息或事件。',
+    risk: 'read',
+    scope: 'history',
+    audit: true,
+    operations: ['read'],
+    inputSchema: {
+      type: 'object',
+      properties: {
+        op: { const: 'read' },
+        cursor: { type: 'string' },
+        limit: { type: 'integer', minimum: 1, maximum: 50 },
+      },
+      required: ['op', 'cursor'],
+      additionalProperties: false,
+    },
+  },
 ];
 
 export const ROLE_TOOLS = {
-  planner: ['workspace.read', 'workspace.search'],
-  architect: ['workspace.read', 'workspace.search'],
+  planner: ['workspace.read', 'workspace.search', 'history_search', 'history_read'],
+  architect: ['workspace.read', 'workspace.search', 'history_search', 'history_read'],
   coder: [
     'workspace.read',
     'workspace.search',
@@ -166,9 +206,24 @@ export const ROLE_TOOLS = {
     'workspace.move',
     'workspace.delete',
     'shell',
+    'history_search',
+    'history_read',
   ],
-  tester: ['workspace.read', 'workspace.search', 'workspace.write', 'shell'],
-  reviewer: ['workspace.read', 'workspace.search', 'shell'],
+  tester: [
+    'workspace.read',
+    'workspace.search',
+    'workspace.write',
+    'shell',
+    'history_search',
+    'history_read',
+  ],
+  reviewer: [
+    'workspace.read',
+    'workspace.search',
+    'shell',
+    'history_search',
+    'history_read',
+  ],
 };
 
 export function toolsForRole(role) {

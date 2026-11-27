@@ -19,6 +19,8 @@ const DEFAULT_OPERATION = {
   'workspace.write': 'write',
   'workspace.move': 'move',
   'workspace.delete': 'delete',
+  history_search: 'search',
+  history_read: 'read',
   shell: 'exec',
 };
 
@@ -134,7 +136,177 @@ function resultSummary(operation, result) {
   if (operation === 'delete') {
     return { path: result?.path || '', trashPath: result?.trashPath || '' };
   }
+  if (operation === 'search') {
+    return {
+      query: result?.query || '',
+      results: result?.results?.length || 0,
+      scanned: result?.scanned || 0,
+      truncated: !!result?.truncated,
+    };
+  }
+  if (operation === 'read') {
+    return {
+      items: result?.items?.length || 0,
+      truncated: !!result?.truncated,
+    };
+  }
   return {};
+}
+
+function encodeHistoryCursor(value) {
+  return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
+}
+
+function decodeHistoryCursor(value) {
+  try {
+    const parsed = JSON.parse(Buffer.from(String(value || ''), 'base64url').toString('utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function historyTasks(task, scope = 'task') {
+  return scope === 'all' ? store.tasks : [task];
+}
+
+function historySearch(task, args = {}) {
+  const query = String(args.query || '').trim().toLowerCase();
+  if (query.length < 2) fail('历史检索关键词至少需要 2 个字符', 400);
+  const scope = args.scope === 'all' ? 'all' : 'task';
+  const limit = Math.max(1, Math.min(50, Number(args.limit) || 12));
+  const cursor = decodeHistoryCursor(args.cursor);
+  if (args.cursor && !cursor) fail('历史检索 cursor 无效', 400);
+  const after = Number(cursor?.after) || 0;
+  const items = [];
+  let scanned = 0;
+  for (const item of historyTasks(task, scope)) {
+    const messages = item.messages || [];
+    for (let messageIndex = 0; messageIndex < messages.length; messageIndex += 1) {
+      const message = messages[messageIndex];
+      scanned += 1;
+      const text = String(message.text || '');
+      if (!text || !text.toLowerCase().includes(query)) continue;
+      items.push({
+        at: Number(message.createdAt) || 0,
+        taskId: item.id,
+        kind: 'message',
+        id: message.id,
+        name: message.name || message.role || 'AI',
+        text: text.slice(0, 240),
+        cursor: encodeHistoryCursor({
+          taskId: item.id,
+          kind: 'message',
+          at: Number(message.createdAt) || 0,
+          after: messageIndex,
+        }),
+      });
+    }
+    const events = item.events || [];
+    for (let eventIndex = 0; eventIndex < events.length; eventIndex += 1) {
+      const event = events[eventIndex];
+      scanned += 1;
+      const data = event.data && typeof event.data === 'object' ? JSON.stringify(event.data) : '';
+      const text = `${event.type || ''} ${data}`;
+      if (!text.toLowerCase().includes(query)) continue;
+      items.push({
+        at: Number(event.at) || 0,
+        taskId: item.id,
+        kind: 'event',
+        id: event.id,
+        name: event.type || 'event',
+        text: data.slice(0, 240),
+        cursor: encodeHistoryCursor({
+          taskId: item.id,
+          kind: 'event',
+          at: Number(event.at) || 0,
+          after: eventIndex,
+        }),
+      });
+    }
+    const summary = item.contextState?.compaction?.summary || '';
+    if (summary) {
+      scanned += 1;
+      if (summary.toLowerCase().includes(query)) {
+        items.push({
+          at: Number(item.contextState?.compaction?.generatedAt) || 0,
+          taskId: item.id,
+          kind: 'summary',
+          id: `summary-${item.id}`,
+          name: '早先上下文摘要',
+          text: summary.slice(0, 240),
+          cursor: encodeHistoryCursor({
+            taskId: item.id,
+            kind: 'summary',
+            at: Number(item.contextState?.compaction?.generatedAt) || 0,
+            after: 0,
+          }),
+        });
+      }
+    }
+  }
+  items.sort((a, b) => b.at - a.at || String(a.id).localeCompare(String(b.id)));
+  const page = items.slice(after, after + limit);
+  const next = after + page.length < items.length ? after + page.length : null;
+  return {
+    query: args.query,
+    scope,
+    results: page,
+    scanned,
+    truncated: next !== null,
+    cursor: next === null ? null : encodeHistoryCursor({ after: next }),
+  };
+}
+
+function historyRead(task, args = {}) {
+  const cursor = decodeHistoryCursor(args.cursor);
+  if (!cursor) fail('历史读取 cursor 无效', 400);
+  const target = cursor.taskId ? store.getTask(cursor.taskId) : task;
+  if (!target) fail('历史任务不存在', 404);
+  const limit = Math.max(1, Math.min(50, Number(args.limit) || 10));
+  const all =
+    cursor.kind === 'message'
+      ? (target.messages || []).map((message) => ({
+          id: message.id,
+          at: Number(message.createdAt) || 0,
+          kind: 'message',
+          name: message.name || message.role || 'AI',
+          text: String(message.text || ''),
+        }))
+      : cursor.kind === 'event'
+        ? (target.events || []).map((event) => ({
+            id: event.id,
+            at: Number(event.at) || 0,
+            kind: 'event',
+            name: event.type || 'event',
+            text: JSON.stringify(event.data || {}),
+          }))
+        : target.contextState?.compaction
+          ? [
+              {
+                id: `summary-${target.id}`,
+                at: Number(target.contextState.compaction.generatedAt) || 0,
+                kind: 'summary',
+                name: '早先上下文摘要',
+                text: String(target.contextState.compaction.summary || ''),
+              },
+            ]
+          : [];
+  const after = Number(cursor.after) || 0;
+  const source = all.filter((item) => {
+    const at = Number(cursor.at) || 0;
+    return at ? item.at <= at : true;
+  });
+  const items = source.slice(after, after + limit);
+  const next = after + items.length < source.length ? after + items.length : null;
+  return {
+    items,
+    truncated: next !== null,
+    cursor:
+      next === null
+        ? null
+        : encodeHistoryCursor({ ...cursor, after: next }),
+  };
 }
 
 function executeWorkspaceTool(task, toolId, operation, args, meta) {
@@ -173,6 +345,8 @@ function executeWorkspaceTool(task, toolId, operation, args, meta) {
   if (toolId === 'workspace.delete') {
     return deleteWorkspaceEntry(task, args.path, meta);
   }
+  if (toolId === 'history_search') return historySearch(task, args);
+  if (toolId === 'history_read') return historyRead(task, args);
   if (toolId === 'shell') {
     fail('平台 Shell 执行入口尚未开放；请使用受控 CLI 运行器。', 501);
   }

@@ -166,6 +166,89 @@ test('tool gateway audits owner calls and rejects an unauthorized agent', () => 
   assert.equal(store.getTask(task.id).events.length, beforeQuietRead);
 });
 
+test('history tools are read-only, scoped to the task by default and cursor-paginated', () => {
+  const task = store.createTask({ goal: 'history search primary task' });
+  const other = store.createTask({ goal: 'history search other task' });
+  for (let index = 0; index < 15; index += 1) {
+    store.addMessage(task.id, {
+      agentId: 'system',
+      name: 'Historian',
+      role: 'system',
+      title: 'HIS',
+      kind: 'text',
+      done: true,
+      text: `NEEDLE primary ${index}`,
+    });
+  }
+  store.addMessage(other.id, {
+    agentId: 'system',
+    name: 'Historian',
+    role: 'system',
+    title: 'HIS',
+    kind: 'text',
+    done: true,
+    text: 'NEEDLE other task',
+  });
+
+  const first = toolGateway.invokeTool({
+    taskId: task.id,
+    toolId: 'history_search',
+    operation: 'search',
+    args: { op: 'search', query: 'NEEDLE', limit: 5 },
+    principal: { kind: 'owner', id: 'owner', name: 'Owner UI' },
+    source: 'test.history',
+  }).result;
+  assert.equal(first.results.length, 5);
+  assert.ok(first.results.every((item) => item.taskId === task.id));
+  assert.ok(first.truncated);
+  assert.ok(first.cursor);
+
+  const second = toolGateway.invokeTool({
+    taskId: task.id,
+    toolId: 'history_search',
+    operation: 'search',
+    args: { op: 'search', query: 'NEEDLE', limit: 5, cursor: first.cursor },
+    principal: { kind: 'owner', id: 'owner', name: 'Owner UI' },
+    source: 'test.history',
+  }).result;
+  assert.equal(second.results.length, 5);
+  assert.notEqual(second.results[0].id, first.results[0].id);
+
+  const cross = toolGateway.invokeTool({
+    taskId: task.id,
+    toolId: 'history_search',
+    operation: 'search',
+    args: { op: 'search', query: 'NEEDLE', scope: 'all', limit: 50 },
+    principal: { kind: 'owner', id: 'owner', name: 'Owner UI' },
+    source: 'test.history',
+  }).result;
+  assert.ok(cross.results.some((item) => item.taskId === other.id));
+
+  const messageHit = first.results.find(
+    (item) => item.taskId === task.id && item.kind === 'message' && item.cursor,
+  );
+  assert.ok(messageHit);
+  const read = toolGateway.invokeTool({
+    taskId: task.id,
+    toolId: 'history_read',
+    operation: 'read',
+    args: { op: 'read', cursor: messageHit.cursor, limit: 2 },
+    principal: { kind: 'owner', id: 'owner', name: 'Owner UI' },
+    source: 'test.history',
+  }).result;
+  assert.ok(read.items.length >= 1);
+  assert.equal(read.items[0].kind, 'message');
+
+  const before = store.getTask(task.id).messages.length;
+  assert.equal(store.getTask(task.id).messages.length, before, 'history 工具不能改原始消息');
+  const events = store.getTask(task.id).events;
+  assert.ok(
+    events.some(
+      (event) => event.type === 'tool.call.end' && event.data.tool === 'history_search',
+    ),
+  );
+});
+
 test('a failed run performs at most one automatic replan', async () => {
   const planner = store.findAgentByRole('planner');
   const before = { mode: planner.mode, cli: { ...planner.cli } };
