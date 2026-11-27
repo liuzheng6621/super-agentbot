@@ -108,13 +108,6 @@ function applyProviderArgs(agent, args) {
     out = replaceOption(out, ['--model', '-m'], provider.model);
     out = out.map((arg) => (String(arg).startsWith('model=') ? `model=${provider.model}` : arg));
   }
-  if (provider.baseUrl) {
-    out = replaceOption(
-      out,
-      ['--openai-api-base', '--openai-base-url', '--base-url'],
-      provider.baseUrl,
-    );
-  }
   return out;
 }
 
@@ -416,15 +409,12 @@ function killTree(child) {
 /* 本机 CLI 探测                                                        */
 /* ------------------------------------------------------------------ */
 
-// 本机 magpie 网关的可用模型：各 CLI 默认模型会落到 codar 等失效 provider 上，统一钉一个健康档
-const MAGPIE_MODEL = process.env.AGENTFORGE_MODEL || 'trae-cn/glm-5.3-flash';
-
 // 非交互（-p / exec）下没有人在旁边点「允许」，各 CLI 默认会把写盘动作判成待审批并卡死。
 // 这里逐家给一次性的免审批开关，作用域都限定在被调用的工作区。
 const CANDIDATES = [
-  { command: 'claude', label: 'Claude Code', args: ['-p', '{{prompt}}', '--output-format', 'text', '--model', MAGPIE_MODEL, '--permission-mode', 'bypassPermissions'] },
+  { command: 'claude', label: 'Claude Code', args: ['-p', '{{prompt}}', '--output-format', 'text', '--permission-mode', 'bypassPermissions'] },
   // codex 在非 git 目录会直接拒绝执行，沙箱限定为工作区可写
-  { command: 'codex', label: 'Codex CLI', args: ['exec', '--skip-git-repo-check', '--sandbox', 'workspace-write', '-c', `model=${MAGPIE_MODEL}`, '{{prompt}}'] },
+  { command: 'codex', label: 'Codex CLI', args: ['exec', '--skip-git-repo-check', '--sandbox', 'workspace-write', '{{prompt}}'] },
   // 下面这些命令在本机是 .cmd/.ps1 包装器，只能过 cmd.exe：prompt 一律改走 stdin。
   // 理由：cmd.exe 会把参数里的换行当成命令分隔符，多行 prompt 一旦进了命令行，
   // 后面的 flag（如 gemini 的 --skip-trust）就被截断，实测报「not running in a trusted directory」。
@@ -442,9 +432,9 @@ const CANDIDATES = [
   // workbuddy 是业务系统 CLI（jobs/crm/mcp），没有一次性提示词入口，不能当编排成员用
   { command: 'crush', label: 'Crush', args: ['run', '-y'] },
   { command: 'goose', label: 'Goose', args: ['run', '-t', '{{prompt}}'] },
-  { command: 'aider', label: 'Aider', args: ['--message', '{{prompt}}', '--yes', '--openai-api-base', 'http://127.0.0.1:3425/v1', '--openai-api-key', 'magpie', '--model', `openai/${MAGPIE_MODEL}`, '--no-git'] },
-  { command: 'gemini', label: 'Gemini CLI', args: ['--skip-trust', '--approval-mode', 'yolo', '-m', MAGPIE_MODEL, '--prompt='], env: { GEMINI_API_KEY: 'magpie', GOOGLE_GEMINI_BASE_URL: 'http://127.0.0.1:3425' } },
-  { command: 'qwen', label: 'Qwen Code', args: ['--approval-mode', 'yolo', '--auth-type', 'openai', '--openai-api-key', 'magpie', '--openai-base-url', 'http://127.0.0.1:3425/v1', '-m', MAGPIE_MODEL] },
+  { command: 'aider', label: 'Aider', args: ['--message', '{{prompt}}', '--yes', '--no-git'] },
+  { command: 'gemini', label: 'Gemini CLI', args: ['--skip-trust', '--approval-mode', 'yolo', '--prompt='] },
+  { command: 'qwen', label: 'Qwen Code', args: ['--approval-mode', 'yolo', '--auth-type', 'openai'] },
   { command: 'ollama', label: 'Ollama', args: ['run', 'qwen2.5-coder', '{{prompt}}'] },
 ];
 
