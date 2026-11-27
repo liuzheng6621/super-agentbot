@@ -2,7 +2,7 @@
 
 > 更新日期：2026-11-27
 > 状态：M3 / M4 / M5 已完成；本轮 P1-9、P1-10 与五项 P2 能力已完成
-> 当前文档基线：`2aa62d2 P2-11 agent-web acceptance adapter`
+> 当前文档基线：`14fe33d docs: align plan baseline and remaining backlog`
 > 来源：OpenBot 上游仓库（https://github.com/OpenHands/OpenBot）+ AgentForge 现有路线图（`agent-platform-roadmap.md`）
 > 说明：本计划只吸收机制与契约，不移植 OpenBot 的 Electron / Bun / Cloudflare 架构。
 

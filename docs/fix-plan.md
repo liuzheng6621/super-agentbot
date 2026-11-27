@@ -2,7 +2,7 @@
 
 > 核查日期：2026-11-27
 > 核查对象：`E:\SKIl.1\bot` 当前工作树
-> 文档同步基线：`2aa62d2 P2-11 agent-web acceptance adapter`
+> 文档同步基线：`14fe33d docs: align plan baseline and remaining backlog`
 > 本文性质：修复与验收文档；每项状态以“当前状态”和对应提交 / 测试为准
 
 ## 1. 目的与边界
