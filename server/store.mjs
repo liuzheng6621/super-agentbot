@@ -571,6 +571,8 @@ function emptyDb() {
       debateParticipants: 5,
       debatePoolSeats: 1,
       debateConcurrency: 2,
+      dynamicPlanEnabled: false,
+      maxPlanSteps: 12,
       timeouts: defaultTimeouts(),
       automations: [],
       mcpServers: [],
@@ -2188,6 +2190,10 @@ class Store {
       s.debatePoolSeats = clamp(patch.debatePoolSeats, 0, 3, s.debatePoolSeats);
     if (patch.debateConcurrency !== undefined)
       s.debateConcurrency = clamp(patch.debateConcurrency, 1, 4, s.debateConcurrency);
+    if (typeof patch.dynamicPlanEnabled === 'boolean')
+      s.dynamicPlanEnabled = patch.dynamicPlanEnabled;
+    if (patch.maxPlanSteps !== undefined)
+      s.maxPlanSteps = clamp(patch.maxPlanSteps, 2, 12, s.maxPlanSteps);
     if (patch.maxConcurrency !== undefined)
       s.maxConcurrency = clamp(patch.maxConcurrency, 1, 4, s.maxConcurrency);
     if (patch.maxTaskConcurrency !== undefined)
@@ -2331,8 +2337,10 @@ class Store {
       runId: task.runId || null,
       agentId: message.agentId || '',
       stepId: message.stepId || '',
+      executionId: message.executionId || '',
       data: {
         messageId: message.id,
+        executionId: message.executionId || '',
         correlationId: message.correlationId,
         from: message.from,
         to: message.to,
@@ -2752,6 +2760,7 @@ class Store {
       String(event.spanId || '').replace(/[^\w-]/g, '').slice(0, 80) || randomUUID();
     const trace = ensureTaskTrace(task, runId, spanId, at);
     const stepId = String(event.stepId || '');
+    const executionId = String(event.executionId || '');
     let parentSpanId;
     if (Object.prototype.hasOwnProperty.call(event, 'parentSpanId')) {
       parentSpanId = event.parentSpanId
@@ -2790,6 +2799,7 @@ class Store {
       kind: String(event.kind || traceKindFor(type)),
       agentId: '',
       stepId,
+      executionId,
       type,
     };
     saved.agentId = String(event.agentId || '');
@@ -2840,6 +2850,7 @@ class Store {
       lang: change.lang || '',
       agentId: change.agentId || '',
       stepId: change.stepId || '',
+      executionId: change.executionId || '',
       runId: change.runId || task.runId || null,
       source: change.source || 'workspace',
       trashPath: change.trashPath || '',
@@ -2867,6 +2878,7 @@ class Store {
       runId: saved.runId || null,
       agentId: saved.agentId,
       stepId: saved.stepId,
+      executionId: saved.executionId,
       data: { ...saved },
     });
     this.save({ tasks: [taskId] });
@@ -2893,6 +2905,7 @@ class Store {
         updatedAt: Date.now(),
         deletedAt: null,
         status: '',
+        executionId: file.executionId || existing.executionId || '',
       });
       saved = existing;
     } else {
@@ -2904,6 +2917,7 @@ class Store {
         lang: file.lang || '',
         agentId: file.agentId || '',
         stepId: file.stepId || '',
+        executionId: file.executionId || '',
         createdAt: Date.now(),
         status: '',
       };
@@ -2921,6 +2935,7 @@ class Store {
         lang: file.lang,
         agentId: file.agentId,
         stepId: file.stepId,
+        executionId: file.executionId || existing?.executionId || '',
         source: file.source || 'artifact',
       });
     }

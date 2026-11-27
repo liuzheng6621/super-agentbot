@@ -2643,18 +2643,20 @@ const FLOW_NUM_FIELDS = [
   ["setMaxConcurrency", "maxConcurrency", 1, 4, 2],
   ["setMaxRepairRounds", "maxRepairRounds", 0, 3, 1],
   ["setMaxStepAttempts", "maxStepAttempts", 1, 3, 2],
+  ["setMaxPlanSteps", "maxPlanSteps", 2, 12, 12],
 ];
 
 const FLOW_PRESETS = {
-  fast: { debateEnabled: false, debateParticipants: 2, debateConcurrency: 2, debatePoolSeats: 0, maxTaskConcurrency: 3, maxConcurrency: 4, maxRepairRounds: 0, maxStepAttempts: 1 },
-  balanced: { debateEnabled: true, debateParticipants: 5, debateConcurrency: 2, debatePoolSeats: 1, maxTaskConcurrency: 2, maxConcurrency: 2, maxRepairRounds: 1, maxStepAttempts: 2 },
-  thorough: { debateEnabled: true, debateParticipants: 6, debateConcurrency: 4, debatePoolSeats: 2, maxTaskConcurrency: 2, maxConcurrency: 4, maxRepairRounds: 3, maxStepAttempts: 3 },
+  fast: { debateEnabled: false, dynamicPlanEnabled: false, debateParticipants: 2, debateConcurrency: 2, debatePoolSeats: 0, maxTaskConcurrency: 3, maxConcurrency: 4, maxRepairRounds: 0, maxStepAttempts: 1, maxPlanSteps: 8 },
+  balanced: { debateEnabled: true, dynamicPlanEnabled: true, debateParticipants: 5, debateConcurrency: 2, debatePoolSeats: 1, maxTaskConcurrency: 2, maxConcurrency: 2, maxRepairRounds: 1, maxStepAttempts: 2, maxPlanSteps: 12 },
+  thorough: { debateEnabled: true, dynamicPlanEnabled: true, debateParticipants: 6, debateConcurrency: 4, debatePoolSeats: 2, maxTaskConcurrency: 2, maxConcurrency: 4, maxRepairRounds: 3, maxStepAttempts: 3, maxPlanSteps: 12 },
 };
 
 function currentFlowSettings() {
   const s = S.settings || {};
   return {
     debateEnabled: s.debateEnabled !== false,
+    dynamicPlanEnabled: s.dynamicPlanEnabled !== false,
     debateParticipants: Number(s.debateParticipants) || 4,
     debateConcurrency: Number(s.debateConcurrency) || 2,
     debatePoolSeats: Number(s.debatePoolSeats ?? 1),
@@ -2662,6 +2664,7 @@ function currentFlowSettings() {
     maxConcurrency: Number(s.maxConcurrency) || 2,
     maxRepairRounds: Number(s.maxRepairRounds ?? 1),
     maxStepAttempts: Number(s.maxStepAttempts) || 2,
+    maxPlanSteps: Number(s.maxPlanSteps) || 12,
     timeouts: { ...(s.timeouts || {}) },
   };
 }
@@ -2723,11 +2726,15 @@ function fillFlowForm(values) {
     el.value = String(values[key] ?? fallback);
   }
   $("#setDebateEnabled").checked = values.debateEnabled !== false;
+  $("#setDynamicPlanEnabled").checked = values.dynamicPlanEnabled !== false;
   fillTimeoutFields(values.timeouts);
 }
 
 function readFlowForm() {
-  const out = { debateEnabled: $("#setDebateEnabled").checked };
+  const out = {
+    debateEnabled: $("#setDebateEnabled").checked,
+    dynamicPlanEnabled: $("#setDynamicPlanEnabled").checked,
+  };
   for (const [id, key] of FLOW_NUM_FIELDS) out[key] = Number($(`#${id}`).value);
   out.timeouts = timeoutMillisecondsFromForm($("#flowModal"));
   return out;

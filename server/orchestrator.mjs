@@ -23,6 +23,7 @@ import { timeoutFor, timeoutSummary } from './timeouts.mjs';
 import { attachmentAbsolutePath, imageDataUrl } from './attachments.mjs';
 import { commandText, detectTestCommand } from './test-entry.mjs';
 export { detectTestCommand } from './test-entry.mjs';
+import { isPlannerPlanComplete, parsePlannerPlan } from './plan-schema.mjs';
 import { buildContextPack as buildContextPackFromFiles } from './context-budget.mjs';
 import { stableBlock, volatileBlock } from './context-budget.mjs';
 export {
@@ -729,6 +730,7 @@ async function streamMessage(
     causeBy = '',
     stepId = '',
     artifactRefs = [],
+    execution = null,
   } = {},
 ) {
   const msg = store.addMessage(task.id, {
@@ -744,6 +746,7 @@ async function streamMessage(
     parentMessageId,
     causeBy,
     stepId,
+    executionId: execution?.executionId || '',
     artifactRefs,
   });
   beginAgent(agent, `${ROLE_LABEL[agent.role] || agent.role}发言中`);
@@ -789,6 +792,7 @@ async function cliMessage(
     causeBy = '',
     stepId = '',
     artifactRefs = [],
+    executionId = '',
   } = {},
 ) {
   const route = agentRouteForExecution(agent);
@@ -807,6 +811,7 @@ async function cliMessage(
     causeBy,
     stepId,
     artifactRefs,
+    executionId,
   });
   beginAgent(agent, `${agent.cli?.command || 'CLI'} 运行中`);
 
@@ -844,6 +849,7 @@ async function cliMessage(
       type: 'tool.call.start',
       agentId: agent.id,
       stepId,
+      executionId,
       data: {
         callId,
         tool: 'cli',
@@ -863,6 +869,7 @@ async function cliMessage(
       type: 'cli.policy.start',
       agentId: agent.id,
       stepId,
+      executionId,
       data: {
         callId,
         command: cliPolicy.command,
@@ -964,6 +971,7 @@ async function cliMessage(
       type: res.policyDenied ? 'cli.policy.denied' : 'cli.policy.end',
       agentId: agent.id,
       stepId,
+      executionId,
       data: {
         ...effectivePolicyData,
         callId,
@@ -980,6 +988,7 @@ async function cliMessage(
       type: 'tool.call.end',
       agentId: agent.id,
       stepId,
+      executionId,
       data: {
         callId: toolCall?.data?.callId || callId,
         tool: 'cli',
@@ -1015,6 +1024,7 @@ async function cliMessage(
       type: 'provider.fallback',
       agentId: agent.id,
       stepId,
+      executionId,
       data: {
         fromProviderId: provider?.id || '',
         fromProviderName: providerName,
@@ -1085,13 +1095,29 @@ async function cliMessage(
     timeoutMs: timeout,
   });
 
-  // 收集 CLI 新增/修改的文件：先按 size + 纳秒 mtime 粗筛，命中项再算内容版本。
-  // 内容没变就不重复记 artifact——CLI 把同一个文件重写一遍不该算一次产出。
+  // 并行的 CLI 会改同一批文件。只把相对本工序开始前新出现/改过的路径归给本工序，
+  // 避免后完成的工序把另一个 Agent 刚写的文件误记成自己的产物。
   const after = snapshotFiles(task);
+  const changed = [];
   for (const f of after) {
     const prev = before.get(f.path);
     const touched = !prev || prev.bytes !== f.bytes || prev.mtimeNs !== f.mtimeNs;
     if (!touched) continue;
+    changed.push({ ...f, prev });
+  }
+  const ownerOf = (relPath) =>
+    store.getTask(task.id)?.artifacts?.find((artifact) => artifact.path === relPath)?.stepId || '';
+  for (const f of changed) {
+    const current = store.getTask(task.id);
+    const ownedByOtherRunningStep = (current?.plan || []).some(
+      (item) =>
+        item.id !== stepId &&
+        item.status === 'running' &&
+        (item.outputPaths || []).includes(f.path),
+    );
+    if (ownedByOtherRunningStep) continue;
+    const existingOwner = ownerOf(f.path);
+    if (existingOwner && existingOwner !== stepId) continue;
     store.addArtifact(task.id, {
       path: f.path,
       bytes: f.bytes,
@@ -1100,8 +1126,9 @@ async function cliMessage(
       lang: path.extname(f.path).slice(1),
       agentId: agent.id,
       stepId,
-      beforeVersion: prev?.version || '',
+      beforeVersion: f.prev?.version || '',
       source: 'cli',
+      executionId,
     });
   }
   // 截断扫描不能证明文件真的被删除，不能据此写删除审计。
@@ -1192,6 +1219,8 @@ export function buildPrompt(task, agent, step, depsText, context, extra = {}) {
     '# 项目目标',
     task.goal,
     '',
+    `STEP_ID: ${step?.id || 'summary'}`,
+    '',
     '# 你当前负责的工序',
     step ? `${step.title}（角色：${ROLE_LABEL[role] || role}）` : '协作讨论',
     '',
@@ -1252,7 +1281,7 @@ export function buildPrompt(task, agent, step, depsText, context, extra = {}) {
   return lines.filter((line) => line !== '').join('\n');
 }
 
-function buildPlanPrompt(agent, task, context = null, extra = {}) {
+function buildPlanPrompt(agent, task, step, context = null, extra = {}) {
   return [
     stableBlock(context),
     `你是「${agent.name}」，团队里的${agent.title}。`,
@@ -1262,11 +1291,35 @@ function buildPlanPrompt(agent, task, context = null, extra = {}) {
     '# 项目目标',
     task.goal,
     '',
+    `STEP_ID: ${step?.id || 'summary'}`,
+    '',
     '# 你的任务',
     '把目标拆成可验收的工序，确认每道工序的负责人角色、依赖关系、产出物与验收标准。',
     '团队已有规划、架构、实现、测试、评审五个执行席位，不要把所有工作都分给实现工程师。',
     '',
-    '不要写业务代码，不要客套。中文 Markdown，结尾用一行「下一步建议：…」收口。',
+    '不要写业务代码，不要客套。先用中文 Markdown 说明拆解依据，再输出唯一的正式计划 JSON，最后一行用「下一步建议：…」收口。',
+    '',
+    '# PLAN CONTRACT v1',
+    '# 正式计划 JSON 契约',
+    '```json',
+    '{"steps":[',
+    '  {"id":"design","title":"技术方案","role":"architect","needs":["plan"],"outputPaths":["docs/design.md"]},',
+    '  {"id":"impl-core","title":"实现核心","role":"coder","needs":["design"],"outputPaths":["src/core.js"]},',
+    '  {"id":"impl-api","title":"实现 API","role":"coder","needs":["design"],"outputPaths":["src/api.js"]},',
+    '  {"id":"tests","title":"测试编写","role":"tester","needs":["design"],"outputPaths":["tests/core.test.js"]},',
+    '  {"id":"final-review","title":"评审与质量门","role":"reviewer","needs":["impl-core","impl-api","tests"],"outputPaths":[]}',
+    ']}',
+    '```',
+    '',
+    '契约要求：',
+    '1. 工序数量 2 到 12，id 使用小写字母、数字和连字符。',
+    '2. role 只能是 architect、coder、tester、reviewer；不要输出 planner 工序。',
+    '3. needs 只能引用 plan 或列表中更早出现的工序；禁止循环依赖。',
+    '4. 至少包含一个 coder 和一个 tester，且恰好包含一个 reviewer。',
+    '5. reviewer 必须是最后一个终端工序，并直接或间接覆盖其余全部工序。',
+    '6. outputPaths 每道工序最多 8 个，只能使用工作区相对路径，禁止绝对路径、反斜杠和 ..。',
+    '7. 正式 JSON 必须放在最后一条「下一步建议：」之前；JSON 之后只能保留这一行收口。',
+    '8. 如果无法给出合法计划，说明原因，平台会回退到稳定的默认流水线。',
     '',
     volatileBlock(context, '需求拆解', { inlineImages: agent.mode !== 'cli' }),
   ].join('\n');
@@ -1856,7 +1909,11 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
 /* 工序执行                                                             */
 /* ------------------------------------------------------------------ */
 
-async function runStep(task, agent, { step, kind, prompt, signal, speed, simOutputs }) {
+async function runStep(
+  task,
+  agent,
+  { step, kind, prompt, signal, speed, simOutputs, execution = null },
+) {
   if (!agent) throw new Error('没有可用的智能体');
   if (agent.mode === 'cli') {
     const res = await cliMessage(task, agent, prompt, {
@@ -1868,8 +1925,11 @@ async function runStep(task, agent, { step, kind, prompt, signal, speed, simOutp
       }),
       causeBy: step?.id ? `step:${step.id}` : 'summary',
       stepId: step?.id || '',
+      executionId: execution?.executionId || '',
       completeWhen: step
-        ? (value) => isCompleteStepText(value, step.role)
+        ? step.id === 'plan' && step.role === 'planner'
+          ? isPlannerPlanComplete
+          : (value) => isCompleteStepText(value, step.role)
         : isCompleteSummaryText,
       settleMs: 6000,
     });
@@ -1904,6 +1964,7 @@ async function runStep(task, agent, { step, kind, prompt, signal, speed, simOutp
     causeBy: step?.id ? `step:${step.id}` : 'summary',
     stepId: step?.id || '',
     artifactRefs: (out.artifacts || []).map((file) => file.path),
+    executionId: execution?.executionId || '',
   });
   throwIfAborted(signal);
   for (const file of out.artifacts || []) {
@@ -2160,10 +2221,16 @@ async function executeSteps(task, steps, { outputs, speed, signal, runId = '' })
         const context = buildContextPack(current, { files: knownFiles(current) });
         const depsText = dependencyText(current, step, outputs);
         const skillContext = activateSkills(current, agent, step, 'step');
-        const prompt = buildPrompt(current, agent, step, depsText, context, {
-          ...extra,
-          skills: skillContext.skills,
-        });
+        const prompt =
+          step.id === 'plan' && step.role === 'planner'
+            ? buildPlanPrompt(agent, current, step, context, {
+                ...extra,
+                skills: skillContext.skills,
+              })
+            : buildPrompt(current, agent, step, depsText, context, {
+                ...extra,
+                skills: skillContext.skills,
+              });
         const simOutputs = {
           ...Object.fromEntries([...outputs].map(([id, value]) => [id, value.text])),
           steps: Object.fromEntries([...outputs]),
@@ -2179,9 +2246,9 @@ async function executeSteps(task, steps, { outputs, speed, signal, runId = '' })
           signal,
           speed,
           simOutputs,
+          execution,
           // 首选成员允许按设置重试；切换成员后只给它一次机会，避免整条流水线被拖死。
           maxAttempts: index === 0 ? undefined : 1,
-          execution,
         });
         if (out.ok && step.role === 'reviewer') {
           const verdict = parseReviewVerdictDetails(out.text);
@@ -2253,6 +2320,121 @@ function planWithSeats(goal) {
     const { agent, maxAttempts } = roleAgent(step.role);
     return { ...step, agentId: agent?.id || '', maxAttempts };
   });
+}
+
+function plannerCandidates(role) {
+  const primary = pickAgent(role);
+  const ordered = [];
+  const push = (agent) => {
+    if (!agent || ordered.some((item) => item.id === agent.id)) return;
+    ordered.push(agent);
+  };
+  push(primary);
+  for (const agent of store.agents) {
+    if (agent.role === role && agent.seat !== false) push(agent);
+  }
+  // 同角色工具池也是可分配执行者，尤其是多 coder DAG 不能全压在一个席位。
+  for (const agent of store.agents) {
+    if (agent.role === role) push(agent);
+  }
+  if (role !== 'reviewer') {
+    for (const agent of store.agents) {
+      if (agent.seat !== false) push(agent);
+    }
+  }
+  return ordered;
+}
+
+function bindPlannerAgents(steps) {
+  const coderAgents = plannerCandidates('coder');
+  let coderIndex = 0;
+  return steps.map((step) => {
+    const candidates = plannerCandidates(step.role);
+    const agent =
+      step.role === 'coder' && coderAgents.length
+        ? coderAgents[coderIndex++ % coderAgents.length]
+        : candidates[0] || null;
+    return {
+      ...step,
+      agentId: agent?.id || '',
+      maxAttempts:
+        agent?.mode === 'cli' ? Number(store.db.settings.maxStepAttempts) || 2 : 1,
+    };
+  });
+}
+
+function plannerFallbackReason(value) {
+  return clip(String(value || '规划结果未通过契约校验'), 1000);
+}
+
+function applyPlannerPlan(taskId, plannerOutput, { runId } = {}) {
+  const task = store.getTask(taskId);
+  if (!task) return null;
+  const parsed = parsePlannerPlan(plannerOutput?.text || '');
+  if (!parsed.ok) {
+    const reason = plannerFallbackReason(parsed.reason);
+    store.addTaskEvent(taskId, {
+      type: 'plan.fallback',
+      runId,
+      stepId: 'plan',
+      data: { reason, source: 'planner' },
+    });
+    store.updateStep(taskId, 'plan', {
+      note: `规划 JSON 未通过校验，沿用模板计划：${reason}`,
+    });
+    return { applied: false, reason, steps: [] };
+  }
+
+  const maxPlanSteps = Math.max(
+    2,
+    Math.min(12, Number(store.db.settings.maxPlanSteps) || 12),
+  );
+  if (parsed.steps.length > maxPlanSteps) {
+    const reason = `动态计划包含 ${parsed.steps.length} 个工序，超过上限 ${maxPlanSteps}`;
+    store.addTaskEvent(taskId, {
+      type: 'plan.fallback',
+      runId,
+      stepId: 'plan',
+      data: { reason, source: 'planner' },
+    });
+    store.updateStep(taskId, 'plan', {
+      note: `规划 JSON 未通过校验，沿用模板计划：${reason}`,
+    });
+    return { applied: false, reason, steps: [] };
+  }
+
+  const bound = bindPlannerAgents(parsed.steps);
+  const result = store.replanUnfinished(taskId, {
+    steps: bound,
+    reason: '规划师生成的动态工序图',
+    source: 'planner',
+    runId,
+  });
+  const current = store.getTask(taskId);
+  store.addTaskEvent(taskId, {
+    type: 'plan.generated',
+    runId,
+    stepId: 'plan',
+    data: {
+      steps: bound.map((step) => ({
+        id: step.id,
+        role: step.role,
+        agentId: step.agentId,
+        needs: step.needs,
+        outputPaths: step.outputPaths,
+      })),
+      planVersion: current?.planVersion || 0,
+      preserved: result?.preserved || [],
+      reopened: result?.reopened || [],
+    },
+  });
+  return {
+    applied: true,
+    reason: '',
+    steps: (current?.plan || []).filter(
+      (step) => step.status === 'pending' && !['debate', 'plan'].includes(step.id),
+    ),
+  };
 }
 
 function describeFailure(result, plan) {
@@ -2491,12 +2673,47 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
       });
     }
 
-    const workPlan = store.getTask(taskId).plan.filter((step) => step.id !== 'debate');
-    let first = await executeSteps(task, workPlan, { outputs, speed, signal });
+    const planStep = store.getTask(taskId).plan.find((step) => step.id === 'plan');
+    if (!planStep) throw new Error('模板计划缺少 plan 工序');
+    const planRun = await executeSteps(task, [planStep], {
+      outputs,
+      speed,
+      signal,
+      runId,
+    });
+    if (!planRun.ok && !signal.aborted) {
+      const replanned = replanFailure(taskId, planRun, { runId });
+      if (replanned?.steps.length) {
+        const retryPlan = await executeSteps(task, replanned.steps, {
+          outputs,
+          speed,
+          signal,
+          runId,
+        });
+        if (!retryPlan.ok) {
+          throw new Error(describeFailure(retryPlan, store.getTask(taskId).plan));
+        }
+      } else {
+        throw new Error(describeFailure(planRun, store.getTask(taskId).plan));
+      }
+    } else if (!planRun.ok) {
+      throw new Error(describeFailure(planRun, store.getTask(taskId).plan));
+    }
+    if (store.db.settings.dynamicPlanEnabled !== false) {
+      const applied = applyPlannerPlan(taskId, outputs.get('plan'), { runId });
+      if (applied?.applied) {
+        store.updateStep(taskId, 'plan', { note: `已生成 ${applied.steps.length} 个动态工序` });
+      }
+    }
+
+    const workPlan = store
+      .getTask(taskId)
+      .plan.filter((step) => !['debate', 'plan'].includes(step.id));
+    let first = await executeSteps(task, workPlan, { outputs, speed, signal, runId });
     if (!first.ok && !signal.aborted) {
       const replanned = replanFailure(taskId, first, { runId });
       if (replanned?.steps.length) {
-        first = await executeSteps(task, replanned.steps, { outputs, speed, signal });
+        first = await executeSteps(task, replanned.steps, { outputs, speed, signal, runId });
       }
     }
     if (!first.ok) throw new Error(describeFailure(first, store.getTask(taskId).plan));
@@ -2549,7 +2766,7 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
       const retry = await executeSteps(
         task,
         store.getTask(taskId).plan.filter((s) => s.round === repairRound),
-        { outputs, speed, signal },
+        { outputs, speed, signal, runId },
       );
       if (!retry.ok) throw new Error(describeFailure(retry, store.getTask(taskId).plan));
       review = outputs.get(`re-review-${repairRound}`);

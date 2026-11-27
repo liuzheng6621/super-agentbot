@@ -2,7 +2,7 @@ const ROLE_WHITELIST = new Set(['architect', 'coder', 'tester', 'reviewer']);
 const RESERVED_ID = /^(?:debate|plan|fix-\d+|retest-\d+|re-review-\d+)$/;
 const VALID_ID = /^[a-z][a-z0-9-]{0,39}$/;
 const JSON_FENCE = /```json\s*([\s\S]*?)```/gi;
-const NEXT_STEP = /(?:^|\n)\s*下一步建议\s*[：:]/;
+const NEXT_STEP_LINE = /(?:^|\n)[ \t]*下一步建议\s*[：:]/gm;
 const MAX_OUTPUT_PATHS = 8;
 
 function failure(reason) {
@@ -21,7 +21,7 @@ function parseLastJsonBlock(text) {
   const block = blocks.at(-1);
   const closingEnd = (block.index || 0) + block[0].length;
   const closing = value.slice(closingEnd);
-  const nextSteps = [...closing.matchAll(new RegExp(NEXT_STEP.source, 'g'))];
+  const nextSteps = [...closing.matchAll(NEXT_STEP_LINE)];
   if (!nextSteps.length) return { ok: false, reason: 'JSON 代码块后缺少最终的「下一步建议：」收口行' };
   const nextStep = nextSteps.at(-1);
   if (/\S/.test(closing.slice(0, nextStep.index))) {
