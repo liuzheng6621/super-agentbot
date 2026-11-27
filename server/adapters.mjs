@@ -275,6 +275,8 @@ export function spawnCli(
       // Provider Profile 只把引用解析成子进程环境，不把明文密钥写回 store。
       ...(execAgent.provider?.env || {}),
     });
+    // 质量门可能在 node --test 中运行 node --test；子测试进程不能继承父测试上下文。
+    delete env.NODE_TEST_CONTEXT;
     const resolved = resolveCommand(execAgent.cli.command);
     if (!resolved) {
       resolve({

@@ -14,6 +14,7 @@ const {
   isSelfReview,
   buildContextPack,
   runQualityGate,
+  qualityGateAllowsDelivery,
   isTransientCliError,
   scanStats,
   workMsOf,
@@ -42,12 +43,29 @@ test('只有上游瞬时故障才重试，真实失败照旧上报', () => {
   assert.equal(isTransientCliError(undefined), false);
 });
 
-test('测试入口探测：npm / pytest / cargo / go / Makefile / node:test / 都没有', () => {
+test('测试入口探测按 npm / Makefile / pytest 优先级执行', () => {
   const npm = detectTestCommand(
     workspace({ 'package.json': JSON.stringify({ scripts: { test: 'node --test tests/' } }) }),
   );
   assert.equal(npm.command, 'npm');
   assert.match(npm.source, /scripts\.test/);
+
+  const allConfigured = detectTestCommand(
+    workspace({
+      'package.json': JSON.stringify({ scripts: { test: 'node --test' } }),
+      Makefile: 'test:\n\tnode --test\n',
+      'pyproject.toml': '[tool.pytest.ini_options]\n',
+    }),
+  );
+  assert.equal(allConfigured.command, 'npm', 'package.json scripts.test 优先');
+
+  const makeAndPytest = detectTestCommand(
+    workspace({
+      Makefile: 'test:\n\tnode --test\n',
+      'pyproject.toml': '[tool.pytest.ini_options]\n',
+    }),
+  );
+  assert.equal(makeAndPytest.command, 'make', 'Makefile 优先于 pytest 配置');
 
   const placeholder = detectTestCommand(
     workspace({ 'package.json': JSON.stringify({ scripts: { test: 'echo "Error: no test specified" && exit 1' } }) }),
@@ -55,9 +73,11 @@ test('测试入口探测：npm / pytest / cargo / go / Makefile / node:test / �
   assert.equal(placeholder, null, '占位脚本不算测试入口');
 
   assert.equal(detectTestCommand(workspace({ 'pyproject.toml': '[tool.pytest.ini_options]\n' })).command, 'python');
+  assert.equal(detectTestCommand(workspace({ 'pyproject.toml': '[project]\nname = "x"\n' })), null);
+  assert.equal(detectTestCommand(workspace({ 'pytest.ini': '[pytest]\n' })).command, 'python');
+  assert.equal(detectTestCommand(workspace({ 'tox.ini': '[pytest]\n' })).command, 'python');
   assert.equal(detectTestCommand(workspace({ 'Cargo.toml': '[package]\n' })).command, 'cargo');
   assert.equal(detectTestCommand(workspace({ 'go.mod': 'module x\n' })).command, 'go');
-  assert.equal(detectTestCommand(workspace({ Makefile: 'test:\n\tnode --test\n' })).command, 'make');
 
   const nodeTests = detectTestCommand(workspace({ 'tests/a.test.js': '' }));
   assert.deepEqual(nodeTests.args, ['--test', 'tests/']);
@@ -105,7 +125,7 @@ test('上下文包可以直接复用目录快照，不再重复扫描', () => {
   assert.equal(scanStats.calls, before + 1, '不传快照才扫一次');
 });
 
-test('质量门会真的跑工作区里的测试入口，找不到入口就报 missing', async () => {
+test('质量门会真的跑工作区里的测试入口，找不到入口就报 no-test-entry', async () => {
   const signal = new AbortController().signal;
 
   const failing = store.createTask({
@@ -126,11 +146,61 @@ test('质量门会真的跑工作区里的测试入口，找不到入口就报 m
   const passed = await runQualityGate(passing, { round: 0 }, signal);
   assert.equal(passed.status, 'passed');
   assert.equal(passed.code, 0);
+  assert.match(passed.command, /npm test --silent/);
+  assert.equal(typeof passed.elapsed, 'number');
+  assert.ok(passed.stdout !== undefined);
+  assert.ok(passed.stderr !== undefined);
 
   const empty = store.createTask({ goal: '没有测试入口', workspace: workspace({ 'README.md': '# 空' }).workspace });
   const missing = await runQualityGate(empty, { round: 0 }, signal);
-  assert.equal(missing.status, 'missing', '找不到入口不能假装通过，也不能静默 skipped');
+  assert.equal(missing.status, 'no-test-entry', '找不到入口不能假装通过，也不能静默 skipped');
+  assert.notEqual(missing.status, 'passed');
   assert.match(missing.reason, /没找到可执行的测试入口/);
+  assert.equal(qualityGateAllowsDelivery(missing), false, '无入口不能让整体交付判通过');
+  assert.equal(store.getTask(empty.id).quality.status, 'no-test-entry', '状态必须能从任务记录读取');
+});
+
+test('只有 CLI 成员时也会执行他们产出的测试文件，并记录真实命令、退出码与输出', async () => {
+  const signal = new AbortController().signal;
+  const ws = workspace({
+    'tests/cli-generated.test.js': [
+      "import test from 'node:test';",
+      "import assert from 'node:assert/strict';",
+      "test('cli generated test really runs', () => {",
+      "  console.log('CLI_GENERATED_TEST_OUTPUT');",
+      '  assert.equal(2 + 2, 4);',
+      '});',
+      '',
+    ].join('\n'),
+  });
+  const task = store.createTask({ goal: 'CLI 成员质量门样本', workspace: ws.workspace });
+  const coder = store.findAgentByRole('coder');
+  const tester = store.findAgentByRole('tester');
+  const before = [coder, tester].map((agent) => ({ id: agent.id, mode: agent.mode, cli: { ...agent.cli } }));
+  try {
+    store.updateAgent(coder.id, { mode: 'cli', cli: { command: process.execPath, args: [] } });
+    store.updateAgent(tester.id, { mode: 'cli', cli: { command: process.execPath, args: [] } });
+    store.setPlan(task.id, [
+      { id: 'implement', title: '实现', role: 'coder', agentId: coder.id },
+      { id: 'test-design', title: '测试', role: 'tester', agentId: tester.id },
+    ]);
+    store.updateStep(task.id, 'implement', { status: 'done' });
+    store.updateStep(task.id, 'test-design', { status: 'done' });
+
+    const quality = await runQualityGate(store.getTask(task.id), { round: 0 }, signal);
+    assert.equal(quality.cli, true, 'CLI 成员任务不能被当作模拟任务');
+    assert.equal(quality.status, 'passed');
+    assert.equal(quality.code, 0);
+    assert.match(quality.command, /--test tests\//);
+    assert.match(quality.command, /node/i);
+    assert.ok(quality.elapsed >= 0, '耗时必须记录');
+    assert.match(`${quality.stdout}\n${quality.stderr}`, /CLI_GENERATED_TEST_OUTPUT/);
+    assert.equal(store.getTask(task.id).quality.command, quality.command, '真实命令必须落进任务记录');
+  } finally {
+    for (const item of before) {
+      store.updateAgent(item.id, { mode: item.mode, cli: item.cli });
+    }
+  }
 });
 
 test('workMsOf 只累加真实工序耗时，不拿墙钟冒充', () => {

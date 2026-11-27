@@ -1667,6 +1667,15 @@ export function stepAgentCandidates(step, preferred = null) {
 const TEST_TIMEOUT = CLI_TIMEOUTS.qualityGate;
 const PLACEHOLDER_TEST = /no test specified/i;
 
+function commandText(command, args = []) {
+  return [command, ...args]
+    .map((part) => {
+      const value = String(part ?? '');
+      return /[\s"'&|<>^()]/.test(value) ? `"${value.replace(/"/g, '\\"')}"` : value;
+    })
+    .join(' ');
+}
+
 /**
  * 从工作区探测真实测试入口。找不到就返回 null——宁可显示「没有测试入口」，
  * 也不要像以前那样在 CLI 模式下直接 skipped，假装质量门跑过了。
@@ -1705,7 +1714,16 @@ export function detectTestCommand(task) {
       /* package.json 坏了就当没有 */
     }
   }
-  if (exists('pyproject.toml') || exists('pytest.ini') || exists('tox.ini') || exists('setup.cfg')) {
+  if (exists('Makefile') && /^test\s*:/m.test(read('Makefile'))) {
+    return { command: 'make', args: ['test'], label: 'make test', source: 'Makefile' };
+  }
+  const pyproject = read('pyproject.toml');
+  const hasPytestConfig =
+    exists('pytest.ini') ||
+    exists('tox.ini') ||
+    /^\s*\[tool\.pytest(?:\]|\.)/m.test(pyproject) ||
+    /^\s*\[tool:pytest\]/m.test(read('setup.cfg'));
+  if (hasPytestConfig) {
     return { command: 'python', args: ['-m', 'pytest', '-q'], label: 'pytest', source: 'Python 测试配置' };
   }
   if (exists('Cargo.toml')) {
@@ -1713,9 +1731,6 @@ export function detectTestCommand(task) {
   }
   if (exists('go.mod')) {
     return { command: 'go', args: ['test', './...'], label: 'go test ./...', source: 'go.mod' };
-  }
-  if (exists('Makefile') && /^test\s*:/m.test(read('Makefile'))) {
-    return { command: 'make', args: ['test'], label: 'make test', source: 'Makefile' };
   }
   try {
     if (exists('tests')) {
@@ -1740,50 +1755,68 @@ export function detectTestCommand(task) {
 
 export async function runQualityGate(task, step, signal) {
   const round = step?.round || 0;
-  const plan = store.getTask(task.id).plan;
+  const current = store.getTask(task.id) || task;
+  const plan = current.plan || [];
   const implementation = [...plan].reverse().find((s) => s.role === 'coder' && s.status === 'done');
   const testDesign = [...plan].reverse().find((s) => s.role === 'tester' && s.status === 'done');
   const coder = implementation && store.getAgent(implementation.agentId);
   const tester = testDesign && store.getAgent(testDesign.agentId);
-  const cliMode = !!task.external || coder?.mode === 'cli' || tester?.mode === 'cli';
+  const cliMode = !!current.external || coder?.mode === 'cli' || tester?.mode === 'cli';
 
   // 真实 CLI 任务同样要跑工作区里真实存在的测试入口，不再一律 skipped
-  const detected = detectTestCommand(task);
+  const detected = detectTestCommand(current);
   if (!detected) {
     const quality = {
-      status: 'missing',
+      status: 'no-test-entry',
       reason:
-        '工作区里没找到可执行的测试入口（package.json scripts.test / pytest / Cargo / go.mod / Makefile / tests/），这一轮只能靠评审 VERDICT 判定',
+        '工作区里没找到可执行的测试入口（package.json scripts.test / Makefile / pytest 配置 / tests/），不能把本轮质量门判为通过',
       cli: cliMode,
       checkedAt: Date.now(),
       round,
     };
-    store.updateTask(task.id, { quality });
+    store.updateTask(current.id, { quality });
     return quality;
   }
 
-  store.updateTask(task.id, { quality: { status: 'running', command: detected.label, round } });
+  const command = commandText(detected.command, detected.args);
+  store.updateTask(current.id, {
+    quality: {
+      status: 'running',
+      command,
+      label: detected.label,
+      source: detected.source,
+      round,
+    },
+  });
+  const startedAt = Date.now();
   const res = await spawnCli({ cli: { command: detected.command, args: detected.args } }, '', {
-    cwd: task.workspace,
+    cwd: current.workspace,
     timeout: TEST_TIMEOUT,
     signal,
   });
   throwIfAborted(signal);
 
-  const status = res.code === 0 ? 'passed' : 'failed';
+  const timedOut = !!res.timedOut || res.code === -3;
+  const status = timedOut ? 'timeout' : res.code === 0 ? 'passed' : 'failed';
   const quality = {
     status,
-    command: detected.label,
+    command,
+    label: detected.label,
+    args: detected.args,
     source: detected.source,
     cli: cliMode,
     code: res.code,
+    timedOut,
+    elapsed: Number.isFinite(Number(res.elapsed)) ? Number(res.elapsed) : Date.now() - startedAt,
+    stdout: clip(String(res.stdout || '').trim(), 3000),
+    stderr: clip(String(res.stderr || '').trim(), 3000),
     log: clip(`${res.stdout}\n${res.stderr}`.trim(), 4000),
     checkedAt: Date.now(),
     round,
   };
-  store.updateTask(task.id, { quality });
+  store.updateTask(current.id, { quality });
 
-  const msg = store.addMessage(task.id, {
+  const msg = store.addMessage(current.id, {
     agentId: 'system',
     name: '质量门',
     role: 'system',
@@ -1791,12 +1824,17 @@ export async function runQualityGate(task, step, signal) {
     color: status === 'passed' ? '#34d399' : '#ff5538',
     kind: 'quality',
     done: true,
-    text: `**自动化质量门 · ${status === 'passed' ? '通过' : '未通过'}**\n\n- 入口：\`${detected.label}\`（${detected.source}）\n- 退出码：\`${res.code}\`${
-      quality.log ? `\n\n\`\`\`log\n${clip(quality.log, 1800)}\n\`\`\`` : ''
+    text: `**自动化质量门 · ${status === 'passed' ? '通过' : timedOut ? '超时' : '未通过'}**\n\n- 命令：\`${command}\`\n- 来源：${detected.source}\n- 退出码：\`${res.code}\`\n- 耗时：${quality.elapsed}ms${
+      quality.stdout ? `\n\n\`\`\`stdout\n${clip(quality.stdout, 1400)}\n\`\`\`` : ''
+    }${quality.stderr ? `\n\n\`\`\`stderr\n${clip(quality.stderr, 1400)}\n\`\`\`` : ''
     }`,
   });
-  store.endMessage(task.id, msg.id, {});
+  store.endMessage(current.id, msg.id, {});
   return quality;
+}
+
+export function qualityGateAllowsDelivery(quality) {
+  return quality?.status === 'passed';
 }
 
 async function executeSteps(task, steps, { outputs, speed, signal }) {
@@ -1864,20 +1902,18 @@ async function executeSteps(task, steps, { outputs, speed, signal }) {
         if (out.ok && step.role === 'reviewer') {
           const verdict = parseReviewVerdict(out.text);
           out.verdict = verdict === true ? 'pass' : verdict === false ? 'fail' : 'unknown';
-          out.passed = verdict === true && extra.quality?.status !== 'failed';
-          // 没有测试入口时不能说「质量门通过」——那一轮根本没有自动化把关，只有评审结论。
-          const gateMissing = extra.quality?.status === 'missing';
+          const gateStatus = extra.quality?.status || 'not-run';
+          const gatePassed = qualityGateAllowsDelivery(extra.quality);
+          out.passed = verdict === true && gatePassed;
           out.note = out.passed
             ? extra.selfReview
-              ? gateMissing
-                ? '评审通过（没有测试入口，且是自审）'
-                : '质量门通过（自审：没有独立评审席位）'
-              : gateMissing
-                ? '评审通过（没有测试入口，未经自动化质量门）'
-                : '质量门通过'
+              ? '质量门通过（自审：没有独立评审席位）'
+              : '质量门通过'
             : verdict === null
               ? '缺少明确评审结论'
-              : '未通过，进入返工';
+              : !gatePassed
+                ? `评审${verdict ? '通过' : '未通过'}，但质量门状态为 ${gateStatus}，不能交付`
+                : '未通过，进入返工';
         }
         if (out.ok) {
           if (index > 0) out.note = `${out.note || '已完成'} · 由 ${agent.name} 接替`;
