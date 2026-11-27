@@ -542,6 +542,7 @@ class Store {
           a.skills = skills;
         }
         for (const t of this.db.tasks) {
+          if (!Array.isArray(t.usageLedger)) t.usageLedger = [];
           if (t.status === 'running' || t.status === 'stopping' || t.status === 'queued') {
             const previousStatus = t.status;
             const recoveredAt = Date.now();
@@ -1083,6 +1084,7 @@ class Store {
       debate: { status: 'pending', proposals: [], critiques: [], decision: null },
       skillActivations: [],
       stats: { tokens: 0, tokensIn: 0, tokensOut: 0, agentRuns: 0, files: 0, ms: 0 },
+      usageLedger: [],
       workspace: root,
       sourceWorkspace: worktree?.source || root,
       worktree,
@@ -1125,6 +1127,14 @@ class Store {
       planVersion: task.planVersion || 0,
       planVersions: (task.planVersions || []).length,
       quality: task.quality || { status: 'pending' },
+      usage: {
+        entries: (task.usageLedger || []).length,
+        tokensIn: (task.usageLedger || []).reduce((sum, entry) => sum + (entry.tokensIn || 0), 0),
+        tokensOut: (task.usageLedger || []).reduce((sum, entry) => sum + (entry.tokensOut || 0), 0),
+        cost: (task.usageLedger || []).some((entry) => Number.isFinite(entry.cost))
+          ? (task.usageLedger || []).reduce((sum, entry) => sum + (Number(entry.cost) || 0), 0)
+          : null,
+      },
       skillActivations: (task.skillActivations || []).slice(-8),
       stats: task.stats,
       steps: task.plan.length,
@@ -1287,6 +1297,45 @@ class Store {
     this.broadcast({ type: 'task.stats', taskId, stats: task.stats });
     this.save({ tasks: [taskId], agents: !!agentId });
     return n;
+  }
+
+  recordProviderUsage(taskId, entry = {}) {
+    const task = this.getTask(taskId);
+    if (!task) return null;
+    if (!Array.isArray(task.usageLedger)) task.usageLedger = [];
+    const tokensIn = Math.max(0, Math.round(Number(entry.tokensIn) || 0));
+    const tokensOut = Math.max(0, Math.round(Number(entry.tokensOut) || 0));
+    const cost =
+      entry.cost !== null && entry.cost !== undefined && Number.isFinite(Number(entry.cost))
+        ? Number(entry.cost)
+        : null;
+    const saved = {
+      id: randomUUID(),
+      at: Number(entry.at) || Date.now(),
+      providerId: String(entry.providerId || '').slice(0, 64),
+      model: String(entry.model || '').slice(0, 160),
+      taskId: task.id,
+      runId: String(entry.runId || task.runId || '') || null,
+      agentId: String(entry.agentId || '').slice(0, 80),
+      tokensIn,
+      tokensOut,
+      cost,
+      source: ['cli', 'api', 'estimate'].includes(entry.source) ? entry.source : 'estimate',
+      usageSource: ['provider', 'estimate'].includes(entry.usageSource)
+        ? entry.usageSource
+        : 'estimate',
+      attempt: Math.max(1, Math.round(Number(entry.attempt) || 1)),
+      routeIndex: Math.max(0, Math.round(Number(entry.routeIndex) || 0)),
+      code: Number.isFinite(Number(entry.code)) ? Number(entry.code) : null,
+      elapsedMs: Math.max(0, Math.round(Number(entry.elapsedMs) || 0)),
+    };
+    task.usageLedger.push(saved);
+    if (task.usageLedger.length > 1000) {
+      task.usageLedger.splice(0, task.usageLedger.length - 1000);
+    }
+    this.broadcast({ type: 'usage.recorded', taskId: task.id, entry: { ...saved } });
+    this.save({ tasks: [task.id] });
+    return saved;
   }
 
   appendMessage(taskId, messageId, delta) {

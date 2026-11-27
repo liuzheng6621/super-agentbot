@@ -351,6 +351,19 @@ test('真实 CLI 调用失败后按 Provider 路由切换到备用网关', async
     assert.match(message.text, /BACKUP_OK/);
     assert.equal(message.meta.providerFallback, true);
     assert.equal(message.meta.providerId, backup.id);
+    const ledger = store.getTask(task.id).usageLedger;
+    assert.equal(ledger.length, 2, '失败的主 Provider 与成功的备用 Provider 都要入账');
+    assert.deepEqual(
+      ledger.map((entry) => entry.providerId),
+      [primary.id, backup.id],
+    );
+    assert.ok(ledger.every((entry) => entry.runId === store.getTask(task.id).runId));
+    assert.ok(ledger.every((entry) => entry.agentId === agent.id));
+    assert.ok(ledger.every((entry) => entry.usageSource === 'estimate'));
+    assert.ok(ledger.every((entry) => entry.cost === null));
+    assert.ok(ledger[0].tokensIn > 0);
+    assert.equal(ledger[0].tokensOut, 0, '失败且无 stdout 的尝试输出为 0');
+    assert.ok(ledger[1].tokensIn > 0 && ledger[1].tokensOut > 0);
   } finally {
     store.removeAgent(agent.id);
     store.removeProvider(primary.id);

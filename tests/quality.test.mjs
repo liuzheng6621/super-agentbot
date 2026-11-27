@@ -286,6 +286,48 @@ test('token 账必须算输入，不能只算输出', () => {
   assert.equal(stats.tokens, 1205, '累计 = 输入 + 输出');
 });
 
+test('Provider 用量账本按 run 记录真实归属，未知成本保持 null', async () => {
+  const task = store.createTask({ goal: 'provider usage ledger' });
+  store.updateTask(task.id, { runId: 'run-usage-1' });
+  const agent = store.findAgentByRole('coder');
+  const entry = store.recordProviderUsage(task.id, {
+    providerId: 'local-default',
+    model: 'local-model',
+    runId: 'run-usage-1',
+    agentId: agent.id,
+    tokensIn: 321,
+    tokensOut: 123,
+    cost: null,
+    source: 'cli',
+    usageSource: 'estimate',
+    attempt: 1,
+    routeIndex: 0,
+    code: 0,
+    elapsedMs: 45,
+  });
+
+  assert.equal(entry.taskId, task.id);
+  assert.equal(entry.runId, 'run-usage-1');
+  assert.equal(entry.providerId, 'local-default');
+  assert.equal(entry.tokensIn, 321);
+  assert.equal(entry.tokensOut, 123);
+  assert.equal(entry.cost, null);
+  assert.equal(entry.usageSource, 'estimate');
+
+  const summary = store.taskSummary(store.getTask(task.id));
+  assert.equal(summary.usage.entries, 1);
+  assert.equal(summary.usage.tokensIn, 321);
+  assert.equal(summary.usage.tokensOut, 123);
+  assert.equal(summary.usage.cost, null, '没有价格配置时不能伪造 0 成本');
+
+  store.flush();
+  const saved = JSON.parse(
+    fs.readFileSync(path.join(temp, 'db.json'), 'utf8'),
+  ).tasks.find((item) => item.id === task.id);
+  assert.equal(saved.usageLedger[0].runId, 'run-usage-1');
+  assert.equal(saved.usageLedger[0].tokensOut, 123);
+});
+
 test.after(() => {
   store.flush();
   try {

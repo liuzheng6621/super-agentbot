@@ -138,6 +138,7 @@ function taskDetail(task) {
     plan: task.plan,
     planVersion: task.planVersion || 0,
     planVersions: task.planVersions || [],
+    usageLedger: (task.usageLedger || []).slice(-200),
     messages: task.messages,
     artifacts: task.artifacts,
     debate: task.debate || null,

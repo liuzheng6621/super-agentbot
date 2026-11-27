@@ -743,6 +743,7 @@ async function cliMessage(
 
   // 重试和 Provider 回退分别记账，避免只统计最后一次尝试。
   let promptTokens = 0;
+  let responseTokens = 0;
   let res = { code: -1, stdout: '', stderr: '没有可执行的 Provider', elapsed: 0 };
   let finalExecAgent = route[0] || agentForExecution(agent);
   let finalAttempts = 0;
@@ -825,6 +826,23 @@ async function cliMessage(
         } catch (err) {
           routeResult = { code: -1, stdout: '', stderr: err.message, elapsed: 0 };
         }
+        const attemptTokensOut = estimateTokens(routeResult.stdout || '');
+        responseTokens += attemptTokensOut;
+        store.recordProviderUsage(task.id, {
+          providerId: provider?.id || '',
+          model: provider?.model || execAgent.cli?.model || '',
+          runId: task.runId,
+          agentId: agent.id,
+          tokensIn: attemptTokens,
+          tokensOut: attemptTokensOut,
+          cost: null,
+          source: 'cli',
+          usageSource: 'estimate',
+          attempt,
+          routeIndex,
+          code: routeResult.code,
+          elapsedMs: routeResult.elapsed,
+        });
       }
       const combined = `${routeResult.stdout || ''}\n${routeResult.stderr || ''}`;
       if (
@@ -956,7 +974,7 @@ async function cliMessage(
   const finalPolicy = res.policy || resolveCliPolicy(finalExecAgent);
   const finalPolicyData = policySummary(finalPolicy);
   store.endMessage(task.id, msg.id, {
-    tokens: estimateTokens(res.stdout),
+    tokens: responseTokens || estimateTokens(res.stdout),
     tokensIn: promptTokens,
     ms: res.elapsed,
     exitCode: res.code,
@@ -966,6 +984,8 @@ async function cliMessage(
     settledEarly: !!res.settledEarly,
     providerId: finalExecAgent.provider?.id || '',
     providerName: finalExecAgent.provider?.name || '',
+    usageSource: 'estimate',
+    cost: null,
     providerRoute: route.map((item) => ({
       id: item.provider?.id || '',
       name: item.provider?.name || '',
