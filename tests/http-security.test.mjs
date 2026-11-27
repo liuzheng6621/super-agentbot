@@ -558,6 +558,114 @@ test('HTTP profiles are readable by agents, writable only by operators, and expo
   }
 });
 
+test('HTTP provider copy creates an editable profile without resolving credentials', async () => {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-http-provider-copy-'));
+  const port = await availablePort();
+  const baseUrl = `http://127.0.0.1:${port}`;
+  const child = spawn(process.execPath, ['server/index.mjs'], {
+    cwd: path.resolve('.'),
+    env: {
+      ...process.env,
+      PORT: String(port),
+      HOST: '127.0.0.1',
+      AGENTFORGE_DATA_DIR: temp,
+      AGENTFORGE_API_TOKEN: TOKEN,
+      COPY_SOURCE_KEY: 'resolved-secret-must-not-leak',
+      AGENTFORGE_SKIP_TEAM_BOOTSTRAP: '1',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+    windowsHide: true,
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk;
+  });
+
+  try {
+    await waitForHealth(baseUrl, child);
+    const headers = {
+      Authorization: `Bearer ${TOKEN}`,
+      'Content-Type': 'application/json',
+    };
+    const created = await fetch(`${baseUrl}/api/providers`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        id: 'http-copy-source',
+        name: 'HTTP Copy Source',
+        kind: 'openai-compatible',
+        baseUrl: 'http://127.0.0.1:3425/v1',
+        model: 'copy-model',
+        apiKeyRef: 'COPY_SOURCE_KEY',
+        env: { OPENAI_API_KEY: '{{apiKey}}' },
+        cliBindings: {
+          codex: {
+            args: ['exec', '-c', 'model={{model}}', '{{prompt}}'],
+            env: { OPENAI_API_KEY: '{{apiKey}}' },
+          },
+        },
+      }),
+    });
+    assert.equal(created.status, 201);
+
+    const copied = await fetch(`${baseUrl}/api/providers/http-copy-source/copy`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({}),
+    });
+    assert.equal(copied.status, 201);
+    const copiedProvider = (await copied.json()).provider;
+    assert.equal(copiedProvider.id, 'http-copy-source-copy');
+    assert.equal(copiedProvider.name, 'HTTP Copy Source 副本');
+    assert.equal(copiedProvider.apiKeyRef, 'COPY_SOURCE_KEY');
+    assert.equal(copiedProvider.env.OPENAI_API_KEY, '{{apiKey}}');
+    assert.equal(copiedProvider.cliBindings.codex.env.OPENAI_API_KEY, '{{apiKey}}');
+    assert.equal(JSON.stringify(copiedProvider).includes('resolved-secret-must-not-leak'), false);
+
+    const patched = await fetch(
+      `${baseUrl}/api/providers/http-copy-source-copy`,
+      {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ name: 'Edited Copy', maxConcurrency: 4 }),
+      },
+    );
+    assert.equal(patched.status, 200);
+    assert.equal((await patched.json()).provider.name, 'Edited Copy');
+
+    const missing = await fetch(`${baseUrl}/api/providers/missing-provider/copy`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({}),
+    });
+    assert.equal(missing.status, 404);
+
+    const state = await fetch(`${baseUrl}/api/state`, { headers }).then((response) =>
+      response.json(),
+    );
+    assert.ok(state.providers.some((provider) => provider.id === 'http-copy-source-copy'));
+    assert.equal(JSON.stringify(state).includes('resolved-secret-must-not-leak'), false);
+  } catch (err) {
+    throw new Error(`${err.message}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+  } finally {
+    if (child.exitCode === null) child.kill('SIGTERM');
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once('exit', resolve);
+      setTimeout(resolve, 2000).unref();
+    });
+    try {
+      fs.rmSync(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 120 });
+    } catch {
+      /* Windows can hold the data directory briefly. */
+    }
+  }
+});
+
 test('HTTP command approvals keep agents request-only and execute approved commands once', async () => {
   const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-http-approval-'));
   const port = await availablePort();

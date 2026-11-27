@@ -970,9 +970,19 @@ const server = http.createServer(async (req, res) => {
         return json(res, 400, { error: err.message });
       }
     }
-    const providerMatch = pathname.match(/^\/api\/providers\/([\w-]+)$/);
+    const providerMatch = pathname.match(/^\/api\/providers\/([\w-]+)(\/copy)?$/);
     if (providerMatch) {
       const providerId = providerMatch[1];
+      if (providerMatch[2] && method === 'POST') {
+        const body = await readBody(req);
+        try {
+          const provider = store.copyProvider(providerId, body);
+          if (!provider) return json(res, 404, { error: 'Provider 不存在' });
+          return json(res, 201, { provider: redactProvider(provider) });
+        } catch (err) {
+          return json(res, 400, { error: err.message });
+        }
+      }
       if (method === 'PATCH') {
         const body = await readBody(req);
         const provider = store.updateProvider(providerId, body);

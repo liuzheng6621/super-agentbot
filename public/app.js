@@ -4003,6 +4003,7 @@ function renderProviders() {
               <span>${escapeHtml(provider.id)} · ${escapeHtml(provider.kind)} · 并发 ${provider.maxConcurrency}${provider.model ? ` · ${escapeHtml(provider.model)}` : ""}${Object.keys(provider.cliBindings || {}).length ? ` · ${Object.keys(provider.cliBindings).length} 个 CLI 模板` : ""}${(provider.capabilities || []).length ? ` · ${escapeHtml(provider.capabilities.join("/"))}` : ""}</span>
             </div>
             <span class="provider-row-state">${provider.enabled === false ? "OFF" : "ON"}</span>
+            <button type="button" class="link-btn" data-provider-copy="${escapeHtml(provider.id)}">复制</button>
             <button type="button" class="link-btn" data-provider-edit="${escapeHtml(provider.id)}">编辑</button>
             ${
               provider.builtin
@@ -4214,6 +4215,22 @@ async function deleteProvider(id) {
     toast("Provider 已删除", "ok");
   } catch (err) {
     toast(`删除失败：${err.message}`, "err");
+  }
+}
+
+async function copyProvider(id) {
+  try {
+    const result = await api(`/api/providers/${encodeURIComponent(id)}/copy`, {
+      method: "POST",
+      body: {},
+    });
+    S.providers.push(result.provider);
+    renderProviders();
+    renderProviderChoices(result.provider.id);
+    fillProviderForm(result.provider);
+    toast("Provider Profile 已复制，请确认新 ID 与名称", "ok");
+  } catch (err) {
+    toast(`复制失败：${err.message}`, "err");
   }
 }
 
@@ -4677,6 +4694,11 @@ function bind() {
     saveProvider();
   });
   $("#providerList").addEventListener("click", (e) => {
+    const copy = e.target.closest("[data-provider-copy]");
+    if (copy) {
+      copyProvider(copy.dataset.providerCopy);
+      return;
+    }
     const edit = e.target.closest("[data-provider-edit]");
     if (edit) {
       const provider = S.providers.find((item) => item.id === edit.dataset.providerEdit);

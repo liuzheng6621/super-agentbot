@@ -1504,6 +1504,29 @@ class Store {
     return provider;
   }
 
+  copyProvider(id, patch = {}) {
+    const source = this.getProvider(id);
+    if (!source) return null;
+    const requestedId = String(patch.id || '').trim();
+    const requestedName = String(patch.name || '').trim();
+    let copyId = requestedId;
+    if (!copyId) {
+      const base = `${source.id}-copy`;
+      copyId = base;
+      for (let index = 2; this.getProvider(copyId); index += 1) {
+        copyId = `${base}-${index}`;
+      }
+    }
+    return this.addProvider({
+      ...normalizeProvider(source),
+      ...patch,
+      id: copyId,
+      name: requestedName || `${source.name} 副本`,
+      builtin: false,
+      createdAt: Date.now(),
+    });
+  }
+
   removeProvider(id) {
     if (id === DEFAULT_PROVIDER_ID) return false;
     const index = this.db.providers.findIndex((provider) => provider.id === id);

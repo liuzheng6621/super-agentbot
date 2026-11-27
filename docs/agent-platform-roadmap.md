@@ -104,7 +104,7 @@ Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile �
 实现顺序：
 
 1. 把 CLI 参数中的固定网关、模型和凭据改为模板变量。已完成 `cliBindings`。
-2. Provider Profile 持久化，并支持创建、测试、复制和停用。已完成创建、测试和停用，复制待补。
+2. Provider Profile 持久化，并支持创建、测试、复制和停用。已完成创建、测试、复制和停用。
 3. Agent 可选择 Provider Profile 与模型，健康检查按 Profile 执行。已完成。
 4. 增加路由与回退：同一角色可配置主 Provider、备用 Provider 和预算上限。已完成主/备路由和失败回退，费用预算待补。
 5. 凭据只保存引用或系统密钥，不把明文 API Key 写进 `db.json`。

@@ -161,3 +161,49 @@ test('agent model overrides provider model on the real execution copy', () => {
   assert.equal(execution.cli.env.AGENTFORGE_MODEL, 'agent-model');
   assert.deepEqual(execution.cli.args, ['exec', '-c', 'model=agent-model', '{{prompt}}']);
 });
+
+test('provider profiles can be copied without sharing ids or resolving secrets', () => {
+  const source = store.addProvider({
+    id: 'copy-source',
+    name: 'Copy Source',
+    kind: 'openai-compatible',
+    baseUrl: 'http://127.0.0.1:3425/v1',
+    model: 'copy-model',
+    apiKeyRef: 'COPY_SOURCE_KEY',
+    env: { OPENAI_API_KEY: '{{apiKey}}', STATIC_FLAG: 'on' },
+    capabilities: ['chat', 'vision'],
+    maxConcurrency: 3,
+    cliBindings: {
+      codex: {
+        args: ['exec', '--model', '{{model}}', '{{prompt}}'],
+        env: { OPENAI_API_KEY: '{{apiKey}}' },
+      },
+    },
+  });
+  const first = store.copyProvider(source.id);
+  const second = store.copyProvider(source.id);
+  assert.equal(first.id, 'copy-source-copy');
+  assert.equal(second.id, 'copy-source-copy-2');
+  assert.notEqual(first.id, source.id);
+  assert.equal(first.name, 'Copy Source 副本');
+  assert.equal(first.apiKeyRef, 'COPY_SOURCE_KEY');
+  assert.equal(first.env.OPENAI_API_KEY, '{{apiKey}}');
+  assert.equal(first.cliBindings.codex.env.OPENAI_API_KEY, '{{apiKey}}');
+  assert.equal(first.enabled, source.enabled);
+  assert.equal(first.builtin, false);
+  assert.deepEqual(first.capabilities, ['chat', 'vision']);
+  assert.equal(store.getProvider(source.id).name, 'Copy Source');
+
+  const named = store.copyProvider(source.id, {
+    id: 'copy-custom',
+    name: 'Custom Copy',
+    enabled: false,
+  });
+  assert.equal(named.id, 'copy-custom');
+  assert.equal(named.name, 'Custom Copy');
+  assert.equal(named.enabled, false);
+  assert.throws(
+    () => store.copyProvider(source.id, { id: 'copy-custom' }),
+    /Provider ID 已存在/,
+  );
+});

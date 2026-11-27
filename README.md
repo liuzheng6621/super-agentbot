@@ -316,6 +316,7 @@ Token 已带最小主体和作用域：`AGENTFORGE_API_TOKEN` 是跨租户 owner
 | `POST` `DELETE` | `/api/automations/:id/wait` | 进入 durable 事件等待 / 取消等待 |
 | `POST` | `/api/automations/:id/events` | 以 `{ eventId }` 唤醒等待中的 Automation；重复事件幂等 |
 | `GET` `POST` | `/api/providers` | Provider Profile 列表 / 新增 |
+| `POST` | `/api/providers/:id/copy` | 复制 Profile；生成新 ID 和名称，密钥仍只保存环境变量引用 |
 | `PATCH` `DELETE` | `/api/providers/:id` | 修改 / 删除 Profile（`local-default` 不可删除） |
 | `GET` `POST` | `/api/profiles` | 可复用 Agent Profile 列表 / 创建 |
 | `GET` `PATCH` `DELETE` | `/api/profiles/:id` | 查看、修改或删除 Profile |
