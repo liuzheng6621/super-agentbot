@@ -197,6 +197,8 @@ Provider Profile 已落地。当前结构示例：
 | 能力 | 状态 | 已实现内容 |
 | --- | --- | --- |
 | 计划版本 | 已完成 | 初版、返工和手动重规划都生成不可变快照；保留已完成工序；自动重规划最多一次 |
+| 动态工序图 | 已完成 | 规划师输出经严格 schema 校验后替换模板；支持省略设计、多 coder / tester 并行、终端 reviewer 归一化和模板回退；记录 `plan.generated` / `plan.fallback` / `plan.replanned` |
+| 动态计划并发 | 已完成 | 同一 Agent 默认串行，不同 Agent 可并行；无独立席位时同角色工序排队，不能并发抢占同一执行上下文 |
 | 协作消息路由 | 已完成 | 消息记录来源、目标、父消息、关联工序、产物引用和 correlationId |
 | Tool Gateway 第一层 | 已完成 | 统一工具描述、Owner/Agent/System 主体、工具白名单、工作区执行和审计事件 |
 | 工作区控制台 | 已完成 | 计划版本、协作消息、工具审计与原有文件、执行泳道、Diff 统一展示 |
@@ -258,12 +260,14 @@ M3 不包含：自由 shell、Agent 自审批、MCP 写工具、Provider fill-fi
 | 阶段 | 重点 | 交付物 |
 | --- | --- | --- |
 | P0（已完成） | 工作区 API、全屏控制台、工具白名单、Git worktree/clone 回退、Diff 与事件流 | 可用的单机协作台 |
-| P1（第一层已完成） | Tool Gateway、计划版本、消息路由、Provider Profile、CLI 参数模板与自动回退、CLI 执行策略 | 平台 API 可校验、CLI 可强制或明确拒绝、可审计、可重规划 |
+| P1（第一层已完成） | Tool Gateway、动态工序图、计划版本、消息路由、Provider Profile、CLI 参数模板与自动回退、CLI 执行策略 | 平台 API 可校验、CLI 可强制或明确拒绝、可审计、可动态规划 |
 | P2（已完成基础层） | 全局 Scheduler、任务并发、Provider 配额、Agent 租约、Agent Profile | 稳定的多任务并发 |
 | M2（团队服务基线，已完成） | 共享服务 Token、CORS / 审计、trace / span、Automation、启动恢复 | 可部署的团队服务基线 |
 | M3（已完成） | 身份与审计、用量 / 上下文、历史与幂等、只读 MCP、受控执行与审批 | 高风险能力前置边界已补齐 |
 | M4（已完成） | Agent Profile、工作区池、读后写守卫、事务回滚、DAG 图与时间回放 | 面向复杂项目的分工与工作区 |
 | M5（已完成基础层） | 租户隔离与配额、OTLP、多实例 JSON + 锁 / 租约、目录懒加载、`/api/state` 分页 | 生产化与规模化基础；完整账号 / RBAC / SSO 仍待后续 |
+
+动态计划默认开启（`dynamicPlanEnabled: true`），`maxPlanSteps` 上限为 12；`fast` 预设显式关闭动态计划。规划师输出不合法时保留模板并记录 `plan.fallback`，不会把回退误报成规划成功。
 
 ## 下一阶段 backlog
 
@@ -278,6 +282,8 @@ M3 不包含：自由 shell、Agent 自审批、MCP 写工具、Provider fill-fi
 | P2 | 完整账号 / RBAC / SSO | 已有 Token 主体、作用域、租户过滤和任务配额 | 需要用户身份、角色权限、SSO 和按用户计费时再做 |
 | P2 | 外部数据库 / 分布式队列 | 当前是 JSON + 文件锁 + 租约，多实例可共享同一数据目录 | SQLite 或队列引入前先做架构决策，保持零依赖承诺清楚 |
 | P2 | 真实 CLI 交付矩阵 | 自动测试覆盖调用契约、Provider 注入、Windows `.cmd`、超时与进程回收 | 逐项记录 15 个内置候选的安装版本、授权状态和一次真实交付 |
+| P2 | 动态计划条件分支与循环 | 当前只支持有向无环图；条件分支、循环、运行中插删工序和跨任务依赖未实现 | 先补可回放的图语义和失败恢复，再开放运行中变更 |
+| P2 | 规划质量评估 | 已有严格校验、回退事件和计划版本；尚无跨模型的回退率 / 成本对比报表 | 汇总 `plan.generated`、`plan.fallback`、时长与 token，再决定规划提示词和模型策略 |
 
 ## 后续 backlog
 

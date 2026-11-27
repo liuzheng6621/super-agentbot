@@ -571,7 +571,7 @@ function emptyDb() {
       debateParticipants: 5,
       debatePoolSeats: 1,
       debateConcurrency: 2,
-      dynamicPlanEnabled: false,
+      dynamicPlanEnabled: true,
       maxPlanSteps: 12,
       timeouts: defaultTimeouts(),
       automations: [],

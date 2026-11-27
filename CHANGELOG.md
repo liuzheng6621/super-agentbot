@@ -6,6 +6,8 @@
 
 ### Added
 
+- 规划师动态工序图：`plan` 完成后解析并校验 JSON DAG，支持省略架构工序、多 coder / tester 并行、终端 reviewer 归一化和模板回退；记录 `plan.generated` / `plan.fallback` / `plan.replanned`，并保留不可变计划版本。
+- 动态计划设置：`dynamicPlanEnabled` 默认开启，`fast` 预设显式关闭；`maxPlanSteps` 可配置 2 至 12。同一 Agent 的工序串行执行，不同 Agent 可并行。
 - Provider Profile 支持复制，保留密钥引用、CLI 绑定和环境变量模板；团队体检复用已绑定 Profile，覆盖模型、Base URL、密钥环境引用与 Windows `.cmd`。
 - 任务优先级调度、平台产物配额、回收站保留期、增量工作区索引，以及 Automation durable `await_event` 的持久等待、幂等唤醒、取消和完成对账。
 - 真实质量门：探测 `package.json scripts.test`、Makefile、pytest 配置、Cargo、Go 与 `tests/` 入口；CLI 成员产出的测试同样执行，并记录命令、退出码、耗时和 stdout / stderr 摘录。没有入口时返回 `no-test-entry`，不得交付。
@@ -18,6 +20,7 @@
 
 ### Changed
 
+- 执行链路从固定五步流水线升级为“规划师动态 DAG + 模板兜底”；多 coder 自审判断聚合全部实现者，返工路径优先使用评审阻塞项和真实产物。
 - `db.json` 持久化采用 200ms dirty 窗口，按 `agents / profiles / providers / settings / tasks` 记录脏区，只重新序列化变化任务；使用临时文件 + 原子替换，并在正常退出、`SIGINT` / `SIGTERM` 前 flush。当前没有显式 `fsync`。
 - `CANDIDATES` 移除 Magpie 地址、模型和凭据参数，统一由 Provider Profile `cliBindings` 注入；内置候选实际为 15 个。
 - 测试入口探测与质量门从 `orchestrator.mjs` 提取到 `server/test-entry.mjs`，保留兼容导出。
