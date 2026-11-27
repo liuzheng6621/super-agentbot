@@ -1,7 +1,15 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { store, ROOT, DATA_DIR, WORKSPACE_DIR, TOOL_CATALOG, ROLE_TOOLS } from './store.mjs';
+import {
+  store,
+  ROOT,
+  DATA_DIR,
+  WORKSPACE_DIR,
+  TOOL_CATALOG,
+  ROLE_TOOLS,
+  taskTranscript,
+} from './store.mjs';
 import {
   agentRouteForExecution,
   isQueued,
@@ -421,6 +429,20 @@ const server = http.createServer(async (req, res) => {
         scheduleTask(task.id, { speed, source: 'api.create' });
       }
       return json(res, 201, { task: taskDetail(store.getTask(task.id)) });
+    }
+
+    const exportMatch = pathname.match(/^\/api\/tasks\/([\w-]+)\/export$/);
+    if (exportMatch && method === 'GET') {
+      const task = store.getTask(exportMatch[1]);
+      if (!task) return json(res, 404, { error: '任务不存在' });
+      const transcript = taskTranscript(task, searchParams.get('format') || 'markdown');
+      res.writeHead(200, {
+        'Content-Type': transcript.contentType,
+        'Content-Disposition': `attachment; filename="${transcript.filename}"`,
+        'Cache-Control': 'no-store',
+        'Content-Length': Buffer.byteLength(transcript.body),
+      });
+      return res.end(transcript.body);
     }
 
     const taskMatch = pathname.match(

@@ -29,6 +29,7 @@ const MAX_MESSAGES = 400;
 const MAX_TASK_EVENTS = 800;
 const MAX_FILE_CHANGES = 500;
 const MAX_PLAN_VERSIONS = 40;
+const MAX_SKILL_ACTIVATIONS = 40;
 const SAVE_WINDOW_MS = 200;
 
 export const ROLE_ORDER = ['planner', 'architect', 'coder', 'tester', 'reviewer'];
@@ -180,6 +181,18 @@ export function normalizeTools(value, role) {
   return [...new Set(input.filter((tool) => allowed.has(String(tool))))];
 }
 
+export function normalizeSkills(value) {
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(
+      value
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .slice(0, 40),
+    ),
+  ];
+}
+
 function normalizePlanStep(step = {}, fallbackId = 'step-1', used = new Set(), reset = false) {
   let id = String(step.id || fallbackId);
   if (used.has(id)) id = `${fallbackId}-${randomUUID().slice(0, 4)}`;
@@ -202,6 +215,10 @@ function normalizePlanStep(step = {}, fallbackId = 'step-1', used = new Set(), r
     delete saved.startedAt;
     delete saved.endedAt;
     delete saved.verdict;
+    delete saved.verdictDetails;
+    delete saved.selfReview;
+    delete saved.reviewerId;
+    delete saved.implementerId;
     delete saved.resultText;
     delete saved.outputRole;
     delete saved.outputName;
@@ -481,6 +498,9 @@ class Store {
           const executionPolicy = normalizeExecutionPolicy(a.executionPolicy);
           if (executionPolicy !== a.executionPolicy) recovered = true;
           a.executionPolicy = executionPolicy;
+          const skills = normalizeSkills(a.skills);
+          if (JSON.stringify(skills) !== JSON.stringify(a.skills || [])) recovered = true;
+          a.skills = skills;
         }
         for (const t of this.db.tasks) {
           if (t.status === 'running' || t.status === 'stopping' || t.status === 'queued') {
@@ -524,9 +544,16 @@ class Store {
           }
           if (!Array.isArray(t.events)) t.events = [];
           if (!Array.isArray(t.fileChanges)) t.fileChanges = [];
+          if (!Array.isArray(t.skillActivations)) {
+            t.skillActivations = [];
+            recovered = true;
+          }
           if (t.events.length > MAX_TASK_EVENTS) t.events.splice(0, t.events.length - MAX_TASK_EVENTS);
           if (t.fileChanges.length > MAX_FILE_CHANGES) {
             t.fileChanges.splice(0, t.fileChanges.length - MAX_FILE_CHANGES);
+          }
+          if (t.skillActivations.length > MAX_SKILL_ACTIVATIONS) {
+            t.skillActivations.splice(0, t.skillActivations.length - MAX_SKILL_ACTIVATIONS);
           }
         }
         if (recovered) this.flush();
@@ -768,7 +795,7 @@ class Store {
       title: patch.title || '自定义智能体',
       color: patch.color || '#818cf8',
       tagline: patch.tagline || '',
-      skills: patch.skills || [],
+      skills: normalizeSkills(patch.skills),
       tools: normalizeTools(patch.tools, role),
       executionPolicy: normalizeExecutionPolicy(patch.executionPolicy),
       mode: patch.mode === 'cli' ? 'cli' : 'sim',
@@ -837,6 +864,7 @@ class Store {
     }
     // 先把旧 cli 存下来再合并，否则 Object.assign 已经把 agent.cli 覆盖成新对象了
     if (patch.cli) agent.cli = { ...prevCli, ...patch.cli };
+    if (patch.skills !== undefined) agent.skills = normalizeSkills(patch.skills);
     const role = agent.role;
     if (hasExplicitTools) agent.tools = normalizeTools(patch.tools, role);
     else if (patch.role && role !== prevRole) agent.tools = toolsForRole(role);
@@ -985,6 +1013,7 @@ class Store {
       autoReplans: [],
       quality: { status: 'pending' },
       debate: { status: 'pending', proposals: [], critiques: [], decision: null },
+      skillActivations: [],
       stats: { tokens: 0, tokensIn: 0, tokensOut: 0, agentRuns: 0, files: 0, ms: 0 },
       workspace: root,
       sourceWorkspace: worktree?.source || root,
@@ -1026,6 +1055,7 @@ class Store {
       planVersion: task.planVersion || 0,
       planVersions: (task.planVersions || []).length,
       quality: task.quality || { status: 'pending' },
+      skillActivations: (task.skillActivations || []).slice(-8),
       stats: task.stats,
       steps: task.plan.length,
       doneSteps: task.plan.filter((s) => s.status === 'done').length,
@@ -1578,6 +1608,231 @@ class Store {
     this.save({ tasks: [taskId] });
     return found;
   }
+}
+
+export function redactTranscriptText(value) {
+  return String(value ?? '')
+    .replace(
+      /(\b(?:[A-Z][A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD)|api[_-]?key|access[_-]?token|secret)\b\s*[:=]\s*)(["']?)([^\s"'`,;}]+)/gi,
+      '$1$2[REDACTED]',
+    )
+    .replace(/\b(?:sk|pk|ghp|github_pat|xox[baprs])[-_A-Za-z0-9]{12,}\b/g, '[REDACTED]')
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{12,}/gi, 'Bearer [REDACTED]');
+}
+
+function transcriptTime(value) {
+  if (!value) return '—';
+  const date = new Date(Number(value));
+  return Number.isNaN(date.getTime()) ? String(value) : date.toISOString();
+}
+
+function transcriptJson(value) {
+  return redactTranscriptText(JSON.stringify(value ?? null, null, 2));
+}
+
+function transcriptHtmlEscape(value) {
+  return redactTranscriptText(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function transcriptMarkdownBody(task) {
+  const quality = task.quality || { status: 'pending' };
+  const plan = Array.isArray(task.plan) ? task.plan : [];
+  const messages = Array.isArray(task.messages) ? task.messages : [];
+  const events = Array.isArray(task.events) ? task.events : [];
+  const artifacts = Array.isArray(task.artifacts) ? task.artifacts : [];
+  const changes = Array.isArray(task.fileChanges) ? task.fileChanges : [];
+  const skillActivations = Array.isArray(task.skillActivations) ? task.skillActivations : [];
+  const lines = [
+    `# ${task.title || 'AgentForge 运行记录'}`,
+    '',
+    `- 任务 ID: \`${task.id}\``,
+    `- 目标: ${task.goal || '—'}`,
+    `- 状态: \`${task.status || 'unknown'}\``,
+    `- 模式: \`${task.mode || 'unknown'}\` / \`${task.flowMode || 'auto'}\``,
+    `- Run ID: \`${task.runId || '—'}\``,
+    `- 工作区: \`${task.workspace || '—'}\``,
+    `- 创建: ${transcriptTime(task.createdAt)}`,
+    `- 结束: ${transcriptTime(task.finishedAt || task.endedAt)}`,
+    '',
+    '## 质量门',
+    '',
+    `- 状态: \`${quality.status || 'pending'}\``,
+    `- 命令: \`${quality.command || '—'}\``,
+    `- 退出码: \`${quality.code ?? '—'}\``,
+    `- 耗时: \`${quality.elapsed ?? '—'} ms\``,
+    `- 来源: ${quality.source || '—'}`,
+    `- 评审身份: ${quality.reviewerName || quality.reviewerId || '—'} → ${quality.implementerName || quality.implementerId || '—'}`,
+    `- 自审: ${quality.selfReview ? '是' : '否'}`,
+    quality.reason ? `- 说明: ${quality.reason}` : '',
+    '',
+    quality.stdout ? '### stdout\n\n```text\n' + redactTranscriptText(quality.stdout) + '\n```\n' : '',
+    quality.stderr ? '### stderr\n\n```text\n' + redactTranscriptText(quality.stderr) + '\n```\n' : '',
+    '## 执行计划',
+    '',
+    plan.length
+      ? [
+          '| 工序 | 角色 | 状态 | 负责人 | 轮次 | 结论 |',
+          '| --- | --- | --- | --- | --- | --- |',
+          ...plan.map((step) => {
+            const verdict = step.verdictDetails
+              ? `${String(step.verdictDetails.decision || 'unknown').toUpperCase()} · B${step.verdictDetails.blockers ?? '?'} / S${step.verdictDetails.should ?? '?'}`
+              : step.verdict || '—';
+            return `| ${redactTranscriptText(step.title || step.id)} | ${step.role || '—'} | ${step.status || '—'} | ${step.agentId || '—'} | ${step.round || 0} | ${verdict} |`;
+          }),
+        ].join('\n')
+      : '暂无计划。',
+    '',
+    '## 技能激活',
+    '',
+    skillActivations.length
+      ? skillActivations
+          .map((activation) => {
+            const names = (activation.skills || [])
+              .map((skill) => `${skill.name || skill.id} (${skill.id}, ${skill.source || 'unknown'})`)
+              .join('、');
+            return `- ${activation.stepTitle || activation.stepId || activation.phase || '调用'}: ${names || '—'}`;
+          })
+          .join('\n')
+      : '未激活技能。',
+    '',
+    '## 协作消息',
+    '',
+    messages.length
+      ? messages
+          .map((message) => {
+            const header = `### ${transcriptTime(message.createdAt)} · ${message.name || message.role || 'AI'} · ${message.kind || 'text'}`;
+            return `${header}\n\n${redactTranscriptText(message.text || '')}`;
+          })
+          .join('\n\n---\n\n')
+      : '暂无消息。',
+    '',
+    '## 事件',
+    '',
+    events.length
+      ? events
+          .slice(-240)
+          .map(
+            (event) =>
+              `### ${transcriptTime(event.at)} · ${event.type || 'event'}\n\n\`\`\`json\n${transcriptJson(event.data ?? event)}\n\`\`\``,
+          )
+          .join('\n\n')
+      : '暂无事件。',
+    '',
+    '## 产物',
+    '',
+    artifacts.length
+      ? artifacts
+          .map(
+            (artifact) =>
+              `- \`${artifact.path}\` · ${artifact.bytes || 0} bytes · ${artifact.agentId || '—'}`,
+          )
+          .join('\n')
+      : '暂无产物。',
+    '',
+    '## 文件变更',
+    '',
+    changes.length
+      ? changes
+          .map(
+            (change) =>
+              `- \`${change.status || 'M'} ${change.path}\` · ${change.agentId || '—'} · ${transcriptTime(change.at)}`,
+          )
+          .join('\n')
+      : '暂无文件变更。',
+    '',
+    '## 方案讨论',
+    '',
+    task.debate?.decision
+      ? `- 采纳: ${task.debate.decision.winnerName || task.debate.decision.winnerId || '—'}\n- 状态: ${task.debate.status || '—'}\n- 降级: ${task.debate.decision.degraded ? '是' : '否'}`
+      : '本轮没有可记录的方案裁决。',
+  ];
+  return redactTranscriptText(lines.filter((line) => line !== null).join('\n'));
+}
+
+function transcriptHtmlBody(task) {
+  const quality = task.quality || { status: 'pending' };
+  const plan = Array.isArray(task.plan) ? task.plan : [];
+  const messages = Array.isArray(task.messages) ? task.messages : [];
+  const events = Array.isArray(task.events) ? task.events : [];
+  const artifacts = Array.isArray(task.artifacts) ? task.artifacts : [];
+  const changes = Array.isArray(task.fileChanges) ? task.fileChanges : [];
+  const skillActivations = Array.isArray(task.skillActivations) ? task.skillActivations : [];
+  const h = transcriptHtmlEscape;
+  const planRows = plan
+    .map(
+      (step) =>
+        `<tr><td>${h(step.title || step.id)}</td><td>${h(step.role || '—')}</td><td>${h(step.status || '—')}</td><td>${h(step.agentId || '—')}</td><td>${h(step.verdict || '—')}</td></tr>`,
+    )
+    .join('');
+  const messageBlocks = messages
+    .map(
+      (message) =>
+        `<article><h3>${h(transcriptTime(message.createdAt))} · ${h(message.name || message.role || 'AI')} · ${h(message.kind || 'text')}</h3><pre>${h(message.text || '')}</pre></article>`,
+    )
+    .join('');
+  const eventBlocks = events
+    .slice(-240)
+    .map(
+      (event) =>
+        `<details><summary>${h(transcriptTime(event.at))} · ${h(event.type || 'event')}</summary><pre>${h(transcriptJson(event.data ?? event))}</pre></details>`,
+    )
+    .join('');
+  const skillItems = skillActivations
+    .map((activation) => {
+      const names = (activation.skills || [])
+        .map((skill) => `${skill.name || skill.id} (${skill.id}, ${skill.source || 'unknown'})`)
+        .join('、');
+      return `<li>${h(activation.stepTitle || activation.stepId || activation.phase || '调用')}: ${h(names || '—')}</li>`;
+    })
+    .join('');
+
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${h(task.title || 'AgentForge 运行记录')}</title>
+<style>
+body{font:14px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:980px;margin:32px auto;padding:0 20px;color:#17202a;background:#fbfaf6}
+h1,h2,h3{line-height:1.25}h1{border-bottom:3px solid #17202a;padding-bottom:12px}
+section{border-top:1px solid #ccd3d9;padding:18px 0}pre{white-space:pre-wrap;word-break:break-word;background:#f0f2f4;padding:12px;border-radius:4px;overflow:auto}
+table{border-collapse:collapse;width:100%}th,td{border:1px solid #ccd3d9;padding:6px 8px;text-align:left}th{background:#edf0f2}
+details{margin:8px 0}code{background:#edf0f2;padding:1px 4px}.meta{color:#5c6975}
+</style>
+</head>
+<body>
+<h1>${h(task.title || 'AgentForge 运行记录')}</h1>
+<p class="meta">任务 ${h(task.id)} · 状态 ${h(task.status || 'unknown')} · ${h(transcriptTime(task.createdAt))}</p>
+<p><strong>目标：</strong>${h(task.goal || '—')}</p>
+<section><h2>质量门</h2><p>状态 <code>${h(quality.status || 'pending')}</code> · 命令 <code>${h(quality.command || '—')}</code> · 退出码 <code>${h(quality.code ?? '—')}</code> · 耗时 ${h(quality.elapsed ?? '—')} ms</p>
+<p>评审身份：${h(quality.reviewerName || quality.reviewerId || '—')} → ${h(quality.implementerName || quality.implementerId || '—')} · 自审：${quality.selfReview ? '是' : '否'}</p>
+${quality.reason ? `<p>${h(quality.reason)}</p>` : ''}
+${quality.stdout ? `<h3>stdout</h3><pre>${h(quality.stdout)}</pre>` : ''}
+${quality.stderr ? `<h3>stderr</h3><pre>${h(quality.stderr)}</pre>` : ''}
+</section>
+<section><h2>执行计划</h2><table><thead><tr><th>工序</th><th>角色</th><th>状态</th><th>负责人</th><th>结论</th></tr></thead><tbody>${planRows || '<tr><td colspan="5">暂无计划。</td></tr>'}</tbody></table></section>
+<section><h2>技能激活</h2><ul>${skillItems || '<li>未激活技能。</li>'}</ul></section>
+<section><h2>协作消息</h2>${messageBlocks || '<p>暂无消息。</p>'}</section>
+<section><h2>事件</h2>${eventBlocks || '<p>暂无事件。</p>'}</section>
+<section><h2>产物与变更</h2><h3>产物</h3><ul>${artifacts.map((artifact) => `<li><code>${h(artifact.path)}</code> · ${h(artifact.bytes || 0)} bytes · ${h(artifact.agentId || '—')}</li>`).join('') || '<li>暂无产物。</li>'}</ul><h3>文件变更</h3><ul>${changes.map((change) => `<li><code>${h(change.status || 'M')} ${h(change.path)}</code> · ${h(change.agentId || '—')} · ${h(transcriptTime(change.at))}</li>`).join('') || '<li>暂无文件变更。</li>'}</ul></section>
+</body>
+</html>`;
+}
+
+export function taskTranscript(task, format = 'markdown') {
+  if (!task?.id) throw new Error('任务不存在');
+  const selected = String(format || '').toLowerCase() === 'html' ? 'html' : 'markdown';
+  return {
+    format: selected,
+    contentType: selected === 'html' ? 'text/html; charset=utf-8' : 'text/markdown; charset=utf-8',
+    filename: `agentforge-${task.id.slice(0, 8)}.${selected === 'html' ? 'html' : 'md'}`,
+    body: selected === 'html' ? transcriptHtmlBody(task) : transcriptMarkdownBody(task),
+  };
 }
 
 export const store = new Store();

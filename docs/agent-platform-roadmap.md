@@ -203,6 +203,16 @@ Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile �
 | CLI 执行策略 | 第一层已完成 | `inherit / strict`；工具白名单推导沙箱；Codex / DSH / Claude 能力矩阵；不可强制时拒绝；策略事件与消息元数据 |
 | Shell 沙箱 | 待实施 | `shell` 端点明确返回 501，不把未执行的命令伪装成成功 |
 
+## M1 首批增量（2026-11-27）
+
+| 能力 | 状态 | 已实现内容 |
+| --- | --- | --- |
+| Skills MVP | 已完成 | 扫描工作区、源工作区和用户级 `.agents/skills/*/SKILL.md`；解析受控 frontmatter；按触发词、角色和 Agent 显式标签激活；注入讨论、实施、收口和聊天 prompt；记录 `skill.activated` 与任务级激活摘要；不执行技能脚本，不绕过工具权限 |
+| Transcript 导出 | 已完成 | `/api/tasks/:id/export?format=markdown\|html`；包含质量门、计划、技能激活、协作消息、事件、产物、文件变更和讨论裁决；输出前脱敏并转义 HTML；界面提供下载入口 |
+| P1-8 结构化 VERDICT | 已完成 | reviewer 只接受扁平 JSON `VERDICT`；要求 `decision`、`blockers`、`should`；损坏、缺失、负数和 `PASS + Blocker` 都 fail closed；`blockers / should` 落工序与导出记录 |
+
+Skills 的边界：单个 `SKILL.md` 最大 64 KB，正文最多注入 6000 字符，单次最多激活 4 个技能；不跟随技能目录中的符号链接，不执行技能内脚本。导出是本地运行记录的快照，不替代任务工作区或 Git 历史。
+
 当前有两层边界：平台 API 会校验 Agent 工具白名单并留痕；真实 CLI 在 `strict` 下会先经过执行策略预检，能映射到原生沙箱时才启动。`inherit` 仍可能直接调用本机工具，因此下一阶段需要补内核级代理、网络策略和文件租约，不能把平台 API 校验当成完整子进程隔离。
 
 ## 实施顺序
@@ -213,4 +223,35 @@ Provider Profile 已落地：Agent 绑定 `providerId`，执行时把 Profile �
 | P1（第一层已完成） | Tool Gateway、计划版本、消息路由、Provider Profile、CLI 参数模板与自动回退、CLI 执行策略 | 平台 API 可校验、CLI 可强制或明确拒绝、可审计、可重规划 |
 | P2（第一层已完成） | 全局 Scheduler、任务并发、Provider 配额、Agent 租约；专项 Agent Profile 待补 | 稳定的多任务并发 |
 | P3 | DAG 图、时间回放、评审与合并工作台 | 面向复杂项目的可视化协作 |
+
+## 下一阶段 backlog
+
+以下条目来自本轮与 OpenHands 能力对照，尚未实施：
+
+| 优先级 | 条目 | 现状 | 建议 |
+| --- | --- | --- | --- |
+| P1 | 安全层（HTTP Token、监听边界、权限策略） | 当前默认回环且无鉴权；`strict` 只映射 CLI 原生沙箱 | 保持兼容模式，同时增加 token、请求来源和权限审计 |
+| P1 | Automation / 定时任务 | 只有 Bot Hook 和手动开工 | 增加可暂停的调度定义、运行历史和失败重试 |
+| P1 | MCP / 外部工具接入 | Tool Gateway 目前覆盖工作区工具 | 先做只读 MCP 适配与白名单，再开放写工具 |
+| P2 | 专项 Agent Profile 与能力路由 | 角色固定为五席位，技能只是提示词注入 | 把技能、工具、Provider、模型和并发组合成可复用 Profile |
+| P2 | 工作区租约、读后写守卫、事务回滚 | 有变更账本和回收站，没有跨 Agent 写冲突检测 | 在 Tool Gateway 增加版本检查与操作组 |
+| P2 | DAG 图、时间回放、跨任务总览 | 已有工序账本和控制台六视图 | 先做只读可视化和事件回放，不改执行内核 |
+
+## 本轮非目标（只记录，不实施）
+
+| 优先级 | 条目 | 现状 | 后续建议 |
+| --- | --- | --- | --- |
+| P1 | P1-5 目录扫描优化 | `listWorkspaceFiles()` 仍会遍历目录并截断结果 | 改为按需懒加载、索引复用和增量快照 |
+| P1 | P1-7 `/api/state` 分页 | 当前返回任务摘要和最新任务全量详情 | 增加 cursor、摘要字段选择和详情按需加载 |
+| P1 | P1-9 spill 推广 | 目前主要覆盖超长上游产物 | 把 spill 复用于事件、工具输出和导出附件 |
+| P1 | P1-10 超时配置化 | 质量门和各阶段仍使用代码内固定预算 | 将超时放进设置与 Agent/Provider Profile |
+| P2 | CLI 网关配置去硬编码 | `CANDIDATES` 仍内置 magpie 地址、模型和 `--openai-api-key magpie` | 统一走 Provider Profile 和模板变量 |
+| P2 | HTTP API 鉴权 | 默认仅回环，但 API 本身没有 token | 先做可选 token、来源校验和审计，不改变兼容默认 |
+| P2 | 监听与权限边界 | `HOST`、`bypassPermissions`、`yolo` 仍沿用现有策略 | 单独做安全评审和显式配置，不在本轮修改 |
+| P2 | 辩论多样性检测 | 已有提案、交叉评分和降级标记 | 增加方案相似度/角度覆盖检测，避免多份提案同质化 |
+| P2 | 读后写守卫 | Tool Gateway 有版本和变更账本，但没有强制读取版本 | 写入前校验最近读取版本并返回冲突 |
+| P2 | 附件读图 | 当前主要处理文本上下文 | 增加视觉模型能力声明、图片类型/体积校验和脱敏 |
+| P2 | 摘要式上下文压缩 | 已有上下文预算和 spill | 增加可审计的分段摘要，不覆盖原始记录 |
+
+以上条目均未在本轮修改；M1 只落地技能、运行记录导出和结构化评审，避免扩大安全与执行内核的变更面。
 

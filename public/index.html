@@ -205,6 +205,14 @@
           <div class="insp-body">
             <div class="pane" id="pane-context">
               <p class="hint" id="contextHint">选择任务后，这里会显示当前上下文。</p>
+              <div class="context-actions">
+                <button type="button" class="btn btn-ghost sm" data-export-transcript="markdown" disabled>
+                  导出 Markdown
+                </button>
+                <button type="button" class="btn btn-ghost sm" data-export-transcript="html" disabled>
+                  导出 HTML
+                </button>
+              </div>
               <div class="context-list" id="contextList"></div>
             </div>
             <div class="pane" id="pane-debate" hidden>
@@ -502,6 +510,10 @@
                 <input name="seat" type="checkbox" />
                 作为该角色主执行人
               </span>
+            </label>
+            <label class="field">
+              <span>技能标签<em>逗号分隔，匹配 .agents/skills 的 id 或 name</em></span>
+              <input name="skills" id="agentSkills" placeholder="frontend-ui, code-review" />
             </label>
             <div class="field tool-policy-field">
               <div class="tool-policy-head">

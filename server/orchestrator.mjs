@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { store, randomUUID, ROLE_LABEL, TOOL_CATALOG } from './store.mjs';
 import * as sim from './sim.mjs';
 import { streamText, spawnCli, sleep, classifyCliExit, describeCliResult } from './adapters.mjs';
@@ -315,6 +316,286 @@ export function volatileBlock(context, step = '') {
   ]
     .filter(Boolean)
     .join('\n');
+}
+
+/* ------------------------------------------------------------------ */
+/* Skills：项目级与用户级 SKILL.md                                      */
+/* ------------------------------------------------------------------ */
+
+const SKILL_FILE_NAME = 'SKILL.md';
+const MAX_SKILL_FILE_BYTES = 64 * 1024;
+const MAX_SKILL_CONTENT_CHARS = 6000;
+const MAX_SKILLS = 50;
+const MAX_ACTIVE_SKILLS = 4;
+const MAX_SKILL_PROMPT_CHARS = 12000;
+const SKILL_CACHE_MS = 1500;
+const skillCache = new Map();
+
+export function clearSkillCache() {
+  skillCache.clear();
+}
+
+function skillId(value, fallback = 'skill') {
+  const id = String(value || fallback)
+    .trim()
+    .toLowerCase()
+    .replace(/[^\w\u4e00-\u9fa5.-]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  return id || fallback;
+}
+
+function parseSkillList(value) {
+  const raw = String(value ?? '').trim();
+  if (!raw) return [];
+  if (raw.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.map((item) => String(item).trim()).filter(Boolean);
+      }
+    } catch {
+      /* 兼容不带引号的 [a, b] 写法 */
+    }
+  }
+  return raw
+    .replace(/^\[|\]$/g, '')
+    .split(/[,，]/)
+    .map((item) => item.trim().replace(/^["']|["']$/g, ''))
+    .filter(Boolean);
+}
+
+function parseSkillDocument(raw, fallbackId) {
+  const text = String(raw || '').replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
+  const lines = text.split('\n');
+  const data = {};
+  let body = text;
+  if (lines[0]?.trim() === '---') {
+    const end = lines.findIndex((line, index) => index > 0 && line.trim() === '---');
+    if (end > 0) {
+      let currentKey = '';
+      for (const line of lines.slice(1, end)) {
+        const item = line.match(/^\s*-\s+(.+?)\s*$/);
+        if (item && currentKey) {
+          if (!Array.isArray(data[currentKey])) data[currentKey] = [];
+          data[currentKey].push(item[1].replace(/^["']|["']$/g, ''));
+          continue;
+        }
+        const pair = line.match(/^([A-Za-z][\w-]*)\s*:\s*(.*)$/);
+        if (!pair) continue;
+        currentKey = pair[1].toLowerCase();
+        data[currentKey] = pair[2].trim() ? parseSkillList(pair[2]) : [];
+      }
+      body = lines.slice(end + 1).join('\n').trim();
+    }
+  }
+  const first = (key) => {
+    const value = data[key];
+    return Array.isArray(value) ? value[0] || '' : String(value || '');
+  };
+  const list = (key) =>
+    Array.isArray(data[key])
+      ? data[key].map((item) => String(item).trim()).filter(Boolean)
+      : parseSkillList(data[key]);
+  return {
+    id: skillId(first('id') || fallbackId),
+    name: first('name') || fallbackId,
+    description: first('description'),
+    triggers: list('triggers').map((item) => item.toLowerCase()),
+    roles: list('roles').map((item) => item.toLowerCase()),
+    always: first('always').toLowerCase() === 'true',
+    enabled: first('enabled').toLowerCase() !== 'false',
+    content: body.slice(0, MAX_SKILL_CONTENT_CHARS),
+  };
+}
+
+function skillRoots(task) {
+  const roots = [];
+  const seen = new Set();
+  const add = (root, source) => {
+    if (!root) return;
+    const abs = path.resolve(String(root));
+    if (seen.has(abs)) return;
+    seen.add(abs);
+    roots.push({ root: abs, source });
+  };
+  add(task?.workspace, 'workspace');
+  if (task?.sourceWorkspace && task.sourceWorkspace !== task.workspace) {
+    add(task.sourceWorkspace, 'source-workspace');
+  }
+  add(
+    process.env.AGENTFORGE_USER_SKILLS_DIR ||
+      path.join(os.homedir(), '.agents', 'skills'),
+    'user',
+  );
+  return roots;
+}
+
+function readSkillFile(abs, fallbackId, source) {
+  try {
+    const stat = fs.lstatSync(abs);
+    if (!stat.isFile() || stat.size > MAX_SKILL_FILE_BYTES) return null;
+    const parsed = parseSkillDocument(fs.readFileSync(abs, 'utf8'), fallbackId);
+    return {
+      ...parsed,
+      source,
+      file: path.basename(path.dirname(abs)) + '/' + SKILL_FILE_NAME,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function discoverSkills(task, { refresh = false } = {}) {
+  if (!task?.workspace) return [];
+  const roots = skillRoots(task);
+  const key = roots.map((item) => `${item.source}:${item.root}`).join('|');
+  const cached = skillCache.get(key);
+  if (!refresh && cached && cached.expiresAt > Date.now()) return cached.skills;
+
+  const found = [];
+  const seen = new Set();
+  for (const { root, source } of roots) {
+    const skillsRoot = path.join(root, '.agents', 'skills');
+    let entries = [];
+    try {
+      entries = fs.readdirSync(skillsRoot, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+      const skill = readSkillFile(
+        path.join(skillsRoot, entry.name, SKILL_FILE_NAME),
+        entry.name,
+        source,
+      );
+      if (!skill || !skill.enabled || seen.has(skill.id)) continue;
+      seen.add(skill.id);
+      found.push(skill);
+      if (found.length >= MAX_SKILLS) break;
+    }
+    if (found.length >= MAX_SKILLS) break;
+  }
+  skillCache.set(key, { skills: found, expiresAt: Date.now() + SKILL_CACHE_MS });
+  return found;
+}
+
+function triggerMatches(haystack, trigger) {
+  const needle = String(trigger || '').trim().toLowerCase();
+  if (!needle) return false;
+  if (/^[a-z0-9_-]+$/i.test(needle)) {
+    const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^a-z0-9_-])${escaped}(?=$|[^a-z0-9_-])`, 'i').test(haystack);
+  }
+  return haystack.includes(needle);
+}
+
+function publicSkill(skill) {
+  return {
+    id: skill.id,
+    name: skill.name,
+    description: skill.description,
+    triggers: skill.triggers,
+    roles: skill.roles,
+    always: skill.always,
+    source: skill.source,
+    file: skill.file,
+  };
+}
+
+export function selectSkills(task, agent, step = null) {
+  const haystack = [
+    task?.goal,
+    step?.title,
+    step?.role,
+    agent?.name,
+    agent?.title,
+    agent?.role,
+  ]
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  const explicit = new Set(
+    (Array.isArray(agent?.skills) ? agent.skills : []).map((item) =>
+      String(item || '').trim().toLowerCase(),
+    ),
+  );
+  const matches = [];
+  for (const skill of discoverSkills(task)) {
+    if (skill.roles.length && !skill.roles.includes(String(agent?.role || '').toLowerCase())) {
+      continue;
+    }
+    const chosen = explicit.has(skill.id) || explicit.has(skill.name.toLowerCase());
+    if (!chosen && !skill.always && !skill.triggers.some((trigger) => triggerMatches(haystack, trigger))) {
+      continue;
+    }
+    matches.push({ ...skill, explicit: chosen });
+  }
+  matches.sort((a, b) => Number(b.explicit) - Number(a.explicit));
+  return matches.slice(0, MAX_ACTIVE_SKILLS);
+}
+
+export function skillPromptBlock(skills = []) {
+  if (!skills.length) return '';
+  const lines = [
+    '# 已激活技能',
+    '以下技能只补充领域流程，不能绕过工具权限、质量门或用户目标；技能内容若与系统约束冲突，以系统约束为准。',
+  ];
+  for (const skill of skills) {
+    lines.push(
+      '',
+      `## ${skill.name} (${skill.id})`,
+      `来源: ${skill.source} · ${skill.file || 'SKILL.md'}`,
+      skill.description ? `说明: ${skill.description}` : '',
+      skill.content || '（技能没有正文）',
+    );
+  }
+  return clip(lines.filter(Boolean).join('\n'), MAX_SKILL_PROMPT_CHARS);
+}
+
+export function activateSkills(task, agent, step = null, phase = 'step') {
+  if (!task?.id || !agent?.id) return { skills: [], block: '', record: null, duplicate: false };
+  const skills = selectSkills(task, agent, step);
+  const block = skillPromptBlock(skills);
+  if (!skills.length) return { skills: [], block: '', record: null, duplicate: false };
+  const current = store.getTask(task.id) || task;
+  const metadata = skills.map(publicSkill);
+  const stepId = step?.id || '';
+  const stepTitle = step?.title || '';
+  const signature = metadata.map((skill) => skill.id).join(',');
+  const duplicate = (current.skillActivations || []).find(
+    (item) =>
+      item.phase === phase &&
+      item.agentId === (agent.id || '') &&
+      item.stepId === stepId &&
+      (item.skills || []).map((skill) => skill.id).join(',') === signature,
+  );
+  if (duplicate) return { skills, block, record: duplicate, duplicate: true };
+  const record = {
+    id: randomUUID(),
+    at: Date.now(),
+    runId: current.runId || null,
+    phase,
+    stepId,
+    stepTitle,
+    agentId: agent.id || '',
+    agentName: agent.name || '',
+    skills: metadata,
+  };
+  const activations = [...(current.skillActivations || []), record].slice(-40);
+  if (store.getTask(task.id)) {
+    store.updateTask(task.id, { skillActivations: activations });
+    store.addTaskEvent(task.id, {
+      type: 'skill.activated',
+      runId: current.runId || null,
+      agentId: agent.id || '',
+      stepId,
+      data: { phase, stepTitle, skills: metadata },
+    });
+  } else {
+    task.skillActivations = activations;
+  }
+  return { skills, block, record, duplicate: false };
 }
 
 
@@ -793,6 +1074,7 @@ export function buildPrompt(task, agent, step, depsText, context, extra = {}) {
     stableBlock(context),
     `你是「${agent.name}」，团队中的${agent.title}。`,
     toolPolicyBlock(agent),
+    extra.skills?.length ? skillPromptBlock(extra.skills) : '',
     '',
     '# 项目目标',
     task.goal,
@@ -842,7 +1124,7 @@ export function buildPrompt(task, agent, step, depsText, context, extra = {}) {
   if (role === 'reviewer') {
     lines.push(
       '4. 必须先检查质量门结果，再按严重程度列 Blocker / Should。',
-      '5. 最后一行必须单独输出 `VERDICT: PASS` 或 `VERDICT: FAIL`，不能省略。',
+      '5. 最后一行必须单独输出 `VERDICT: {"decision":"PASS|FAIL","blockers":0,"should":0}`，不能省略。',
       '6. 只有没有 Blocker 且质量门通过时才能 PASS。',
     );
   } else {
@@ -853,11 +1135,12 @@ export function buildPrompt(task, agent, step, depsText, context, extra = {}) {
   return lines.filter((line) => line !== '').join('\n');
 }
 
-function buildPlanPrompt(agent, task, context = null) {
+function buildPlanPrompt(agent, task, context = null, extra = {}) {
   return [
     stableBlock(context),
     `你是「${agent.name}」，团队里的${agent.title}。`,
     toolPolicyBlock(agent),
+    extra.skills?.length ? skillPromptBlock(extra.skills) : '',
     '',
     '# 项目目标',
     task.goal,
@@ -877,6 +1160,7 @@ function buildSummaryPrompt(agent, task, outputs, context, extra = {}) {
     stableBlock(context),
     `你是「${agent.name}」，团队里的${agent.title}。本轮协作已结束，由你做交付收口。`,
     toolPolicyBlock(agent),
+    extra.skills?.length ? skillPromptBlock(extra.skills) : '',
     '',
     '# 项目目标',
     task.goal,
@@ -903,16 +1187,107 @@ function buildSummaryPrompt(agent, task, outputs, context, extra = {}) {
     .join('\n');
 }
 
-export function parseReviewVerdict(text) {
+export function parseReviewVerdictDetails(text) {
   const value = String(text || '');
-  const marker = value.match(/(?:VERDICT|质量门结论)\s*[:：]\s*(PASS|FAIL|不通过|通过)/i);
-  if (marker) {
-    const normalized = marker[1].toUpperCase();
-    return normalized === 'PASS' || normalized === '通过';
+  const matches = [
+    ...value.matchAll(/(?:VERDICT|质量门结论)\s*[:：]\s*(\{[\s\S]*?\})/gi),
+  ];
+  const raw = matches.at(-1)?.[1] || '';
+  if (!raw) {
+    return {
+      decision: 'unknown',
+      structured: false,
+      valid: false,
+      blockers: null,
+      should: null,
+      raw: '',
+      reason: '缺少结构化 VERDICT JSON',
+    };
   }
-  const conclusion = value.match(/结论\s*[:：]\s*\**\s*(有条件通过|不通过|未通过|通过)/);
-  if (conclusion) return conclusion[1] === '通过';
-  return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {
+      decision: 'unknown',
+      structured: true,
+      valid: false,
+      blockers: null,
+      should: null,
+      raw,
+      reason: 'VERDICT JSON 无法解析',
+    };
+  }
+  const hasBlockers = Object.prototype.hasOwnProperty.call(parsed || {}, 'blockers');
+  const hasShould =
+    Object.prototype.hasOwnProperty.call(parsed || {}, 'should') ||
+    Object.prototype.hasOwnProperty.call(parsed || {}, 'shouldFix');
+  if (!hasBlockers || !hasShould) {
+    return {
+      decision: 'unknown',
+      structured: true,
+      valid: false,
+      blockers: null,
+      should: null,
+      raw,
+      reason: 'VERDICT 缺少 blockers 或 should 字段',
+    };
+  }
+  const normalized = String(parsed?.decision || '').trim().toUpperCase();
+  const decision =
+    normalized === 'PASS' || normalized === '通过'
+      ? 'pass'
+      : normalized === 'FAIL' || normalized === '不通过' || normalized === '未通过'
+        ? 'fail'
+        : 'unknown';
+  const rawBlockers = parsed?.blockers;
+  const rawShould = parsed?.should ?? parsed?.shouldFix;
+  const blockers = typeof rawBlockers === 'number' ? rawBlockers : NaN;
+  const should = typeof rawShould === 'number' ? rawShould : NaN;
+  if (
+    decision === 'unknown' ||
+    rawBlockers === null ||
+    rawShould === null ||
+    !Number.isInteger(blockers) ||
+    blockers < 0 ||
+    !Number.isInteger(should) ||
+    should < 0
+  ) {
+    return {
+      decision: 'unknown',
+      structured: true,
+      valid: false,
+      blockers: Number.isFinite(blockers) ? blockers : null,
+      should: Number.isFinite(should) ? should : null,
+      raw,
+      reason: 'VERDICT 字段不合法',
+    };
+  }
+  if (decision === 'pass' && blockers > 0) {
+    return {
+      decision: 'unknown',
+      structured: true,
+      valid: false,
+      blockers,
+      should,
+      raw,
+      reason: 'PASS 不能带 Blocker',
+    };
+  }
+  return {
+    decision,
+    structured: true,
+    valid: true,
+    blockers,
+    should,
+    raw,
+    reason: '',
+  };
+}
+
+export function parseReviewVerdict(text) {
+  const details = parseReviewVerdictDetails(text);
+  return details.decision === 'pass' ? true : details.decision === 'fail' ? false : null;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1056,11 +1431,12 @@ export function rankProposals(proposals = []) {
   return list;
 }
 
-function buildProposalPrompt(task, agent, angle, context) {
+function buildProposalPrompt(task, agent, angle, context, extra = {}) {
   return [
     stableBlock(context),
     `你是「${agent.name}」，团队里的${agent.title || ROLE_LABEL[agent.role] || '成员'}。`,
     toolPolicyBlock(agent),
+    extra.skills?.length ? skillPromptBlock(extra.skills) : '',
     '',
     '# 项目目标',
     task.goal,
@@ -1115,9 +1491,7 @@ export function isCompleteStepText(text, role = '') {
   const value = String(text || '');
   if (value.trim().length < 20) return false;
   if (role === 'reviewer') {
-    return /(?:VERDICT|\u8d28\u91cf\u95e8\u7ed3\u8bba)\s*[:\uFF1A]\s*(?:PASS|FAIL|\u901a\u8fc7|\u4e0d\u901a\u8fc7)/i.test(
-      value,
-    );
+    return parseReviewVerdictDetails(value).valid;
   }
   return /\u4e0b\u4e00\u6b65\u5efa\u8bae\s*[:\uFF1A]/.test(value);
 }
@@ -1140,10 +1514,11 @@ export function isCompleteDecisionText(text) {
   );
 }
 
-function buildCritiquePrompt(task, agent, own, others) {
+function buildCritiquePrompt(task, agent, own, others, extra = {}) {
   return [
     `你是「${agent.name}」，团队里的${agent.title || ROLE_LABEL[agent.role] || '成员'}。现在进入交叉质询。`,
     toolPolicyBlock(agent),
+    extra.skills?.length ? skillPromptBlock(extra.skills) : '',
     '',
     '# 项目目标',
     task.goal,
@@ -1161,10 +1536,11 @@ function buildCritiquePrompt(task, agent, own, others) {
   ].join('\n');
 }
 
-function buildDecisionPrompt(task, judge, ranking, winner) {
+function buildDecisionPrompt(task, judge, ranking, winner, extra = {}) {
   return [
     `你是「${judge.name}」，本轮方案讨论的主持人。成员已经完成提案与交叉评分，现在由你宣布裁决。`,
     toolPolicyBlock(judge),
+    extra.skills?.length ? skillPromptBlock(extra.skills) : '',
     '',
     '# 项目目标',
     task.goal,
@@ -1217,14 +1593,22 @@ async function runProposal(task, agent, { id, index, speed, signal, timeout = CL
 
   try {
     if (agent.mode === 'cli') {
-      const res = await cliMessage(task, agent, buildProposalPrompt(task, agent, angle, buildContextPack(task)), {
-        kind: 'proposal',
-        signal,
-        timeout,
-        completeWhen: isCompleteProposalText,
-        settleMs: 4000,
-        message: { debate: { phase: 'proposal', proposalId: id } },
-      });
+      const skillContext = activateSkills(task, agent, null, 'proposal');
+      const res = await cliMessage(
+        task,
+        agent,
+        buildProposalPrompt(task, agent, angle, buildContextPack(task), {
+          skills: skillContext.skills,
+        }),
+        {
+          kind: 'proposal',
+          signal,
+          timeout,
+          completeWhen: isCompleteProposalText,
+          settleMs: 4000,
+          message: { debate: { phase: 'proposal', proposalId: id } },
+        },
+      );
       const text = (res.stdout || '').trim();
       const partial = res.code !== 0 && res.partial && isUsableProposalText(text);
       const ok = (res.code === 0 && isUsableProposalText(text)) || partial;
@@ -1300,14 +1684,20 @@ async function runCritique(task, agent, { index, proposals, speed, signal, timeo
     let partialOutput = false;
     if (agent.mode === 'cli') {
       const expectedIds = others.map((p) => p.id);
-      const res = await cliMessage(task, agent, buildCritiquePrompt(task, agent, own, others), {
-        kind: 'critique',
-        signal,
-        timeout,
-        completeWhen: (value) => isCompleteCritiqueText(value, expectedIds),
-        settleMs: 3000,
-        message: { debate: { phase: 'critique', selfId: own?.id || '' } },
-      });
+      const skillContext = activateSkills(task, agent, null, 'critique');
+      const res = await cliMessage(
+        task,
+        agent,
+        buildCritiquePrompt(task, agent, own, others, { skills: skillContext.skills }),
+        {
+          kind: 'critique',
+          signal,
+          timeout,
+          completeWhen: (value) => isCompleteCritiqueText(value, expectedIds),
+          settleMs: 3000,
+          message: { debate: { phase: 'critique', selfId: own?.id || '' } },
+        },
+      );
       text = (res.stdout || '').trim();
       scores = parseProposalScores(text, { selfId: own?.id || '' });
       partialOutput = res.code !== 0;
@@ -1522,15 +1912,21 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
       });
       store.endMessage(task.id, msg.id, {});
     } else if (judge?.mode === 'cli') {
+      const skillContext = activateSkills(task, judge, null, 'decision');
       const res = await withAgentLease(task.id, judge.id, signal, () =>
-        cliMessage(task, judge, buildDecisionPrompt(task, judge, ranking, winner), {
-          kind: 'decision',
-          signal,
-          timeout: CLI_TIMEOUTS.decision,
-          completeWhen: isCompleteDecisionText,
-          settleMs: 5000,
-          message: { debate: { phase: 'decision', winnerId: winner.id } },
-        }),
+        cliMessage(
+          task,
+          judge,
+          buildDecisionPrompt(task, judge, ranking, winner, { skills: skillContext.skills }),
+          {
+            kind: 'decision',
+            signal,
+            timeout: CLI_TIMEOUTS.decision,
+            completeWhen: isCompleteDecisionText,
+            settleMs: 5000,
+            message: { debate: { phase: 'decision', winnerId: winner.id } },
+          },
+        ),
       );
       if (res.code !== 0 || !res.stdout.trim()) throw new Error('裁决说明生成失败');
     } else {
@@ -1938,7 +2334,11 @@ async function executeSteps(task, steps, { outputs, speed, signal }) {
         };
         const context = buildContextPack(current, { files: knownFiles(current) });
         const depsText = dependencyText(current, step, outputs);
-        const prompt = buildPrompt(current, agent, step, depsText, context, extra);
+        const skillContext = activateSkills(current, agent, step, 'step');
+        const prompt = buildPrompt(current, agent, step, depsText, context, {
+          ...extra,
+          skills: skillContext.skills,
+        });
         const simOutputs = {
           ...Object.fromEntries([...outputs].map(([id, value]) => [id, value.text])),
           steps: Object.fromEntries([...outputs]),
@@ -1958,21 +2358,23 @@ async function executeSteps(task, steps, { outputs, speed, signal }) {
           maxAttempts: index === 0 ? undefined : 1,
         });
         if (out.ok && step.role === 'reviewer') {
-          const verdict = parseReviewVerdict(out.text);
-          out.verdict = verdict === true ? 'pass' : verdict === false ? 'fail' : 'unknown';
+          const verdict = parseReviewVerdictDetails(out.text);
+          out.verdict = verdict.decision;
+          out.verdictDetails = verdict;
           out.selfReview = extra.selfReview;
           const gateStatus = extra.quality?.status || 'not-run';
           const gatePassed = qualityGateAllowsDelivery(extra.quality);
-          out.passed = verdict === true && gatePassed;
+          out.passed = verdict.decision === 'pass' && gatePassed;
           out.note = out.passed
             ? extra.selfReview
               ? '质量门通过（自审：没有独立评审席位）'
               : '质量门通过'
-            : verdict === null
-              ? '缺少明确评审结论'
+            : verdict.decision === 'unknown'
+              ? `结构化评审结论无效：${verdict.reason}`
               : !gatePassed
-                ? `评审${verdict ? '通过' : '未通过'}，但质量门状态为 ${gateStatus}，不能交付`
+                ? `评审${verdict.decision === 'pass' ? '通过' : '未通过'}，但质量门状态为 ${gateStatus}，不能交付`
                 : '未通过，进入返工';
+          store.updateStep(task.id, step.id, { verdictDetails: verdict });
         }
         if (out.ok) {
           if (index > 0) out.note = `${out.note || '已完成'} · 由 ${agent.name} 接替`;
@@ -1984,6 +2386,7 @@ async function executeSteps(task, steps, { outputs, speed, signal }) {
             text: out.text,
             passed: out.passed,
             verdict: out.verdict,
+            verdictDetails: out.verdictDetails,
             selfReview: out.selfReview,
             reviewerId: extra.quality?.reviewerId || agent.id,
             implementerId: extra.quality?.implementerId || '',
@@ -2312,6 +2715,7 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
     if (signal.aborted) throw new Error('aborted');
 
     const planner = pickAgent('planner');
+    const summarySkills = activateSkills(task, planner, null, 'summary');
     const summary = await runStepWithRetry(task, planner, {
       step: null,
       kind: 'summary',
@@ -2325,6 +2729,7 @@ export async function startTask(taskId, { speed = 1, participants = [] } = {}) {
           repairRound,
           quality: store.getTask(taskId).quality,
           degraded: !!decision?.degraded,
+          skills: summarySkills.skills,
         },
       ),
       signal,
@@ -2549,13 +2954,16 @@ export async function chat(taskId, text, { speed = 1 } = {}) {
     const context = buildContextPack(ctx);
     const transcript = context.messages.map((m) => `${m.name}: ${m.text}`).join('\n');
     const signal = running.get(taskId)?.controller.signal;
+    const skillContext = activateSkills(ctx, agent, null, 'chat');
 
     if (agent.mode === 'cli') {
       const res = await withAgentLease(taskId, agent.id, signal, () =>
         cliMessage(
           task,
           agent,
-          `${buildPrompt(task, agent, null, transcript, context)}\n\n# 用户说\n${text}`,
+          `${buildPrompt(task, agent, null, transcript, context, {
+            skills: skillContext.skills,
+          })}\n\n# 用户说\n${text}`,
           {
             kind: 'text',
             signal,

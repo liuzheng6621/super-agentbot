@@ -1896,6 +1896,13 @@ kbd {
 }
 
 /* 当前任务上下文 */
+.context-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
 .context-list {
   display: flex;
   flex-direction: column;
@@ -1948,6 +1955,30 @@ kbd {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+}
+
+.ctx-skill {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 6px;
+  padding: 4px 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.ctx-skill + .ctx-skill {
+  border-top: 1px dashed var(--muted);
+}
+
+.ctx-skill b,
+.ctx-skill span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctx-skill span {
+  color: var(--muted);
 }
 
 .ctx-file {

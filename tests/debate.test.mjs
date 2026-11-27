@@ -206,9 +206,13 @@ test('步骤、交付收口和裁决都能识别完整结尾，避免进程挂�
     true,
   );
   assert.equal(
-    isCompleteStepText('已完成评审，没有 Blocker。\nVERDICT: PASS', 'reviewer'),
+    isCompleteStepText(
+      '已完成评审，没有 Blocker。\nVERDICT: {"decision":"PASS","blockers":0,"should":1}',
+      'reviewer',
+    ),
     true,
   );
+  assert.equal(isCompleteStepText('已完成评审，没有 Blocker。\nVERDICT: PASS', 'reviewer'), false);
   assert.equal(isCompleteStepText('还差最后一步', 'coder'), false);
   assert.equal(
     isCompleteSummaryText(

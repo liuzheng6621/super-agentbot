@@ -8,7 +8,13 @@ const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-test-'));
 process.env.AGENTFORGE_DATA_DIR = temp;
 
 const { store } = await import('../server/store.mjs');
-const { startTask, stopTask, isRunning, parseReviewVerdict } = await import('../server/orchestrator.mjs');
+const {
+  startTask,
+  stopTask,
+  isRunning,
+  parseReviewVerdict,
+  parseReviewVerdictDetails,
+} = await import('../server/orchestrator.mjs');
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -147,9 +153,60 @@ test('停止后不会被旧执行覆盖，也不会留下运行锁', async () =>
   store.updateAgent(planner.id, { mode: before.mode, cli: before.cli, seat: before.seat });
 });
 
-test('评审结论解析不会把「不通过」误判为通过', () => {
-  assert.equal(parseReviewVerdict('结论：不通过\nVERDICT: FAIL'), false);
-  assert.equal(parseReviewVerdict('结论：通过\nVERDICT: PASS'), true);
-  assert.equal(parseReviewVerdict('结论：有条件通过'), false);
+test('评审结论只接受结构化 VERDICT，缺失或矛盾都 fail closed', () => {
+  const pass = parseReviewVerdictDetails(
+    '评审完成。\nVERDICT: {"decision":"PASS","blockers":0,"should":2}',
+  );
+  assert.equal(pass.decision, 'pass');
+  assert.equal(pass.structured, true);
+  assert.equal(pass.blockers, 0);
+  assert.equal(pass.should, 2);
+  assert.equal(parseReviewVerdict('VERDICT: {"decision":"PASS","blockers":0,"should":2}'), true);
+
+  const fail = parseReviewVerdictDetails(
+    '发现两个阻塞项。\nVERDICT: {"decision":"FAIL","blockers":2,"should":1}',
+  );
+  assert.equal(fail.decision, 'fail');
+  assert.equal(parseReviewVerdict('VERDICT: {"decision":"FAIL","blockers":2,"should":1}'), false);
+
+  assert.equal(parseReviewVerdict('结论：不通过\nVERDICT: FAIL'), null, '旧自然语言不能放行');
+  assert.equal(parseReviewVerdict('结论：通过\nVERDICT: PASS'), null, '旧自然语言不能放行');
+  assert.equal(parseReviewVerdict('VERDICT: {"decision":"PASS","blockers":1,"should":0}'), null);
+  assert.equal(parseReviewVerdict('VERDICT: {"decision":"PASS"}'), null, '缺少计数字段不能放行');
+  assert.equal(
+    parseReviewVerdict('VERDICT: {"decision":"FAIL","blockers":null,"should":0}'),
+    null,
+    'null 计数字段不能放行',
+  );
+  assert.equal(
+    parseReviewVerdict('VERDICT: {"decision":"PASS","blockers":true,"should":0}'),
+    null,
+    '布尔值不能被 Number() 当成计数放行',
+  );
+  assert.equal(
+    parseReviewVerdict('VERDICT: {"decision":"PASS","blockers":[],"should":0}'),
+    null,
+    '数组不能被 Number() 当成计数放行',
+  );
+  assert.equal(parseReviewVerdict('VERDICT: {"decision":"PASS", broken json}'), null);
   assert.equal(parseReviewVerdict('没有明确结论'), null);
+});
+
+test('重规划会清掉旧评审结论和身份字段', () => {
+  const task = store.createTask({ goal: '重规划清理评审字段' });
+  store.setPlan(task.id, [{ id: 'review', title: '旧评审', role: 'reviewer' }]);
+  store.updateStep(task.id, 'review', {
+    verdict: 'pass',
+    verdictDetails: { decision: 'pass', blockers: 0, should: 0 },
+    selfReview: true,
+    reviewerId: 'old-reviewer',
+    implementerId: 'old-coder',
+  });
+  store.setPlan(task.id, [{ id: 'review', title: '新评审', role: 'reviewer' }]);
+  const step = store.getTask(task.id).plan[0];
+  assert.equal(step.verdict, undefined);
+  assert.equal(step.verdictDetails, undefined);
+  assert.equal(step.selfReview, undefined);
+  assert.equal(step.reviewerId, undefined);
+  assert.equal(step.implementerId, undefined);
 });

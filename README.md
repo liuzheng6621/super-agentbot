@@ -9,7 +9,7 @@
 [![Node](https://img.shields.io/badge/node-%E2%89%A520.11-3c873a?logo=node.js&logoColor=white)](https://nodejs.org)
 ![Dependencies](https://img.shields.io/badge/dependencies-0-blue)
 ![Build](https://img.shields.io/badge/build-none-lightgrey)
-![Tests](https://img.shields.io/badge/tests-86%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-92%20passing-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 ![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4)
 
@@ -26,6 +26,9 @@
 本轮把“多智能体协作”从固定流水线推进到可追踪、可重规划、可审计的第一层平台：
 
 - **真实质量门**：CLI 与模拟任务都执行工作区测试入口；没有入口、执行失败或超时都不能交付，并记录真实命令、退出码、耗时与输出。
+- **项目技能注入**：从工作区、源工作区与用户级 `.agents/skills/*/SKILL.md` 装载技能，按触发词或 Agent 显式标签激活，注入提案、质询、裁决、工序、收口与聊天 prompt；激活记录会出现在 `/api/state`、任务详情和界面上下文中。
+- **运行记录导出**：`GET /api/tasks/:id/export?format=markdown|html` 导出质量门、计划、技能激活、协作消息、事件、产物与讨论记录，敏感值会脱敏。
+- **结构化评审结论**：评审必须输出扁平 JSON `VERDICT`，缺失、损坏或与 Blocker 矛盾的结论都不能放行；Blocker / Should 数量会进入工序记录和界面。
 - **独立评审**：评审候选只允许 `reviewer / tester / architect`，实现者不会被悄悄拉来审自己；自审按真实 `reviewerId / implementerId` 判定并写入任务事件。
 - **增量持久化**：流式消息在 200ms dirty 窗口内合并落盘，只重新序列化变化任务；进程正常退出前会 flush 未完成窗口。
 - **CLI 解析缓存**：命令解析走进程级缓存，PATH 变化时由探测/刷新接口显式失效，减少热路径同步调用。
@@ -54,7 +57,10 @@
 
 - 🧠 **方案辩论先行** — 4 个执行席位 + 1 个工具池 CLI 各出一版方案（契约先行 / 最小闭环 / 测试先行 / 风险优先 / 分阶段交付），互相匿名打 1–10 分并各指一个硬伤，主持人按平均分裁决；只有 1 份有效提案或评分不足时会在裁决里标注置信度，不假装形成共识。
 - 🔀 **依赖图并行** — 架构定稿后「实现」与「测试设计」并行推进，DAG 校验依赖与环路，失败按依赖链传播，取消是即时生效而不是等当前工序跑完。
-- 🚦 **真实质量门** — 评审前真的执行测试命令，`VERDICT: PASS` 且质量门 `passed` 才允许交付；FAIL 进入「修复 → 回归 → 复评」有界回环，轮次可配。测试入口按 `package.json scripts.test` → Makefile `test` → pytest 配置 → Cargo → Go → `tests/` 探测；没有入口标为 `no-test-entry`，失败或超时同样阻断交付。每次记录真实命令、来源、退出码、耗时和 stdout/stderr，真实 CLI 任务也走同一套质量门。
+- 🚦 **真实质量门** — 评审前真的执行测试命令，结构化 `VERDICT` 判为 PASS 且质量门 `passed` 才允许交付；FAIL 进入「修复 → 回归 → 复评」有界回环，轮次可配。测试入口按 `package.json scripts.test` → Makefile `test` → pytest 配置 → Cargo → Go → `tests/` 探测；没有入口标为 `no-test-entry`，失败或超时同样阻断交付。每次记录真实命令、来源、退出码、耗时和 stdout/stderr，真实 CLI 任务也走同一套质量门。
+- 🧩 **项目技能与用户技能** — 自动发现 `.agents/skills/*/SKILL.md`，支持 `name / description / triggers / roles / always / enabled` 前置字段；工作区技能覆盖源工作区与用户级同名技能。技能只注入提示词，不执行脚本，也不能绕过工具权限、质量门或用户目标。
+- 🧾 **可审计运行记录导出** — Markdown 适合归档和代码评审，HTML 适合直接打开阅读；导出前统一脱敏 API Key、Token、密码和 Bearer 凭据，并转义 HTML。
+- ✅ **结构化评审协议** — 只接受 `VERDICT: {"decision":"PASS|FAIL","blockers":0,"should":0}`；旧的自然语言 `VERDICT: PASS` 不再静默放行，`PASS` 携带 Blocker 也会被判为无效。
 - 🧑‍⚖️ **独立评审** — 评审候选只允许 `reviewer / tester / architect`，实现者绝不会被悄悄拉来审自己；只有实现席位时评审明确不可用。自审按真实 `reviewerId / implementerId` 判定，身份和 `selfReview` 会写入工序、质量记录与 `review.independence` 事件。
 - 🎛 **工作流可视化配置** — 讨论开关与规模、工序并发、全局任务并发、返工轮次都在顶栏 ⚙ 里改，即时落库；另带「快速 / 均衡 / 严谨」三档预设。
 - 🔁 **任务级流程覆盖** — 输入框旁可切「先讨论」或「直接开工」，只影响当前任务，不动全局默认。
@@ -84,7 +90,7 @@
 **工程**
 
 - 📦 **零依赖、零构建** — 纯 Node.js + 原生 ESM，`node server/index.mjs` 就起来，前端不打包、不装包管理器。
-- ✅ **86 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、真实质量门、独立评审、持久化 dirty 窗口、可执行文件解析缓存、上下文预算、工作区文件闭环、Git 隔离、工具策略、CLI 强制沙箱映射、计划版本、消息路由、Tool Gateway 审计、Provider Profile、CLI 参数模板、Provider 自动回退、全局调度队列、Agent 租约、真实工时统计、输出完整性判定与退出码分类。
+- ✅ **92 个测试** — `node --test` 直接跑，覆盖并行调度、失败传播、真实质量门、结构化评审、项目技能、运行记录导出、独立评审、持久化 dirty 窗口、可执行文件解析缓存、上下文预算、工作区文件闭环、Git 隔离、工具策略、CLI 强制沙箱映射、计划版本、消息路由、Tool Gateway 审计、Provider Profile、CLI 参数模板、Provider 自动回退、全局调度队列、Agent 租约、真实工时统计、输出完整性判定与退出码分类。
 
 ## 快速开始
 
@@ -289,7 +295,8 @@ Git 隔离支持两种模式：
 | `GET` | `/api/cli-policy?policy=&command=&tools=` | 预览某组工具和命令能否被严格强制 |
 | `PATCH` | `/api/settings` | 工作流参数（白名单字段 + 范围夹紧） |
 | `POST` | `/api/tasks` | 创建 `{ goal, workspace?, isolation?: "direct"\|"worktree", flowMode?: "debate"\|"direct", autoRun? }` |
-| `GET` | `/api/tasks/:id` | 任务详情（消息、工序、产物、计划版本、工具审计） |
+| `GET` | `/api/tasks/:id` | 任务详情（消息、工序、产物、计划版本、技能激活、工具审计） |
+| `GET` | `/api/tasks/:id/export?format=markdown\|html` | 下载运行记录（质量门、计划、技能、消息、事件、产物与讨论） |
 | `POST` | `/api/tasks/:id/run` | 重新编排，可带 `{ flowMode }` |
 | `POST` | `/api/tasks/:id/stop` | 停止执行 |
 | `POST` | `/api/tasks/:id/chat` | `{ text }` 群聊，支持 `@成员名` |
@@ -374,7 +381,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 │   ├── screenshot.png
 │   ├── design-io-image-context.md
 │   └── agent-platform-roadmap.md
-├── tests/                13 个测试文件、86 个测试
+├── tests/                15 个测试文件、92 个测试
 ├── 安装到桌面.bat
 ├── 卸载桌面快捷方式.bat
 └── data/                 运行时数据（gitignore）
@@ -386,7 +393,7 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 npm test
 ```
 
-86 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、评审结论解析、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `no-test-entry` 判定、真实 CLI 任务同样执行质量门、独立评审与自审身份判定、目录快照复用、上游瞬时故障（ECONNRESET / 429 / socket hang up）只重试一次且不掩盖真实失败、上下文预算（段序稳定性、中文 token 估算、原子写版本、spill 可还原）、工作区文件闭环与路径/敏感文件边界、Agent 工具策略、CLI 强制沙箱映射与拒绝事件、计划版本与已完成工序保留、消息路由、Tool Gateway 权限与审计、Provider Profile 持久化与迁移、CLI 参数模板渲染、Provider 路由与真实子进程回退、全局任务并发、Provider 配额、Agent 租约与排队取消、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计（只累加结束过的工序，不拿墙钟冒充）、输出完整性判定（半截提案 / 缺段质询 / 空步骤都会判不合格）、提案宽松解析（`A=7`、`B：8分`、`方案 C 7/10`）、退出码分类（超时 / 已停止 / 命令缺失 / 策略拒绝 / `0xC0000142`）与参数拼装、dirty 窗口合并落盘、退出前 flush、可执行文件解析缓存。
+92 个测试，覆盖：依赖图并行 / 失败传播 / 环路检测 / 取消即时性、五席位分工、完整协作链路、质量门返工、CLI 失败禁止误交付、停止竞态、结构化评审结论与字段校验、辩论评分与排名规则、工作流设置白名单与任务级流程覆盖、真实团队体检判定与席位挑选、质量门测试入口探测与 `no-test-entry` 判定、真实 CLI 任务同样执行质量门、独立评审与自审身份判定、目录快照复用、上游瞬时故障（ECONNRESET / 429 / socket hang up）只重试一次且不掩盖真实失败、上下文预算（段序稳定性、中文 token 估算、原子写版本、spill 可还原）、工作区文件闭环与路径/敏感文件边界、Agent 工具策略、CLI 强制沙箱映射与拒绝事件、计划版本与已完成工序保留、消息路由、Tool Gateway 权限与审计、Provider Profile 持久化与迁移、CLI 参数模板渲染、Provider 路由与真实子进程回退、全局任务并发、Provider 配额、Agent 租约与排队取消、Git worktree 隔离与 shared clone 回退、未跟踪文件 Diff、真实工时统计（只累加结束过的工序，不拿墙钟冒充）、输出完整性判定（半截提案 / 缺段质询 / 空步骤都会判不合格）、提案宽松解析（`A=7`、`B：8分`、`方案 C 7/10`）、退出码分类（超时 / 已停止 / 命令缺失 / 策略拒绝 / `0xC0000142`）与参数拼装、dirty 窗口合并落盘、退出前 flush、可执行文件解析缓存、项目技能发现与边界保护、运行记录导出与脱敏。
 
 ## 已知边界
 
@@ -415,6 +422,9 @@ npm test
 - [x] Provider Profile（自定义网关、密钥环境引用、Agent 绑定与并发配额）
 - [x] 全局 Scheduler（任务并发、Provider 配额、Agent 租约）
 - [x] Provider 自动路由与回退、CLI 参数模板
+- [x] 项目技能装载、触发与提示词注入（MVP）
+- [x] 运行记录 Markdown / HTML 导出
+- [x] 结构化评审 `VERDICT` 与 fail-closed 解析
 - [ ] 工作区池、磁盘配额与任务优先级
 - [ ] 跨任务工作区总览、DAG 图与时间回放
 - [ ] 附件与读图（把截图交给视觉模型看 UI）

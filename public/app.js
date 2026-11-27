@@ -91,6 +91,32 @@ async function api(path, options = {}) {
   return res.json();
 }
 
+async function downloadTaskTranscript(format = "markdown") {
+  const taskId = S.task?.id;
+  if (!taskId) return;
+  try {
+    const res = await fetch(
+      `/api/tasks/${taskId}/export?format=${encodeURIComponent(format)}`,
+    );
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.error || `导出失败（${res.status}）`);
+    }
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `agentforge-${taskId.slice(0, 8)}.${format === "html" ? "html" : "md"}`;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    toast(`已导出 ${format === "html" ? "HTML" : "Markdown"}`, "ok");
+  } catch (err) {
+    toast(`导出失败：${err.message}`, "err");
+  }
+}
+
 /* ---------------- Markdown ---------------- */
 
 function inlineMd(s) {
@@ -831,7 +857,7 @@ function renderPlan() {
         ? `<div class="step-detail">
             <div class="sd-line"><em>状态</em><span>${escapeHtml(step.note || STEP_STATUS_TEXT[step.status] || step.status)}</span></div>
             ${elapsed ? `<div class="sd-line"><em>耗时</em><span>${elapsed}</span></div>` : ""}
-            ${step.verdict ? `<div class="sd-line"><em>评审</em><span>${step.verdict === "pass" ? "PASS" : step.verdict === "fail" ? "FAIL" : "结论不明确"}</span></div>` : ""}
+            ${step.verdict ? `<div class="sd-line"><em>评审</em><span>${step.verdict === "pass" ? "PASS" : step.verdict === "fail" ? "FAIL" : "结论不明确"}${step.verdictDetails ? ` · B${step.verdictDetails.blockers ?? "?"} / S${step.verdictDetails.should ?? "?"}` : ""}</span></div>` : ""}
             ${step.selfReview ? '<div class="sd-line"><em>独立性</em><span>自审：评审者与实现者相同</span></div>' : ""}
             ${conclusion ? `<div class="sd-conclusion"><em>本步结论</em><p>${escapeHtml(conclusion.text.replace(/\s+/g, " ").slice(0, 260))}${conclusion.text.length > 260 ? "…" : ""}</p></div>` : ""}
             <div class="sd-files"><em>产出 ${files.length} 个文件</em>
@@ -2002,6 +2028,9 @@ function renderContext() {
   const hint = $("#contextHint");
   const t = S.task;
   const context = t?.context;
+  $$("#pane-context [data-export-transcript]").forEach((button) => {
+    button.disabled = !t?.id;
+  });
 
   if (!context) {
     if (hint) hint.textContent = "选择任务后，这里会显示当前上下文。";
@@ -2011,6 +2040,7 @@ function renderContext() {
 
   const files = context.files || [];
   const messages = context.messages || [];
+  const skillActivations = t?.skillActivations || [];
   if (hint) {
     hint.textContent = `工作区 ${shortPath(context.workspace || "")} · ${messages.length} 条近期对话 · ${files.length} 个已知文件`;
     hint.title = context.workspace || "";
@@ -2047,6 +2077,27 @@ function renderContext() {
               )
               .join("")
           : '<p class="hint">工作区还没有可读取的文件。</p>'
+      }
+    </div>
+    <div class="ctx-block">
+      <div class="ctx-label">SKILLS</div>
+      ${
+        skillActivations.length
+          ? skillActivations
+              .slice(-4)
+              .reverse()
+              .map(
+                (activation) =>
+                  `<div class="ctx-skill"><b>${escapeHtml(
+                    activation.stepTitle || activation.stepId || activation.phase || "调用",
+                  )}</b><span>${escapeHtml(
+                    (activation.skills || [])
+                      .map((skill) => skill.name || skill.id)
+                      .join("、") || "—",
+                  )}</span></div>`,
+              )
+              .join("")
+          : '<p class="hint">当前任务还没有激活技能。</p>'
       }
     </div>
   `;
@@ -2327,6 +2378,9 @@ function handleEvent(ev) {
         renderPlan();
         renderStats();
         renderFlow();
+        if (Object.prototype.hasOwnProperty.call(ev.patch || {}, "skillActivations")) {
+          renderContext();
+        }
       }
       renderTasks();
       break;
@@ -2480,6 +2534,23 @@ function handleEvent(ev) {
             S.workspace.events.splice(0, S.workspace.events.length - 160);
           }
           renderWorkspace();
+        }
+        if (ev.event?.type === "skill.activated") {
+          const activation = {
+            id: ev.event.id,
+            at: ev.event.at,
+            runId: ev.event.runId || null,
+            phase: ev.event.data?.phase || "",
+            stepId: ev.event.stepId || "",
+            stepTitle: ev.event.data?.stepTitle || "",
+            agentId: ev.event.agentId || "",
+            skills: ev.event.data?.skills || [],
+          };
+          if (!cur.skillActivations) cur.skillActivations = [];
+          if (!cur.skillActivations.some((item) => item.id === activation.id)) {
+            cur.skillActivations.push(activation);
+          }
+          renderContext();
         }
         scheduleWorkspaceRefresh();
       }
@@ -2968,6 +3039,7 @@ function openAgentModal(agent = null, preset = null) {
     f("executionPolicy").value = agent.executionPolicy === "strict" ? "strict" : "inherit";
     f("providerId").value = agent.providerId || "local-default";
     f("fallbackProviderIds").value = (agent.fallbackProviderIds || []).join(", ");
+    f("skills").value = (agent.skills || []).join(", ");
     f("seat").checked = agent.seat !== false;
   } else if (preset) {
     f("name").value = preset.name || "";
@@ -2977,6 +3049,7 @@ function openAgentModal(agent = null, preset = null) {
     f("executionPolicy").value = "inherit";
     f("providerId").value = "local-default";
     f("fallbackProviderIds").value = "";
+    f("skills").value = (preset.skills || []).join(", ");
     f("seat").checked = false;
   }
 
@@ -3119,6 +3192,10 @@ function bind() {
   $("#agentForm").elements.executionPolicy.addEventListener("change", renderAgentPolicyPreview);
   $("#agentForm").elements.command.addEventListener("input", renderAgentPolicyPreview);
   $("#agentTools").addEventListener("change", renderAgentPolicyPreview);
+  $("#pane-context").addEventListener("click", (e) => {
+    const button = e.target.closest("[data-export-transcript]");
+    if (button && !button.disabled) downloadTaskTranscript(button.dataset.exportTranscript);
+  });
 
   // 关闭按钮必须是 type=button：否则会触发原生表单校验，
   // required 未填时 submit 事件根本不发生，method=dialog 也关不掉弹窗
@@ -3150,6 +3227,10 @@ function bind() {
       executionPolicy: String(fd.get("executionPolicy") || "inherit"),
       providerId: String(fd.get("providerId") || "local-default"),
       fallbackProviderIds: String(fd.get("fallbackProviderIds") || "")
+        .split(",")
+        .map((item) => item.trim())
+        .filter(Boolean),
+      skills: String(fd.get("skills") || "")
         .split(",")
         .map((item) => item.trim())
         .filter(Boolean),

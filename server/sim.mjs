@@ -248,7 +248,7 @@ function reviewerText({ goal, mod, outputs = {} }) {
 
 可以交付。第 ${repairRound} 轮返工闭环完成。
 
-VERDICT: PASS
+VERDICT: {"decision":"PASS","blockers":0,"should":1}
 `);
   }
   return wrap(`
@@ -272,7 +272,7 @@ ${quality.status === 'failed' ? '自动化测试未通过，必须先修复失�
 
 Kilo 改完 B1、B2 后我再复评一次。
 
-VERDICT: FAIL
+VERDICT: {"decision":"FAIL","blockers":2,"should":2}
 `);
 }
 
