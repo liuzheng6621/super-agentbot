@@ -7,6 +7,13 @@ import { streamText, spawnCli, sleep, classifyCliExit, describeCliResult } from 
 import { runDag, throwIfAborted } from './dag.mjs';
 import { versionOf, spillText } from './fs.mjs';
 import { workspacePoolPath } from './workspace.mjs';
+import {
+  clearWorkspaceIndexInvalidation,
+  rememberWorkspaceIndexAdd,
+  takeWorkspaceIndexAdds,
+  takeWorkspaceIndexMoves,
+  workspaceIndexRevision,
+} from './workspace-index.mjs';
 import { estimateTokens } from './tokens.mjs';
 import { toolGateway } from './tool-gateway.mjs';
 import { providerRoute, withProviderProfile } from './providers.mjs';
@@ -70,8 +77,9 @@ import {
 const running = new Map();
 /** agentId -> 正在执行的任务数，避免并行任务把状态互相改回 idle */
 const activeAgents = new Map();
-/** taskId -> 最近一次目录快照，一道工序只扫一遍磁盘 */
+/** taskId -> { root, generation, complete, scannedAt, scanMs, files } */
 const fileIndex = new Map();
+let fileIndexGeneration = 0;
 
 const STEP_KIND = {
   planner: 'plan',
@@ -171,18 +179,8 @@ export async function writeWorkspaceFile(task, relPath, content, meta = {}) {
   const abs = executionAgent?.workspacePolicy?.crossTask
     ? workspacePoolPath(task, relPath, executionAgent)
     : path.join(task.workspace, invocation.result.path);
-  const stat = fs.statSync(abs, { bigint: true });
-  const bytes = Buffer.byteLength(content);
-  // 自己写的文件立刻记进本任务的目录快照，下一步就不用再全量扫一遍
-  const cached = fileIndex.get(task.id);
-  if (cached) {
-    const indexedPath = invocation.result.path;
-    cached.set(indexedPath, {
-      path: indexedPath,
-      bytes,
-      mtimeMs: Number(stat.mtimeMs),
-      mtimeNs: stat.mtimeNs.toString(),
-    });
+  if (!executionAgent?.workspacePolicy?.crossTask) {
+    rememberWorkspaceIndexAdd(task, invocation.result.path);
   }
   return abs;
 }
@@ -201,19 +199,45 @@ const SKIP_DIRS = new Set([
   'venv',
 ]);
 const MAX_SCAN_FILES = 20000;
+const MAX_SCAN_DEPTH = 12;
 
-/** 只为测试与观测：全量目录扫描次数 */
-export const scanStats = { calls: 0 };
+/** 只为测试与观测：全量目录扫描次数、耗时与索引状态。 */
+export const scanStats = {
+  calls: 0,
+  files: 0,
+  elapsedMs: 0,
+  complete: true,
+  truncated: false,
+  lastScanAt: null,
+};
 
-export function listWorkspaceFiles(task) {
+export function listWorkspaceFiles(
+  task,
+  { maxFiles = MAX_SCAN_FILES, maxDepth = MAX_SCAN_DEPTH } = {},
+) {
+  const startedAt = Date.now();
   scanStats.calls += 1;
   const out = [];
+  let truncated = maxFiles <= 0;
+  if (truncated) {
+    scanStats.files = 0;
+    scanStats.elapsedMs = 0;
+    scanStats.complete = false;
+    scanStats.truncated = true;
+    scanStats.lastScanAt = Date.now();
+    out.complete = false;
+    return out;
+  }
   const walk = (dir, prefix = '', depth = 0) => {
-    if (out.length >= MAX_SCAN_FILES || depth > 12) return;
+    if (out.length >= maxFiles || depth > maxDepth) {
+      truncated = true;
+      return;
+    }
     let entries = [];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
     } catch {
+      truncated = true;
       return;
     }
     for (const e of entries) {
@@ -221,8 +245,15 @@ export function listWorkspaceFiles(task) {
       const rel = prefix ? `${prefix}/${e.name}` : e.name;
       if (e.isDirectory()) {
         walk(path.join(dir, e.name), rel, depth + 1);
-        if (out.length >= MAX_SCAN_FILES) return;
+        if (out.length >= maxFiles) {
+          truncated = true;
+          return;
+        }
       } else {
+        if (out.length >= maxFiles) {
+          truncated = true;
+          return;
+        }
         try {
           // bigint 才能拿到纳秒级 mtime：同毫秒内的等长改写也能识别
           const stat = fs.statSync(path.join(dir, e.name), { bigint: true });
@@ -233,32 +264,140 @@ export function listWorkspaceFiles(task) {
             mtimeNs: stat.mtimeNs.toString(),
           });
         } catch {
-          /* 单个文件读不到就算了 */
+          truncated = true;
         }
       }
     }
   };
   walk(task.workspace);
+  const elapsedMs = Date.now() - startedAt;
+  scanStats.files = out.length;
+  scanStats.elapsedMs = elapsedMs;
+  scanStats.complete = !truncated;
+  scanStats.truncated = truncated;
+  scanStats.lastScanAt = Date.now();
+  out.complete = !truncated;
   return out;
 }
 
-/** 扫一次并记住：下一步直接拿它当 before，不用再走一遍磁盘。 */
-export function snapshotFiles(task) {
-  const files = listWorkspaceFiles(task);
-  fileIndex.set(task.id, new Map(files.map((f) => [f.path, f])));
+function fileIndexKey(task) {
+  return `${task?.id || ''}:${path.resolve(task?.workspace || '')}`;
+}
+
+/** 权威扫描：CLI 前后与删除判断只能使用这份结果。 */
+export function snapshotFiles(task, options = {}) {
+  const files = listWorkspaceFiles(task, options);
+  const complete = files.complete !== false;
+  const cached = {
+    root: path.resolve(task.workspace),
+    generation: ++fileIndexGeneration,
+    complete,
+    scannedAt: Date.now(),
+    scanMs: scanStats.elapsedMs,
+    files: new Map(files.map((file) => [file.path, file])),
+  };
+  fileIndex.set(fileIndexKey(task), cached);
+  clearWorkspaceIndexInvalidation(task);
+  takeWorkspaceIndexAdds(task);
+  takeWorkspaceIndexMoves(task);
   return files;
 }
 
+function indexedFile(task, relPath) {
+  try {
+    const stat = fs.statSync(path.join(task.workspace, relPath), { bigint: true });
+    if (!stat.isFile()) return null;
+    return {
+      path: relPath,
+      bytes: Number(stat.size),
+      mtimeMs: Number(stat.mtimeMs),
+      mtimeNs: stat.mtimeNs.toString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
 function knownFiles(task) {
-  const cached = fileIndex.get(task.id);
-  return cached ? [...cached.values()] : snapshotFiles(task);
+  const key = fileIndexKey(task);
+  const cached = fileIndex.get(key);
+  const revision = workspaceIndexRevision(task);
+  if (!cached?.complete) return snapshotFiles(task);
+  if (revision.invalidated === null) return snapshotFiles(task);
+  const moves = takeWorkspaceIndexMoves(task);
+  const adds = takeWorkspaceIndexAdds(task);
+  if (!revision.invalidated?.size && !moves.length && !adds.length) {
+    return [...cached.files.values()];
+  }
+
+  // 移动记录必须在失效删除前建立候选，否则目录源条目已从缓存消失。
+  const moveSource = new Map(cached.files);
+  const movedPaths = new Set();
+  for (const relPath of adds) {
+    // 新增路径即使已被同一批移动带走，也要保留占位以便沿移动链映射到最终路径。
+    if (!moveSource.has(relPath)) {
+      moveSource.set(relPath, {
+        path: relPath,
+        bytes: 0,
+        mtimeMs: 0,
+        mtimeNs: '0',
+      });
+    }
+  }
+  for (const { from, to } of moves) {
+    for (const [filePath, file] of [...moveSource.entries()]) {
+      if (filePath !== from && !filePath.startsWith(`${from}/`)) continue;
+      const nextPath = filePath === from ? to : `${to}${filePath.slice(from.length)}`;
+      moveSource.delete(filePath);
+      moveSource.set(nextPath, { ...file, path: nextPath });
+      movedPaths.add(nextPath);
+    }
+  }
+
+  for (const relPath of revision.invalidated) {
+    for (const filePath of cached.files.keys()) {
+      if (filePath === relPath || filePath.startsWith(`${relPath}/`)) {
+        cached.files.delete(filePath);
+      }
+    }
+  }
+  clearWorkspaceIndexInvalidation(task);
+  cached.generation = ++fileIndexGeneration;
+  // 最终 stat 既能刷新元数据，也能排除移动后又被删除或覆盖的路径。
+  for (const relPath of movedPaths) {
+    const file = indexedFile(task, relPath);
+    if (file) cached.files.set(relPath, file);
+  }
+  for (const relPath of adds) {
+    const file = indexedFile(task, relPath);
+    if (file) cached.files.set(relPath, file);
+  }
+  cached.scannedAt = Date.now();
+  return [...cached.files.values()];
+}
+
+export function fileIndexStatus(task) {
+  const cached = fileIndex.get(fileIndexKey(task));
+  if (!cached) return null;
+  return {
+    generation: cached.generation,
+    complete: cached.complete,
+    lastScanAt: cached.scannedAt,
+    scanMs: cached.scanMs,
+    indexedFiles: cached.files.size,
+  };
 }
 
 export function buildContextPack(task, options = {}) {
   return buildContextPackFromFiles(task, {
     ...options,
-    listFiles: options.listFiles || listWorkspaceFiles,
+    listFiles: options.listFiles || knownFiles,
   });
+}
+
+export function refreshContextFileIndex(task) {
+  snapshotFiles(task);
+  return fileIndexStatus(task);
 }
 
 /* ------------------------------------------------------------------ */
@@ -671,7 +810,9 @@ async function cliMessage(
   });
   beginAgent(agent, `${agent.cli?.command || 'CLI'} 运行中`);
 
-  const before = fileIndex.get(task.id) || new Map(snapshotFiles(task).map((f) => [f.path, f]));
+  const beforeSnapshot = snapshotFiles(task);
+  const before = new Map(beforeSnapshot.map((f) => [f.path, f]));
+  const beforeComplete = beforeSnapshot.complete !== false;
   let hintShown = false;
   let hintTimer = setTimeout(() => {
     hintShown = true;
@@ -963,13 +1104,16 @@ async function cliMessage(
       source: 'cli',
     });
   }
-  const afterPaths = new Set(after.map((f) => f.path));
-  for (const [relPath] of before) {
-    if (afterPaths.has(relPath)) continue;
-    store.markArtifactDeleted(task.id, relPath, {
-      agentId: agent.id,
-      stepId: agent.currentStepId || '',
-    });
+  // 截断扫描不能证明文件真的被删除，不能据此写删除审计。
+  if (beforeComplete && after.complete !== false) {
+    const afterPaths = new Set(after.map((f) => f.path));
+    for (const [relPath] of before) {
+      if (afterPaths.has(relPath)) continue;
+      store.markArtifactDeleted(task.id, relPath, {
+        agentId: agent.id,
+        stepId: agent.currentStepId || '',
+      });
+    }
   }
 
   const failed = res.code !== 0 && res.code !== -4;

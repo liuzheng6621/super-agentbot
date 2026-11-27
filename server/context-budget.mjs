@@ -108,6 +108,7 @@ export function buildContextPack(
     currentTask = store.getTask(task.id) || task;
   }
   const allFiles = files || listFiles(currentTask);
+  if (!allFiles) throw new Error('context-budget 需要 listFiles 或 files');
   const messages = Array.isArray(currentTask.messages) ? currentTask.messages : [];
   const visibleMessages = messages.filter((message) => message.text || message.image);
   const recentStart = Math.max(0, visibleMessages.length - maxMessages);

@@ -4,6 +4,11 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { store } from './store.mjs';
 import { writeFileAtomic, versionOf } from './fs.mjs';
+import {
+  invalidateWorkspaceIndex,
+  rememberWorkspaceIndexAdd,
+  rememberWorkspaceIndexMove,
+} from './workspace-index.mjs';
 
 const MAX_TREE_ENTRIES = 5000;
 const MAX_TREE_DEPTH = 10;
@@ -885,6 +890,10 @@ export function writeWorkspaceEntry(task, relPath, content, meta = {}, agent = n
     principalKind: principal?.kind || (agent?.id ? 'agent' : 'owner'),
     principalId: principal?.id || meta.agentId || (agent?.id ? agent.id : 'owner'),
   });
+  if (!pooled) {
+    invalidateWorkspaceIndex(task, rel);
+    rememberWorkspaceIndexAdd(task, rel);
+  }
   if (existing) {
     const receiptPrincipal =
       principal?.kind === 'system' && (agent?.id || meta.agentId)
@@ -962,6 +971,11 @@ export function moveWorkspaceEntry(task, fromPath, toPath, meta = {}, agent = nu
     stepId: meta.stepId || '',
     data: { from: from.rel, to: to.rel, directory: isDirectory, moved },
   });
+  if (fromPooled || toPooled) invalidateWorkspaceIndex(task);
+  if (!fromPooled && !toPooled) {
+    invalidateWorkspaceIndex(task, [from.rel, to.rel]);
+    rememberWorkspaceIndexMove(task, from.rel, to.rel);
+  }
   store.save();
   return { from: from.rel, to: to.rel, directory: isDirectory, moved };
 }
@@ -1004,6 +1018,7 @@ export function deleteWorkspaceEntry(task, relPath, meta = {}, agent = null) {
     directory: isDirectory,
     trashPath: trashRel,
   });
+  if (!pooled) invalidateWorkspaceIndex(task, target.rel);
   return { path: target.rel, directory: isDirectory, trashPath: trashRel };
 }
 
@@ -1205,6 +1220,7 @@ export function applyWorkspaceTransaction(task, operations, meta = {}, agent = n
       rolledBack: applied.length,
       rollbackErrors,
     });
+    invalidateWorkspaceIndex(task);
     if (rollbackErrors.length) {
       fail(`事务失败且回滚不完整：${rollbackErrors.join('; ')}`, 500);
     }

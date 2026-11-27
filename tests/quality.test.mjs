@@ -19,6 +19,9 @@ const {
   qualityGateAllowsDelivery,
   isTransientCliError,
   scanStats,
+  snapshotFiles,
+  listWorkspaceFiles,
+  fileIndexStatus,
   workMsOf,
 } = await import('../server/orchestrator.mjs');
 
@@ -174,7 +177,8 @@ test('自审按 reviewerId 与 implementerId 判定，并在记录中带出双�
 });
 
 test('上下文包可以直接复用目录快照，不再重复扫描', () => {
-  const task = { id: 'ctx-task', goal: '看板', workspace: temp, status: 'running', mode: 'auto', plan: [], messages: [] };
+  const dir = workspace({ 'a.js': 'a' }).workspace;
+  const task = { id: 'ctx-task', goal: '看板', workspace: dir, status: 'running', mode: 'auto', plan: [], messages: [] };
   const before = scanStats.calls;
   const pack = buildContextPack(task, { files: [{ path: 'virtual.js', bytes: 10, mtimeMs: 1, mtimeNs: '1' }] });
   assert.equal(scanStats.calls, before, '传了快照就不该再扫目录');
@@ -184,7 +188,40 @@ test('上下文包可以直接复用目录快照，不再重复扫描', () => {
   );
 
   buildContextPack(task);
-  assert.equal(scanStats.calls, before + 1, '不传快照才扫一次');
+  buildContextPack(task);
+  assert.equal(scanStats.calls, before + 1, '不传快照时复用同工作区完整索引');
+});
+
+test('大目录索引绑定工作区并报告完整性，截断不会冒充完整快照', () => {
+  const first = workspace({ 'one.js': '1' });
+  const second = workspace({ 'two.js': '2' });
+  first.id = 'indexed-task';
+  second.id = 'indexed-task';
+
+  const one = snapshotFiles(first);
+  assert.equal(one.complete, true);
+  assert.equal(fileIndexStatus(first).complete, true);
+  assert.deepEqual(buildContextPack(first).files.map((file) => file.path), ['one.js']);
+
+  const two = buildContextPack(second);
+  assert.deepEqual(two.files.map((file) => file.path), ['two.js'], '同 taskId 换工作区不能复用旧索引');
+
+  const truncated = listWorkspaceFiles(first, { maxFiles: 0 });
+  assert.equal(truncated.complete, false);
+  assert.equal(scanStats.complete, false);
+});
+
+test('截断扫描不会把缺失文件误判为删除', () => {
+  const dir = workspace({
+    'a.txt': 'a',
+    'b.txt': 'b',
+  }).workspace;
+  const task = { id: 'truncated-task', goal: 'truncate', workspace: dir };
+  const full = snapshotFiles(task);
+  assert.equal(full.complete, true);
+  const truncated = listWorkspaceFiles(task, { maxFiles: 1 });
+  assert.equal(truncated.complete, false);
+  assert.equal(fileIndexStatus(task).complete, true, '截断的只读扫描不能覆盖权威完整快照');
 });
 
 test('质量门会真的跑工作区里的测试入口，找不到入口就报 no-test-entry', async () => {

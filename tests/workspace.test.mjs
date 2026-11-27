@@ -25,6 +25,11 @@ const {
   writeWorkspaceEntry,
   pruneWorkspaceTrash,
 } = await import('../server/workspace.mjs');
+const {
+  buildContextPack,
+  fileIndexStatus,
+  refreshContextFileIndex,
+} = await import('../server/orchestrator.mjs');
 
 function git(root, args) {
   const result = spawnSync('git', ['-C', root, ...args], {
@@ -176,6 +181,31 @@ test('lazy workspace directory reads one level while the legacy snapshot stays r
     true,
   );
   assert.throws(() => listWorkspaceDirectory(current, '../outside'), /越出工作区/);
+});
+
+test('platform writes, moves and deletes invalidate the context file index', () => {
+  const task = store.createTask({ goal: '验证上下文索引失效' });
+  writeWorkspaceEntry(task, 'src/a.js', 'a\n');
+  refreshContextFileIndex(store.getTask(task.id));
+  assert.ok(buildContextPack(store.getTask(task.id)).files.some((file) => file.path === 'src/a.js'));
+
+  writeWorkspaceEntry(task, 'src/b.js', 'b\n');
+  assert.ok(
+    buildContextPack(store.getTask(task.id)).files.some((file) => file.path === 'src/b.js'),
+    '平台新增文件必须立即进入上下文',
+  );
+
+  moveWorkspaceEntry(task, 'src', 'lib');
+  const moved = buildContextPack(store.getTask(task.id)).files.map((file) => file.path);
+  assert.ok(moved.includes('lib/a.js'));
+  assert.ok(moved.includes('lib/b.js'));
+  assert.ok(!moved.some((file) => file.startsWith('src/')));
+
+  deleteWorkspaceEntry(task, 'lib/a.js');
+  const deleted = buildContextPack(store.getTask(task.id)).files.map((file) => file.path);
+  assert.ok(!deleted.includes('lib/a.js'));
+  assert.ok(deleted.includes('lib/b.js'));
+  assert.equal(fileIndexStatus(store.getTask(task.id)).complete, true);
 });
 
 test('HTTP workspace route exposes lazy directories and keeps the legacy full tree', async () => {

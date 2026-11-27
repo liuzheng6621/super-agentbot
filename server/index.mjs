@@ -21,6 +21,8 @@ import {
   chat,
   buildContextPack,
   compactTaskContext,
+  fileIndexStatus,
+  refreshContextFileIndex,
   listTaskCompactions,
   replayTaskCompaction,
   isRunning,
@@ -393,7 +395,11 @@ function taskDetail(task) {
         return type.startsWith('tool.') || type.startsWith('cli.policy.');
       })
       .slice(-120),
-    context: buildContextPack(task),
+    context: (() => {
+      if (!fileIndexStatus(task)) refreshContextFileIndex(task);
+      return buildContextPack(task);
+    })(),
+    fileIndex: fileIndexStatus(task),
   };
 }
 
@@ -1026,13 +1032,15 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/context-preview' && method === 'POST') {
       const body = await readBody(req);
       const goal = String(body.goal || '').trim();
-      const context = buildContextPack({
+      const previewTask = {
         goal,
         workspace: body.workspace || WORKSPACE_DIR,
         status: 'idle',
         mode: 'auto',
         messages: [],
-      }, { maxMessages: 0 });
+      };
+      refreshContextFileIndex(previewTask);
+      const context = buildContextPack(previewTask, { maxMessages: 0 });
       return json(res, 200, { context });
     }
 
