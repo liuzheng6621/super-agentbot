@@ -13,6 +13,8 @@ const S = {
   roleTools: {},
   executionPolicies: [],
   tasks: [],
+  pagination: null,
+  loadingMoreTasks: false,
   task: null,
   settings: {},
   scheduler: null,
@@ -456,7 +458,7 @@ function renderAgents() {
 
 function renderHeroStats() {
   $("#statAgents").textContent = pad2(S.agents.length);
-  $("#statTasks").textContent = pad2(S.tasks.length);
+  $("#statTasks").textContent = pad2(S.pagination?.total ?? S.tasks.length);
   $("#statFiles").textContent = pad2(S.tasks.reduce((n, t) => n + (t.files || 0), 0));
 }
 
@@ -521,8 +523,84 @@ function renderTasks() {
         )
         .join("")
     : '<p class="hint">还没有任务，先描述一个目标。</p>';
-  $("#taskCount").textContent = pad2(S.tasks.length);
+  $("#taskCount").textContent = pad2(S.pagination?.total ?? S.tasks.length);
+  const loadMore = $("#loadMoreTasks");
+  if (loadMore) {
+    loadMore.hidden = !S.pagination?.hasMore;
+    loadMore.disabled = S.loadingMoreTasks;
+    loadMore.textContent = S.loadingMoreTasks
+      ? "正在加载…"
+      : `加载更多（已显示 ${S.tasks.length}/${S.pagination?.total ?? S.tasks.length}）`;
+  }
   renderHeroStats();
+}
+
+const TASK_SUMMARY_FIELDS = [
+  "id",
+  "tenantId",
+  "ownerId",
+  "title",
+  "goal",
+  "mode",
+  "flowMode",
+  "sourceWorkspace",
+  "worktree",
+  "status",
+  "createdAt",
+  "clientMessageId",
+  "clientMessageScope",
+  "endedAt",
+  "queuedAt",
+  "startedAt",
+  "finishedAt",
+  "queuePosition",
+  "waitingReason",
+  "queueMs",
+  "executionMs",
+  "scheduler",
+  "runId",
+  "trace",
+  "recovery",
+  "repairRound",
+  "planVersion",
+  "quality",
+  "usage",
+  "skillActivations",
+  "stats",
+  "steps",
+  "doneSteps",
+  "messages",
+  "files",
+  "changes",
+  "events",
+].join(",");
+
+async function loadMoreTasks() {
+  if (S.loadingMoreTasks || !S.pagination?.hasMore || !S.pagination?.nextCursor) return;
+  S.loadingMoreTasks = true;
+  renderTasks();
+  try {
+    const query = new URLSearchParams({
+      limit: String(S.pagination.limit || 50),
+      fields: TASK_SUMMARY_FIELDS,
+      includeActiveTask: "0",
+      cursor: S.pagination.nextCursor,
+    });
+    const page = await api(`/api/state?${query}`);
+    const seen = new Set(S.tasks.map((task) => task.id));
+    for (const task of page.tasks || []) {
+      if (!seen.has(task.id)) {
+        S.tasks.push(task);
+        seen.add(task.id);
+      }
+    }
+    S.pagination = page.pagination || S.pagination;
+  } catch (err) {
+    toast(`加载历史任务失败：${err.message}`, "err");
+  } finally {
+    S.loadingMoreTasks = false;
+    renderTasks();
+  }
 }
 
 function renderIdentity() {
@@ -3007,7 +3085,10 @@ async function createTask(goal) {
     S.workspace = null;
     S.workspacePreviewData = null;
     $("#workspaceSearch").value = "";
-    if (!S.tasks.find((t) => t.id === task.id)) S.tasks.unshift({ ...task });
+    if (!S.tasks.find((t) => t.id === task.id)) {
+      S.tasks.unshift({ ...task });
+      if (S.pagination) S.pagination.total = Number(S.pagination.total || 0) + 1;
+    }
     $("#heroInput").value = "";
     $("#input").value = "";
     // 直接开工没有讨论可看，落到执行链路；先讨论则停在讨论页看提案
@@ -3083,6 +3164,7 @@ function handleEvent(ev) {
   switch (ev.type) {
     case "task.created": {
       if (!S.tasks.find((t) => t.id === ev.task.id)) S.tasks.unshift(ev.task);
+      if (S.pagination) S.pagination.total = Number(S.pagination.total || 0) + 1;
       renderTasks();
       break;
     }
@@ -3324,6 +3406,9 @@ function handleEvent(ev) {
     }
     case "task.deleted": {
       S.tasks = S.tasks.filter((t) => t.id !== ev.taskId);
+      if (S.pagination) {
+        S.pagination.total = Math.max(0, Number(S.pagination.total || 0) - 1);
+      }
       if (cur && cur.id === ev.taskId) {
         S.task = null;
         S.openStep = "";
@@ -4141,6 +4226,7 @@ function bind() {
     const item = e.target.closest(".task-item");
     if (item) selectTask(item.dataset.task);
   });
+  $("#loadMoreTasks").addEventListener("click", loadMoreTasks);
 
   /* 运行 / 停止 */
   $("#runBtn").addEventListener("click", async () => {
@@ -4499,7 +4585,12 @@ async function boot() {
   applyShift(night);
 
   try {
-    const state = await api("/api/state");
+    const query = new URLSearchParams({
+      limit: "50",
+      fields: TASK_SUMMARY_FIELDS,
+      includeActiveTask: "0",
+    });
+    const state = await api(`/api/state?${query}`);
     S.agents = normalizeAgentSeats(state.agents);
     S.profiles = state.profiles || [];
     S.providers = state.providers || [];
@@ -4507,6 +4598,7 @@ async function boot() {
     S.roleTools = state.roleTools || {};
     S.executionPolicies = state.executionPolicies || [];
     S.tasks = state.tasks;
+    S.pagination = state.pagination || null;
     S.overview = state.overview || null;
     S.settings = state.settings || {};
     S.scheduler = state.scheduler || null;
@@ -4516,7 +4608,12 @@ async function boot() {
     S.commands = state.commands || [];
     S.approvals = state.approvals || [];
     S.security = state.security || null;
-    if (state.activeTask) S.task = state.activeTask;
+    if (state.activeTask) {
+      S.task = state.activeTask;
+    } else if (state.activeTaskId) {
+      const detail = await api(`/api/tasks/${encodeURIComponent(state.activeTaskId)}`);
+      S.task = detail.task;
+    }
     S.openStep = "";
     renderFlowModeControls();
     renderAll();

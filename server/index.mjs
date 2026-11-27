@@ -205,6 +205,137 @@ function visibleApprovals(principal) {
   return approvalsForPrincipal(principal);
 }
 
+const TASK_SUMMARY_FIELDS = new Set([
+  'id',
+  'tenantId',
+  'ownerId',
+  'title',
+  'goal',
+  'mode',
+  'flowMode',
+  'sourceWorkspace',
+  'worktree',
+  'status',
+  'createdAt',
+  'clientMessageId',
+  'clientMessageScope',
+  'endedAt',
+  'queuedAt',
+  'startedAt',
+  'finishedAt',
+  'queuePosition',
+  'waitingReason',
+  'queueMs',
+  'executionMs',
+  'scheduler',
+  'runId',
+  'trace',
+  'recovery',
+  'repairRound',
+  'planVersion',
+  'planVersions',
+  'quality',
+  'usage',
+  'skillActivations',
+  'stats',
+  'steps',
+  'doneSteps',
+  'messages',
+  'files',
+  'changes',
+  'events',
+]);
+
+function encodeTaskCursor(task) {
+  return Buffer.from(
+    JSON.stringify({ createdAt: Number(task.createdAt) || 0, id: task.id }),
+  ).toString('base64url');
+}
+
+function decodeTaskCursor(value) {
+  if (!value) return null;
+  try {
+    const raw = JSON.parse(Buffer.from(String(value), 'base64url').toString('utf8'));
+    if (
+      !raw ||
+      !Number.isFinite(Number(raw.createdAt)) ||
+      typeof raw.id !== 'string' ||
+      !raw.id
+    ) {
+      return null;
+    }
+    return { createdAt: Number(raw.createdAt), id: raw.id };
+  } catch {
+    return null;
+  }
+}
+
+function compareTaskOrder(a, b) {
+  return Number(b.createdAt) - Number(a.createdAt) || String(a.id).localeCompare(String(b.id));
+}
+
+function activeTaskOf(tasks) {
+  return (
+    tasks.find((task) => isRunning(task.id)) ||
+    tasks.find((task) => isQueued(task.id)) ||
+    [...tasks].sort(compareTaskOrder)[0] ||
+    null
+  );
+}
+
+function selectTaskSummaryFields(summary, fields) {
+  if (!fields.length) return summary;
+  const selected = {};
+  for (const field of fields) {
+    if (field === 'id' || TASK_SUMMARY_FIELDS.has(field)) selected[field] = summary[field];
+  }
+  selected.id = summary.id;
+  return selected;
+}
+
+function taskStatePage(tasks, searchParams) {
+  const sorted = [...tasks].sort(compareTaskOrder);
+  const limitRaw = searchParams.get('limit');
+  const fields = String(searchParams.get('fields') || '')
+    .split(',')
+    .map((field) => field.trim())
+    .filter(Boolean);
+  if (!limitRaw) {
+    return {
+      tasks: sorted.map((task) => selectTaskSummaryFields(store.taskSummary(task), fields)),
+      pagination: null,
+      cursor: null,
+    };
+  }
+  const limit = Math.max(1, Math.min(200, Number(limitRaw) || 50));
+  const cursorRaw = searchParams.get('cursor');
+  const cursor = decodeTaskCursor(cursorRaw);
+  if (cursorRaw && !cursor) {
+    return { error: { code: 'invalid-cursor', message: '分页游标无效' } };
+  }
+  let start = 0;
+  if (cursor) {
+    start = sorted.findIndex(
+      (task) =>
+        Number(task.createdAt) < cursor.createdAt ||
+        (Number(task.createdAt) === cursor.createdAt && String(task.id) > cursor.id),
+    );
+    if (start < 0) start = sorted.length;
+  }
+  const page = sorted.slice(start, start + limit);
+  const hasMore = start + limit < sorted.length;
+  return {
+    tasks: page.map((task) => selectTaskSummaryFields(store.taskSummary(task), fields)),
+    pagination: {
+      total: sorted.length,
+      limit,
+      hasMore,
+      nextCursor: hasMore && page.length ? encodeTaskCursor(page[page.length - 1]) : null,
+    },
+    cursor: page.length ? encodeTaskCursor(page[page.length - 1]) : null,
+  };
+}
+
 function taskDetail(task) {
   const summary = store.taskSummary(task);
   const poolAgent = task.plan?.find((step) => step.agentId && store.getAgent(step.agentId));
@@ -389,19 +520,24 @@ const server = http.createServer(async (req, res) => {
     /* ---- 全量状态 ---- */
     if (pathname === '/api/state' && method === 'GET') {
       const scopedTasks = visibleTasks(principal);
-      const tasks = scopedTasks.map((t) => store.taskSummary(t));
-      // 优先给正在跑的那条全量详情；都没在跑时退回最新一条（tasks[0] 是最新）
-      const active =
-        scopedTasks.find((t) => isRunning(t.id)) ||
-        scopedTasks.find((t) => isQueued(t.id)) ||
-        scopedTasks[0];
+      const page = taskStatePage(scopedTasks, searchParams);
+      if (page.error) {
+        return json(res, 400, {
+          error: page.error.message,
+          code: page.error.code,
+        });
+      }
+      const active = activeTaskOf(scopedTasks);
+      const includeActiveTask = searchParams.get('includeActiveTask') !== '0';
       return json(res, 200, {
         agents: store.agents.map(agentView),
         profiles: store.profiles.map((profile) =>
           redactAgentProfile(profile, store.profileOptions()),
         ),
         providers: store.providers.map(redactProvider),
-        tasks,
+        tasks: page.tasks,
+        pagination: page.pagination,
+        cursor: page.cursor,
         settings: stateSettings(),
         mcpServers: store.mcpServers.map(redactMcpServer),
         commands: principal?.kind === 'agent' ? [] : commandRunner.snapshot(),
@@ -430,7 +566,8 @@ const server = http.createServer(async (req, res) => {
         toolCatalog: TOOL_CATALOG,
         roleTools: ROLE_TOOLS,
         executionPolicies: executionPolicyCatalog(),
-        activeTask: active ? taskDetail(active) : null,
+        activeTaskId: active?.id || null,
+        activeTask: active && includeActiveTask ? taskDetail(active) : null,
         overview: crossTaskOverview({ tenantId: principalTenant(principal) }),
       });
     }
