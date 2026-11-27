@@ -1,6 +1,6 @@
-import path from 'node:path';
 import { store } from './store.mjs';
 import { probeClis } from './adapters.mjs';
+import { commandKey } from './command-key.mjs';
 
 const ROLE_TITLE = {
   planner: '规划师',
@@ -19,14 +19,6 @@ const ROLE_PREFERENCES = {
   reviewer: ['dsh', 'claude', 'kimi', 'qwen', 'gemini'],
 };
 
-/** 命令名归一化：绝对路径 / .cmd / .exe 都折成同一个名字，避免重复接管 */
-function baseName(cmd) {
-  return path
-    .basename(String(cmd || ''))
-    .replace(/\.(cmd|bat|exe|ps1)$/i, '')
-    .toLowerCase();
-}
-
 /**
  * 把已接入的 CLI 分到 5 个主执行席位。
  * 优先保留角色现有人选，其次让每个角色尽量使用不同工具，避免所有 CLI 都挤在 coder。
@@ -36,7 +28,7 @@ export function rebalanceTeam() {
   const seenCommands = new Set();
   for (const agent of store.agents) {
     if (agent.mode !== 'cli' || !agent.cli?.command) continue;
-    const key = baseName(agent.cli.command);
+    const key = commandKey(agent.cli.command);
     if (seenCommands.has(key)) continue;
     seenCommands.add(key);
     available.push(agent);
@@ -49,8 +41,8 @@ export function rebalanceTeam() {
     const ranked = [...available]
       .filter((a) => !picked.has(a.id))
       .sort((a, b) => {
-        const ai = prefs.indexOf(baseName(a.cli.command));
-        const bi = prefs.indexOf(baseName(b.cli.command));
+        const ai = prefs.indexOf(commandKey(a.cli.command));
+        const bi = prefs.indexOf(commandKey(b.cli.command));
         // 现有人选只做微弱加权，让 ROLE_PREFERENCES 说了算。seat 标志不参与打分：
         // 它由上一次编排写入，拿它加权等于把上一轮的结果当成理由（tester 被 dsh 粘住、
         // reviewer 被 trae-cli 粘住就是这么来的）。
@@ -66,7 +58,7 @@ export function rebalanceTeam() {
       title: ROLE_TITLE[role],
       seat: true,
     });
-    assignments.push({ role, id: chosen.id, name: chosen.name, command: baseName(chosen.cli.command) });
+    assignments.push({ role, id: chosen.id, name: chosen.name, command: commandKey(chosen.cli.command) });
   }
   return assignments;
 }
@@ -75,15 +67,24 @@ export function rebalanceTeam() {
  * 把本机已安装、但还没成为成员的 CLI 一次性接管成智能体。
  * 幂等：同一条命令不会重复建成员。新成员默认进入工具池，不抢占已有执行席位。
  */
-export async function adoptInstalledClis({ dryRun = false } = {}) {
-  const candidates = await probeClis();
-  const taken = new Set(store.agents.filter((a) => a.mode === 'cli').map((a) => baseName(a.cli?.command)));
+export async function adoptInstalledClis({ dryRun = false, probe = probeClis } = {}) {
+  const candidates = await probe();
+  const taken = new Set(
+    store.agents
+      .filter((a) => a.mode === 'cli')
+      .map((a) => commandKey(a.cli?.command))
+      .filter(Boolean),
+  );
 
   const created = [];
   const skipped = [];
 
   for (const c of candidates) {
-    const key = String(c.command).toLowerCase();
+    const key = commandKey(c.path || c.command);
+    if (!key) {
+      skipped.push({ command: c.command, reason: '无法识别命令名' });
+      continue;
+    }
     if (!c.found) {
       skipped.push({ command: c.command, reason: '未安装' });
       continue;

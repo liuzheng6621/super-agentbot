@@ -9,6 +9,8 @@ process.env.AGENTFORGE_DATA_DIR = temp;
 
 const { judgeHealth, pickRealTeam, isBuiltinSeat, baseName, collectCandidates } =
   await import('../server/team.mjs');
+const { commandBaseName, commandKey } = await import('../server/command-key.mjs');
+const { adoptInstalledClis, rebalanceTeam } = await import('../server/adopt.mjs');
 const { store } = await import('../server/store.mjs');
 
 const cand = (key, health) => ({ key, label: key, path: key, args: [], health });
@@ -102,6 +104,29 @@ test('baseName 把绝对路径与 .cmd/.exe 折成同一个 key', () => {
   assert.equal(baseName('C:\\Users\\six\\AppData\\Roaming\\npm\\opencode.cmd'), 'opencode');
   assert.equal(baseName('C:/Users/six/.local/bin/aider.exe'), 'aider');
   assert.equal(baseName('codex'), 'codex');
+});
+
+test('命令归一化不会把参数、引号或空格当成文件名', () => {
+  assert.equal(commandBaseName('C:\\tools\\codex.exe'), 'codex');
+  assert.equal(commandBaseName('C:/tools/codex.cmd'), 'codex');
+  assert.equal(commandBaseName('codex'), 'codex');
+  assert.equal(commandBaseName('"C:\\Program Files\\Codex CLI\\codex.exe" --sandbox read-only'), 'codex');
+  assert.equal(commandBaseName('C:\\Program Files\\Codex CLI\\codex.exe --sandbox read-only'), 'codex');
+  assert.equal(commandBaseName(''), '');
+  assert.equal(commandKey('C:\\tools\\codex.exe'), 'codex');
+  assert.equal(commandKey('"C:\\Program Files\\Codex CLI\\codex.exe" --version'), 'codex');
+  assert.equal(commandKey(''), '');
+});
+
+test('接管同一 CLI 的不同路径与扩展名只创建一次', async () => {
+  const candidates = [
+    { found: true, command: 'codex', label: 'Codex CLI', path: 'C:\\tools\\codex.exe', args: [] },
+    { found: true, command: 'codex', label: 'Codex CLI', path: 'C:/tools/codex.cmd', args: [] },
+    { found: true, command: 'codex', label: 'Codex CLI', path: 'codex', args: [] },
+  ];
+  const result = await adoptInstalledClis({ probe: async () => candidates });
+  assert.equal(result.created.length, 1);
+  assert.equal(result.skipped.filter((item) => item.reason === '已在团队中').length, 2);
 });
 
 test('候选按命令名去重，并复用已持久化的体检缓存', () => {
