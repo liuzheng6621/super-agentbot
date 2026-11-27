@@ -14,8 +14,144 @@ function write(relPath, content) {
 
 const close = (text) => process.stdout.write(text.trim() + '\n');
 const hasGoal = (text) => prompt.includes(text);
+const singleModuleFeature = hasGoal('SINGLE_MODULE_FEATURE');
+const bugfixOnly = hasGoal('BUGFIX_ONLY');
 
-if (hasGoal('动态计划返工夹具') && prompt.includes('STEP_ID: review')) {
+function requirePrompt(condition, message) {
+  if (condition) return;
+  process.stderr.write(`prompt contract failed: ${message}\n`);
+  process.exit(12);
+}
+
+if (singleModuleFeature && prompt.includes('PLAN CONTRACT v1')) {
+  close([
+    'Plan for one module without an architecture-only step.',
+    '',
+    '```json',
+    JSON.stringify({
+      steps: [
+        {
+          id: 'feature',
+          title: 'Implement greeting module',
+          role: 'coder',
+          needs: ['plan'],
+          outputPaths: ['src/greeting.js'],
+        },
+        {
+          id: 'tests',
+          title: 'Test greeting module',
+          role: 'tester',
+          needs: ['feature'],
+          outputPaths: ['tests/greeting.test.js'],
+        },
+        {
+          id: 'final-review',
+          title: 'Review greeting module',
+          role: 'reviewer',
+          needs: ['tests'],
+          outputPaths: [],
+        },
+      ],
+    }),
+    '```',
+    '下一步建议：实现、测试并评审单模块功能。',
+  ].join('\n'));
+} else if (singleModuleFeature && prompt.includes('STEP_ID: feature')) {
+  requirePrompt(prompt.includes('中文验收：生成问候语'), 'Chinese goal missing');
+  requirePrompt(prompt.includes('"双引号"'), 'double quotes missing');
+  requirePrompt(prompt.includes('第一行\n第二行'), 'multiline goal missing');
+  write(
+    'src/greeting.js',
+    "export function greeting(name) {\n  return `你好，${name}！`;\n}\n",
+  );
+  close('Implemented the single-module greeting feature.\n下一步建议：补充回归测试。');
+} else if (singleModuleFeature && prompt.includes('STEP_ID: tests')) {
+  write(
+    'tests/greeting.test.js',
+    [
+      "import assert from 'node:assert/strict';",
+      "import { greeting } from '../src/greeting.js';",
+      "assert.equal(greeting('世界'), '你好，世界！');",
+      "console.log('single-module CLI acceptance passed');",
+      '',
+    ].join('\n'),
+  );
+  close('Added greeting regression coverage.\n下一步建议：进入最终评审。');
+} else if (singleModuleFeature && prompt.includes('STEP_ID: review')) {
+  close([
+    'The greeting module and its regression test are present.',
+    'VERDICT: {"decision":"PASS","blockers":0,"should":0}',
+  ].join('\n'));
+} else if (bugfixOnly && prompt.includes('PLAN CONTRACT v1')) {
+  close([
+    'Bug fix plan deliberately omits the architecture-only step.',
+    '',
+    '```json',
+    JSON.stringify({
+      steps: [
+        {
+          id: 'bugfix',
+          title: 'Fix calculator overflow',
+          role: 'coder',
+          needs: ['plan'],
+          outputPaths: ['src/calculator.js'],
+        },
+        {
+          id: 'regression',
+          title: 'Add overflow regression test',
+          role: 'tester',
+          needs: ['bugfix'],
+          outputPaths: ['tests/calculator.test.js'],
+        },
+        {
+          id: 'final-review',
+          title: 'Review bug fix',
+          role: 'reviewer',
+          needs: ['regression'],
+          outputPaths: [],
+        },
+      ],
+    }),
+    '```',
+    '下一步建议：直接修复缺陷并回归验证。',
+  ].join('\n'));
+} else if (bugfixOnly && prompt.includes('STEP_ID: bugfix')) {
+  write(
+    'src/calculator.js',
+    [
+      'export function add(a, b) {',
+      '  if (!Number.isSafeInteger(a) || !Number.isSafeInteger(b)) {',
+      "    throw new RangeError('unsafe integer');",
+      '  }',
+      '  const result = a + b;',
+      '  if (!Number.isSafeInteger(result)) {',
+      "    throw new RangeError('unsafe integer');",
+      '  }',
+      '  return result;',
+      '}',
+      '',
+    ].join('\n'),
+  );
+  close('Fixed overflow handling.\n下一步建议：运行回归测试。');
+} else if (bugfixOnly && prompt.includes('STEP_ID: regression')) {
+  write(
+    'tests/calculator.test.js',
+    [
+      "import assert from 'node:assert/strict';",
+      "import { add } from '../src/calculator.js';",
+      "assert.equal(add(2, 3), 5);",
+      "assert.throws(() => add(Number.MAX_SAFE_INTEGER, 1), RangeError);",
+      "console.log('bug-fix CLI acceptance passed');",
+      '',
+    ].join('\n'),
+  );
+  close('Added overflow regression coverage.\n下一步建议：进入最终评审。');
+} else if (bugfixOnly && prompt.includes('STEP_ID: review')) {
+  close([
+    'The bug fix is scoped and the regression test covers the overflow path.',
+    'VERDICT: {"decision":"PASS","blockers":0,"should":0}',
+  ].join('\n'));
+} else if (hasGoal('动态计划返工夹具') && prompt.includes('STEP_ID: review')) {
   close([
     'The first review found issues in both implementation modules.',
     '- `src/core.js`: missing the repaired marker.',

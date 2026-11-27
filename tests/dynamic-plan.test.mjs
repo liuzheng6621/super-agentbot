@@ -78,12 +78,161 @@ function addSecondCoder() {
   });
 }
 
-function configureTestCommand(task) {
+function configureTestCommand(task, script = 'node tests/core.test.js') {
   fs.writeFileSync(
     path.join(task.workspace, 'package.json'),
-    JSON.stringify({ scripts: { test: 'node tests/core.test.js' } }, null, 2),
+    JSON.stringify({ scripts: { test: script } }, null, 2),
   );
 }
+
+async function withCliFixture(settings, run) {
+  const saved = configureFixtureAgents();
+  const previous = {};
+  for (const key of Object.keys(settings)) previous[key] = store.db.settings[key];
+  store.updateSettings(settings);
+  try {
+    return await run();
+  } finally {
+    restoreAgents(saved);
+    store.updateSettings(previous);
+  }
+}
+
+test('真实 CLI 完成单模块新功能，中文、双引号和多行目标完整到达子进程', async () => {
+  await withCliFixture(
+    {
+      debateEnabled: false,
+      dynamicPlanEnabled: true,
+      maxRepairRounds: 0,
+      maxAutoReplans: 0,
+    },
+    async () => {
+      const goal = [
+        'SINGLE_MODULE_FEATURE',
+        '中文验收：生成问候语',
+        '请保留"双引号"',
+        '第一行',
+        '第二行',
+      ].join('\n');
+      const task = store.createTask({ goal, debate: 'direct' });
+      configureTestCommand(task, 'node tests/greeting.test.js');
+
+      const ok = await startTask(task.id, { speed: 1000 });
+      const done = store.getTask(task.id);
+      assert.equal(
+        ok,
+        true,
+        done.error || done.plan.map((step) => `${step.id}:${step.status}`).join(','),
+      );
+      assert.deepEqual(
+        done.plan.map((step) => step.id),
+        ['debate', 'plan', 'feature', 'tests', 'review'],
+      );
+      assert.equal(done.plan.find((step) => step.id === 'feature').role, 'coder');
+      assert.equal(done.plan.find((step) => step.id === 'tests').role, 'tester');
+      assert.equal(done.plan.find((step) => step.id === 'review').verdict, 'pass');
+      assert.equal(done.quality.status, 'passed');
+      assert.match(
+        fs.readFileSync(path.join(done.workspace, 'src/greeting.js'), 'utf8'),
+        /你好/,
+      );
+      assert.match(
+        fs.readFileSync(path.join(done.workspace, 'tests/greeting.test.js'), 'utf8'),
+        /single-module CLI acceptance passed/,
+      );
+      assert.ok(
+        done.messages.some(
+          (message) =>
+            message.stepId === 'feature' &&
+            message.text.includes('Implemented the single-module greeting feature.'),
+        ),
+      );
+    },
+  );
+});
+
+test('真实 CLI 的纯 bug 修复计划不生成 design 工序并通过回归质量门', async () => {
+  await withCliFixture(
+    {
+      debateEnabled: false,
+      dynamicPlanEnabled: true,
+      maxRepairRounds: 0,
+      maxAutoReplans: 0,
+    },
+    async () => {
+      const task = store.createTask({
+        goal: 'BUGFIX_ONLY 修复整数溢出，不生成设计文档',
+        debate: 'direct',
+      });
+      configureTestCommand(task, 'node tests/calculator.test.js');
+
+      const ok = await startTask(task.id, { speed: 1000 });
+      const done = store.getTask(task.id);
+      assert.equal(
+        ok,
+        true,
+        done.error || done.plan.map((step) => `${step.id}:${step.status}`).join(','),
+      );
+      assert.deepEqual(
+        done.plan.map((step) => step.id),
+        ['debate', 'plan', 'bugfix', 'regression', 'review'],
+      );
+      assert.equal(done.plan.some((step) => step.role === 'architect'), false);
+      assert.equal(done.quality.status, 'passed');
+      assert.equal(done.status, 'done');
+      assert.match(
+        fs.readFileSync(path.join(done.workspace, 'src/calculator.js'), 'utf8'),
+        /Number\.isSafeInteger/,
+      );
+      assert.ok(
+        done.events.some(
+          (event) =>
+            event.type === 'quality.gate.passed' && event.stepId === 'review',
+        ),
+      );
+    },
+  );
+});
+
+test('真实 CLI 命令缺失会明确失败并阻断任务交付', async () => {
+  const planner = store.findAgentByRole('planner');
+  const before = {
+    mode: planner.mode,
+    cli: { ...planner.cli },
+    providerId: planner.providerId,
+  };
+  store.updateAgent(planner.id, {
+    mode: 'cli',
+    providerId: 'local-default',
+    cli: { command: 'agentforge-command-that-does-not-exist-7f24', args: [] },
+  });
+  const previous = {
+    debateEnabled: store.db.settings.debateEnabled,
+    dynamicPlanEnabled: store.db.settings.dynamicPlanEnabled,
+    maxAutoReplans: store.db.settings.maxAutoReplans,
+  };
+  store.updateSettings({ debateEnabled: false, dynamicPlanEnabled: true, maxAutoReplans: 0 });
+  try {
+    const task = store.createTask({ goal: 'CLI 命令缺失验收', debate: 'direct' });
+    configureTestCommand(task);
+    const ok = await startTask(task.id, { speed: 1000 });
+    const failed = store.getTask(task.id);
+
+    assert.equal(ok, false);
+    assert.equal(failed.status, 'error');
+    assert.notEqual(failed.status, 'done');
+    assert.notEqual(failed.quality.status, 'passed');
+    assert.equal(failed.plan.find((step) => step.id === 'plan').status, 'error');
+    assert.ok(
+      failed.messages.some((message) =>
+        `${message.text || ''}\n${message.exitLabel || ''}`.includes('找不到 CLI 命令'),
+      ) || failed.events.some((event) => /找不到 CLI 命令/.test(JSON.stringify(event))),
+    );
+  } finally {
+    store.updateAgent(planner.id, before);
+    store.updateSettings(previous);
+  }
+});
 
 test('真实 CLI 规划输出生成动态 DAG，双 coder 产物归属正确工序', async () => {
   const saved = configureFixtureAgents();
