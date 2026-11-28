@@ -159,10 +159,70 @@
               </p>
 
               <div class="hero-compose">
-                <p class="compose-label">TARGET / 你的目标</p>
+                <div class="compose-head">
+                  <p class="compose-label" id="composeLabel">TARGET / 你的目标</p>
+                  <div class="compose-switch" id="composeSwitch" role="group" aria-label="输入方式">
+                    <button type="button" class="cs active" data-compose="text" aria-pressed="true">文本</button>
+                    <button type="button" class="cs" data-compose="canvas" aria-pressed="false">意图画布 ✳</button>
+                  </div>
+                </div>
                 <textarea id="heroInput" rows="3" placeholder="例如：做一个支持并发安全的待办清单 API，带单元测试和技术方案文档"></textarea>
+                <section class="intent-canvas" id="intentCanvas" hidden aria-label="意图画布">
+                  <div class="ic-foot">
+                    <div class="ic-stats" id="icStats"></div>
+                    <div class="ic-foot-actions">
+                      <span class="ic-mode-hint" id="icModeHint"></span>
+                      <button type="button" class="ic-clear" id="icClear">清空画布</button>
+                      <button type="button" class="btn btn-primary ic-start" id="icStart">开工 →</button>
+                    </div>
+                  </div>
+                  <div class="ic-grid">
+                    <div class="ic-col">
+                      <div class="ic-block">
+                        <div class="ic-block-head">
+                          <span class="ic-idx">01</span><b>主目标</b><small>GOAL · 一句话说清要交付什么</small>
+                        </div>
+                        <input class="ic-goal" id="icGoal" type="text" maxlength="160" placeholder="例如：做一个支持并发安全的待办清单 API" autocomplete="off" />
+                        <div class="ic-cardlist" id="icSubgoals"></div>
+                        <div class="ic-addrow">
+                          <input class="ic-add-input" id="icSubgoalInput" type="text" maxlength="120" placeholder="拆一条子目标，回车添加" autocomplete="off" />
+                          <button type="button" class="ic-add-btn" id="icAddSubgoal">+ 添加</button>
+                        </div>
+                      </div>
+                      <div class="ic-block">
+                        <div class="ic-block-head">
+                          <span class="ic-idx">02</span><b>约束</b><small>CONSTRAINTS · 点击加入，拖到右侧工位指定负责人</small>
+                        </div>
+                        <div class="ic-library" id="icLibrary"></div>
+                        <div class="ic-addrow">
+                          <input class="ic-add-input" id="icCustomInput" type="text" maxlength="120" placeholder="自定义约束，回车添加" autocomplete="off" />
+                          <button type="button" class="ic-add-btn" id="icAddCustom">+ 自定义</button>
+                        </div>
+                        <div class="ic-cardlist" id="icSelected"></div>
+                      </div>
+                    </div>
+                    <div class="ic-col">
+                      <div class="ic-block ic-stations-block">
+                        <div class="ic-block-head">
+                          <span class="ic-idx">03</span><b>成员落位</b><small>ASSIGNMENT · 拖卡片到工位，或点选卡片再点工位</small>
+                        </div>
+                        <div class="ic-stations" id="icStations"></div>
+                        <p class="ic-live" id="icLive" role="status" aria-live="polite"></p>
+                      </div>
+                      <div class="ic-block">
+                        <div class="ic-block-head">
+                          <span class="ic-idx">04</span><b>意图摘要</b><small>将发送给团队的内容</small>
+                        </div>
+                        <details class="ic-preview" id="icPreview">
+                          <summary class="ic-preview-sum">展开预览</summary>
+                          <pre id="icPreviewText"></pre>
+                        </details>
+                      </div>
+                    </div>
+                  </div>
+                </section>
                 <div class="hero-compose-foot">
-                  <span class="kbd-hint"><kbd>Ctrl</kbd><kbd>↵</kbd> 直接开工</span>
+                  <span class="kbd-hint" id="composeKbdHint"><kbd>Ctrl</kbd><kbd>↵</kbd> 直接开工</span>
                   <div class="flow-mode" id="heroMode" role="group" aria-label="开工方式">
                     <button class="fm active" data-mode="debate" title="多位成员各出方案、交叉评分，选出最优再实施">先讨论</button>
                     <button class="fm" data-mode="direct" title="跳过方案讨论，按固定工序直接实施">直接开工</button>

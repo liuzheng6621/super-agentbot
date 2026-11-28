@@ -20,6 +20,22 @@ import {
   AUTOMATION_STATUS_LABEL,
 } from "./lib/status.js";
 import { decisionItems, ddClip } from "./lib/decisions.js";
+import {
+  ROLE_ORDER,
+  CONSTRAINT_LIBRARY,
+  createCanvasState,
+  withGoal,
+  addSubgoal,
+  removeSubgoal,
+  toggleConstraint,
+  addCustomConstraint,
+  removeCustomConstraint,
+  assignCard,
+  canvasCards,
+  deriveAssignments,
+  serializeCanvas,
+  canvasReadiness,
+} from "./lib/intent-canvas.js";
 
 const S = {
   agents: [],
@@ -48,6 +64,10 @@ const S = {
   worktree: false,
   flowMode: "debate",
   priority: "normal",
+  composeMode: "text",
+  canvas: createCanvasState(),
+  icSelectedCard: "",
+  icTextSeed: "",
   tab: "plan",
   atBottom: true,
   pending: new Map(),
@@ -3358,7 +3378,376 @@ function applyBubbleClamp() {
   });
 }
 
+/* =========================================================
+   意图画布（2026-11-28）：把一段自由文本拆成目标 / 子目标 / 约束，
+   实时映射到成员工位，开工时序列化为结构化 goal 复用 createTask。
+   不新增后端字段、不改 tab 体系，动作全部落在空态输入区。
+   ========================================================= */
+
+const COMPOSE_MODE_KEY = "agentforge:composeMode";
+
+function composeGoal() {
+  return S.composeMode === "canvas"
+    ? serializeCanvas(S.canvas, S.agents)
+    : $("#heroInput").value;
+}
+
+function syncStartButton() {
+  const btn = $("#heroStart");
+  const icBtn = $("#icStart");
+  if (S.task) {
+    if (btn) btn.disabled = false;
+    if (icBtn) icBtn.disabled = false;
+    return;
+  }
+  const blocked = S.composeMode === "canvas" && !canvasReadiness(S.canvas, S.agents).ok;
+  if (btn) btn.disabled = blocked;
+  if (icBtn) icBtn.disabled = blocked;
+}
+
+function icLive(text) {
+  const node = $("#icLive");
+  if (!node) return;
+  node.textContent = text;
+  node.classList.remove("is-flash");
+  void node.offsetWidth;
+  node.classList.add("is-flash");
+}
+
+function icCardHtml(card, info) {
+  const tone = card.tone === "hard" || card.tone === "soft" ? card.tone : "goal";
+  const kind = card.type === "subgoal" ? "子目标" : card.tone === "hard" ? "硬约束" : "软约束";
+  const tag = info ? `${info.short}${info.explicit ? " · 已指定" : " · 自动"}` : "未落位";
+  const title = escapeHtml(card.title);
+  // 移除/取消按钮放在卡片外的兄弟节点：避免 interactive 控件嵌套，
+  // 也让 role=button 的可访问名称直接来自可见文字，不与 aria-label 冲突。
+  return `
+    <div class="ic-card-row">
+      <div class="ic-card" draggable="true" role="button" tabindex="0"
+        data-card-id="${escapeHtml(card.id)}" data-tone="${tone}"
+        title="点击选中后点工位指派，或直接拖到工位">
+        <span class="ic-card-kind">${kind}</span>
+        <b class="ic-card-title">${title}</b>
+        <span class="ic-card-tag${info?.explicit ? " is-explicit" : ""}">${escapeHtml(tag)}</span>
+      </div>
+      ${info?.explicit
+        ? `<button type="button" class="ic-unassign" data-unassign="${escapeHtml(card.id)}" aria-label="恢复${title}自动落位">↩</button>`
+        : ""}
+      <button type="button" class="ic-remove" data-remove="${escapeHtml(card.id)}" aria-label="移除${title}">×</button>
+    </div>`;
+}
+
+/** 只重绘派生区（工位、摘要、指标、按钮），不碰输入框，避免打断输入。 */
+function updateCanvasDerived() {
+  if (S.composeMode !== "canvas") return;
+  const rows = deriveAssignments(S.canvas, S.agents);
+  const stations = $("#icStations");
+  if (stations) {
+    stations.innerHTML = rows.map((row) => {
+      const color = escapeHtml(row.agentColor || "#8aa79d");
+      const minis = row.cards.length
+        ? row.cards
+            .map((card) => `<span class="ic-mini${card.explicit ? " is-explicit" : ""}" title="${escapeHtml(card.title)}">${escapeHtml(ddClip(card.title, 14))}</span>`)
+            .join("")
+        : '<span class="ic-station-empty">等待落位</span>';
+      return `
+        <div class="ic-station${row.present ? "" : " is-vacant"}${row.cards.length ? " has-cards" : ""}"
+          data-role="${row.role}" role="button" tabindex="0"
+          title="点此把选中的卡片指派到 ${escapeHtml(row.agentName)}（${escapeHtml(row.short)}）工位">
+          <div class="ic-station-head">
+            <span class="ic-seat" style="--c:${color}" aria-hidden="true">${escapeHtml(row.short)}</span>
+            <b>${escapeHtml(row.agentName)}</b>
+            <small>${row.cards.length} 项</small>
+          </div>
+          <div class="ic-station-cards">${minis}</div>
+        </div>`;
+    }).join("");
+  }
+  const preview = $("#icPreviewText");
+  if (preview) preview.textContent = serializeCanvas(S.canvas, S.agents) || "写下主目标后，这里会实时显示将要发送给团队的内容。";
+  const r = canvasReadiness(S.canvas, S.agents);
+  const modeHint = $("#icModeHint");
+  if (modeHint) modeHint.textContent = S.flowMode === "direct" ? "直接开工" : "先讨论后实施";
+  const stats = $("#icStats");
+  if (stats) {
+    stats.innerHTML = `
+      <span><b>${r.cards}</b> 张卡片</span>
+      <span><b>${r.hard}</b> 硬约束</span>
+      <span><b>${r.soft}</b> 软约束</span>
+      <span><b>${r.roles}</b> 个工位已落位</span>`;
+  }
+  syncStartButton();
+}
+
+function renderIntentCanvas() {
+  const canvas = $("#intentCanvas");
+  if (!canvas) return;
+  const isCanvas = S.composeMode === "canvas";
+  $("#heroInput").hidden = isCanvas;
+  canvas.hidden = !isCanvas;
+  const label = $("#composeLabel");
+  if (label) label.textContent = isCanvas ? "INTENT CANVAS / 意图画布" : "TARGET / 你的目标";
+  const hint = $("#composeKbdHint");
+  if (hint) {
+    hint.innerHTML = isCanvas
+      ? '<kbd>Ctrl</kbd><kbd>↵</kbd> 按画布开工'
+      : '<kbd>Ctrl</kbd><kbd>↵</kbd> 直接开工';
+  }
+  $$("#composeSwitch .cs").forEach((button) => {
+    const active = button.dataset.compose === S.composeMode;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  if (!isCanvas) { syncStartButton(); return; }
+
+  const goalInput = $("#icGoal");
+  if (goalInput && document.activeElement !== goalInput) goalInput.value = S.canvas.goal;
+
+  const library = $("#icLibrary");
+  if (library) {
+    library.innerHTML = CONSTRAINT_LIBRARY.map((def) => {
+      const on = S.canvas.constraints.includes(def.id);
+      return `<button type="button" class="ic-chip${on ? " is-on" : ""}" data-cst="${def.id}"
+        data-tone="${def.tone}" aria-pressed="${on}" title="${escapeHtml(def.detail)}">
+        <span class="ic-chip-tone" aria-hidden="true"></span>${escapeHtml(def.label)}</button>`;
+    }).join("");
+  }
+
+  const rows = deriveAssignments(S.canvas, S.agents);
+  const infoByCard = new Map();
+  for (const row of rows) {
+    for (const card of row.cards) {
+      infoByCard.set(card.id, { short: row.short, explicit: card.explicit });
+    }
+  }
+  const cards = canvasCards(S.canvas);
+  const subgoals = cards.filter((card) => card.type === "subgoal");
+  const selected = cards.filter((card) => card.type === "constraint");
+  const subWrap = $("#icSubgoals");
+  if (subWrap) {
+    subWrap.innerHTML = subgoals.length
+      ? subgoals.map((card) => icCardHtml(card, infoByCard.get(card.id))).join("")
+      : '<p class="ic-empty">还没有子目标。可以在上方写清主目标，或拆成几条再拖给成员。</p>';
+  }
+  const selWrap = $("#icSelected");
+  if (selWrap) {
+    selWrap.innerHTML = selected.length
+      ? selected.map((card) => icCardHtml(card, infoByCard.get(card.id))).join("")
+      : '<p class="ic-empty">点上方标签加入约束，或自己写一条；卡片可拖到右侧工位指定负责人。</p>';
+  }
+  $$("#intentCanvas .ic-card").forEach((el) => {
+    el.classList.toggle("is-selected", el.dataset.cardId === S.icSelectedCard);
+  });
+  updateCanvasDerived();
+}
+
+function setComposeMode(mode, { persist = true } = {}) {
+  const next = mode === "canvas" ? "canvas" : "text";
+  S.composeMode = next;
+  if (persist) {
+    try { localStorage.setItem(COMPOSE_MODE_KEY, next); } catch { /* 隐私模式忽略 */ }
+  }
+  if (next === "canvas" && !S.canvas.goal.trim()) {
+    const seed = $("#heroInput")?.value.trim() || "";
+    if (seed) S.canvas = withGoal(S.canvas, seed);
+  }
+  // 画布模式收起营销式首屏装饰，把中栏宽度让给编排区，并回到顶部
+  document.querySelector(".page")?.classList.toggle("ic-mode", next === "canvas");
+  if (next === "canvas") {
+    const scroller = $("#scroll");
+    if (scroller) scroller.scrollTop = 0;
+  }
+  S.icSelectedCard = "";
+  renderIntentCanvas();
+}
+
+function restoreComposeMode() {
+  let stored = "text";
+  try { stored = localStorage.getItem(COMPOSE_MODE_KEY) || "text"; } catch { /* ignore */ }
+  setComposeMode(stored === "canvas" ? "canvas" : "text", { persist: false });
+}
+
+function startFromCompose() {
+  const goal = composeGoal();
+  if (!goal || goal.trim().length < 2) {
+    toast("先写下主目标", "err");
+    (S.composeMode === "canvas" ? $("#icGoal") : $("#heroInput"))?.focus();
+    return;
+  }
+  createTask(goal);
+}
+
+function icRemoveCard(id) {
+  if (id.startsWith("sub-")) S.canvas = removeSubgoal(S.canvas, id);
+  else if (id.startsWith("cst-")) S.canvas = toggleConstraint(S.canvas, id.slice(4));
+  else S.canvas = removeCustomConstraint(S.canvas, id);
+  if (S.icSelectedCard === id) S.icSelectedCard = "";
+  renderIntentCanvas();
+  icLive("已移除卡片");
+}
+
+function icAddSubgoal() {
+  const input = $("#icSubgoalInput");
+  if (!input) return;
+  const before = S.canvas.subgoals.length;
+  S.canvas = addSubgoal(S.canvas, input.value);
+  if (S.canvas.subgoals.length === before) return;
+  input.value = "";
+  renderIntentCanvas();
+  icLive("已添加子目标，可拖到右侧工位指定负责人");
+}
+
+function icAddCustom() {
+  const input = $("#icCustomInput");
+  if (!input) return;
+  const before = S.canvas.customConstraints.length;
+  S.canvas = addCustomConstraint(S.canvas, input.value, "hard");
+  if (S.canvas.customConstraints.length === before) return;
+  input.value = "";
+  renderIntentCanvas();
+  icLive("已加入自定义约束（硬约束）");
+}
+
+function icToggleSelect(cardEl) {
+  const id = cardEl.dataset.cardId;
+  S.icSelectedCard = S.icSelectedCard === id ? "" : id;
+  $$("#intentCanvas .ic-card").forEach((el) => {
+    el.classList.toggle("is-selected", el.dataset.cardId === S.icSelectedCard);
+  });
+  const card = canvasCards(S.canvas).find((item) => item.id === S.icSelectedCard);
+  icLive(card ? `已选中「${card.title}」，点击右侧工位完成指派` : "已取消选中");
+}
+
+function icAssignTo(role) {
+  const id = S.icSelectedCard || S.icDragging;
+  if (!id) {
+    icLive("先选中一张卡片，再点工位；也可以直接把卡片拖过来");
+    return;
+  }
+  const card = canvasCards(S.canvas).find((item) => item.id === id);
+  if (!card) return;
+  S.canvas = assignCard(S.canvas, id, role);
+  S.icSelectedCard = "";
+  S.icDragging = "";
+  const row = deriveAssignments(S.canvas, S.agents).find((item) => item.role === role);
+  renderIntentCanvas();
+  icLive(`「${card.title}」已指派给 ${row?.agentName || ROLE_META[role]?.short || role}`);
+}
+
+function bindIntentCanvas() {
+  const canvas = $("#intentCanvas");
+  if (!canvas) return;
+
+  $("#composeSwitch")?.addEventListener("click", (event) => {
+    const button = event.target.closest(".cs");
+    if (button) setComposeMode(button.dataset.compose);
+  });
+
+  canvas.addEventListener("click", (event) => {
+    if (event.target.closest("#icStart")) { startFromCompose(); return; }
+    if (event.target.closest("#icAddSubgoal")) { icAddSubgoal(); return; }
+    if (event.target.closest("#icAddCustom")) { icAddCustom(); return; }
+    if (event.target.closest("#icClear")) {
+      S.canvas = createCanvasState();
+      S.icSelectedCard = "";
+      const goalInput = $("#icGoal");
+      if (goalInput) goalInput.value = "";
+      renderIntentCanvas();
+      icLive("画布已清空");
+      return;
+    }
+    const chip = event.target.closest("[data-cst]");
+    if (chip) {
+      S.canvas = toggleConstraint(S.canvas, chip.dataset.cst);
+      renderIntentCanvas();
+      return;
+    }
+    const remove = event.target.closest("[data-remove]");
+    if (remove) { icRemoveCard(remove.dataset.remove); return; }
+    const unassign = event.target.closest("[data-unassign]");
+    if (unassign) {
+      S.canvas = assignCard(S.canvas, unassign.dataset.unassign, null);
+      renderIntentCanvas();
+      icLive("已恢复自动落位");
+      return;
+    }
+    const card = event.target.closest(".ic-card");
+    if (card) { icToggleSelect(card); return; }
+    const station = event.target.closest(".ic-station");
+    if (station) { icAssignTo(station.dataset.role); return; }
+  });
+
+  canvas.addEventListener("input", (event) => {
+    if (event.target.id !== "icGoal") return;
+    S.canvas = withGoal(S.canvas, event.target.value);
+    updateCanvasDerived();
+  });
+
+  canvas.addEventListener("keydown", (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      startFromCompose();
+      return;
+    }
+    if (event.key === "Enter" && (event.target.id === "icSubgoalInput" || event.target.id === "icCustomInput")) {
+      event.preventDefault();
+      if (event.target.id === "icSubgoalInput") icAddSubgoal();
+      else icAddCustom();
+      return;
+    }
+    const key = event.key === "Enter" || event.key === " " || event.key === "Spacebar";
+    if (!key) return;
+    const card = event.target.closest(".ic-card");
+    if (card) { event.preventDefault(); icToggleSelect(card); return; }
+    const station = event.target.closest(".ic-station");
+    if (station) { event.preventDefault(); icAssignTo(station.dataset.role); }
+  });
+
+  canvas.addEventListener("dragstart", (event) => {
+    const card = event.target.closest(".ic-card");
+    if (!card) return;
+    S.icDragging = card.dataset.cardId;
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", S.icDragging);
+    }
+    canvas.classList.add("is-dragging");
+    card.classList.add("is-drag-src");
+  });
+
+  canvas.addEventListener("dragend", () => {
+    S.icDragging = "";
+    canvas.classList.remove("is-dragging");
+    $$("#intentCanvas .ic-card").forEach((el) => el.classList.remove("is-drag-src"));
+    $$("#intentCanvas .ic-station").forEach((el) => el.classList.remove("is-over"));
+  });
+
+  canvas.addEventListener("dragover", (event) => {
+    const station = event.target.closest(".ic-station");
+    if (!station || !S.icDragging) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    $$("#intentCanvas .ic-station").forEach((el) => el.classList.toggle("is-over", el === station));
+  });
+
+  canvas.addEventListener("dragleave", (event) => {
+    const station = event.target.closest(".ic-station");
+    if (station && !station.contains(event.relatedTarget)) station.classList.remove("is-over");
+  });
+
+  canvas.addEventListener("drop", (event) => {
+    const station = event.target.closest(".ic-station");
+    if (!station) return;
+    event.preventDefault();
+    S.icDragging = S.icDragging || event.dataTransfer?.getData("text/plain") || "";
+    $$("#intentCanvas .ic-station").forEach((el) => el.classList.remove("is-over"));
+    canvas.classList.remove("is-dragging");
+    icAssignTo(station.dataset.role);
+  });
+}
+
 function renderAll() {
+  if (!S.task) renderIntentCanvas();
   renderAgents();
   renderTasks();
   renderIdentity();
@@ -3485,6 +3874,8 @@ async function createTask(goal) {
   }
   try {
     $("#heroStart").disabled = true;
+    const icStartBtn = $("#icStart");
+    if (icStartBtn) icStartBtn.disabled = true;
     const body = {
       goal: text,
       flowMode: S.flowMode === "direct" ? "direct" : "debate",
@@ -3504,6 +3895,9 @@ async function createTask(goal) {
     }
     $("#heroInput").value = "";
     $("#input").value = "";
+    // 画布保留约束与分工作为可复用模板，只清空主目标，避免下次误重复开工
+    S.canvas = withGoal(S.canvas, "");
+    S.icSelectedCard = "";
     // 直接开工没有讨论可看，落到执行链路；先讨论则停在讨论页看提案
     switchTab(S.flowMode === "direct" ? "plan" : "debate");
     renderAll();
@@ -3527,7 +3921,7 @@ async function createTask(goal) {
   } catch (err) {
     toast(`创建失败：${err.message}`, "err");
   } finally {
-    $("#heroStart").disabled = false;
+    syncStartButton();
   }
 }
 
@@ -4590,20 +4984,31 @@ function bind() {
     S.task = null;
     S.openStep = "";
     renderAll();
-    $("#heroInput").focus();
+    (S.composeMode === "canvas" ? $("#icGoal") : $("#heroInput"))?.focus();
     closeDrawers();
   });
 
-  $("#heroStart").addEventListener("click", () => createTask($("#heroInput").value));
+  $("#heroStart").addEventListener("click", startFromCompose);
   $("#heroInput").addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") createTask(e.target.value);
   });
 
+  /* 意图画布：文本 / 画布两种输入方式共用同一个开工按钮 */
+  bindIntentCanvas();
+  restoreComposeMode();
+
   $("#suggestions").addEventListener("click", (e) => {
     const chip = e.target.closest(".chip");
     if (!chip) return;
-    $("#heroInput").value = chip.textContent.trim();
-    createTask(chip.textContent.trim());
+    const text = chip.textContent.trim();
+    if (S.composeMode === "canvas") {
+      S.canvas = withGoal(S.canvas, text);
+      renderIntentCanvas();
+      startFromCompose();
+    } else {
+      $("#heroInput").value = text;
+      createTask(text);
+    }
   });
 
   /* 发送 */
