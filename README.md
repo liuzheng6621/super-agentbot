@@ -89,7 +89,7 @@ AgentForge 当前定位是**单机 / 团队服务基线**：一个 Node.js 进�
 
 **执行**
 
-- 🖥 **本机 CLI 体检接入** — 内置候选覆盖 15 个常用 CLI；启动后台并发体检已安装项，只有「真回了话且没有鉴权错误」的才占执行席位，同一个 CLI 可兼任多角色（`OpenCode · 架构师`）。体检复用已绑定 Agent 的 Provider Profile，参数模板、Base URL、模型和密钥环境引用会进入真实子进程；仓库自动测试验证调用契约、Provider 注入、Windows `.cmd` 与进程路径，不等于本机已安装并授权全部 15 个 CLI。
+- 🖥 **本机 CLI 体检接入** — 内置候选覆盖 15 个常用 CLI；启动默认只做本地存在性 / 版本 / 配置探测，**不发起真实提示词调用**，只有点「体检并换席」或 `POST /api/team/refresh` 才并发体检已安装项，只有「真回了话且没有鉴权错误」的才占执行席位，同一个 CLI 可兼任多角色（`OpenCode · 架构师`）。体检复用已绑定 Agent 的 Provider Profile，参数模板、Base URL、模型和密钥环境引用会进入真实子进程；仓库自动测试验证调用契约、Provider 注入、Windows `.cmd` 与进程路径，不等于本机已安装并授权全部 15 个 CLI。
 - 🔎 **CLI 解析缓存** — `resolveCommand()` 缓存命令解析结果，避免每次调用都同步跑 `where.exe` / `which`；探测或刷新团队时显式失效，带参数的命令串也能正确提取可执行文件。
 - 🔌 **Provider Profile、参数模板与自动回退** — 每个 Agent 可绑定独立 Provider Profile，保存 Base URL、模型、密钥环境变量引用、CLI 参数模板和并发上限；可配置有序备用 Provider，真实 CLI 失败后自动切换并把 `provider.fallback` 写入任务事件流。密钥只从服务进程环境读取，不写入 `db.json`。
 - 🧾 **产物带内容版本** — 每个产物记录 `version`（sha256 前 16 位），改写即换版本，可判断「这一步到底动了什么」。
@@ -115,7 +115,10 @@ AgentForge 当前定位是**单机 / 团队服务基线**：一个 Node.js 进�
 要求 **Node.js ≥ 20.11**，没有任何其他依赖。
 
 ```bash
+# GitHub（主仓）
 git clone https://github.com/liuzheng6621/super-agentbot.git
+# Gitee（国内镜像，内容同步）
+# git clone https://gitee.com/liu-everything_impossble/super-agentbot.git
 cd super-agentbot
 npm start
 ```
@@ -484,6 +487,7 @@ Token 在界面右侧「统计」面板，或 `GET /api/hook-token`（需 `opera
 | --- | --- |
 | [平台演进路线](docs/agent-platform-roadmap.md) | 当前能力、已完成里程碑、边界与后续方向 |
 | [OpenBot 融合计划](docs/agentforge-openbot-plan.md) | M3-M5 的依赖顺序、完成证据与 backlog |
+| [安全复审与 W1-W20](docs/hardening-plan-2026-11-28.md) | 安全复审发现、工作项、实施顺序与统一验收 |
 | [修复与验收计划](docs/fix-plan.md) | 历史缺陷、验证证据、残余风险与待决策项 |
 | [文件、读图与上下文设计](docs/design-io-image-context.md) | 设计判断、实现结果、未完成能力与取舍 |
 | [发布规范](docs/release.md) | 版本源、发布检查清单与双远端同步 |
@@ -529,7 +533,7 @@ CI 在 Ubuntu / Windows × Node 20 / 22 上运行 `npm test`、`npm run check:sy
 - **动态计划仍是有向无环图**：首期不支持条件分支、循环、运行中插删工序或跨任务依赖；每次最多 12 个工序，终端 reviewer 归一化为 `review`。没有独立 Agent 时同角色工序排队，不能并发抢同一席位。
 - **规划质量取决于规划师输出**：平台会严格校验并回退，但回退不是“规划成功”；回退率应结合 `plan.fallback` 和计划版本观察，不能只看任务最终状态。
 - **内核级 CLI 隔离未实现**：`strict` 只是原生能力映射，不能拦截网络请求、系统调用或所有跨进程文件写入；完整隔离需要独立架构评审。
-- **真实 CLI 矩阵仍需环境验收**：自动夹具覆盖调用契约与进程边界，不等于 15 个内置候选的安装、授权和真实交付全部通过。
+- **真实 CLI 矩阵仍需环境验收**：自动夹具覆盖调用契约与进程边界，不等于 15 个内置候选的安装、授权和真实交付全部通过。文中 CLI 数量、体检耗时与测试数量都可能随版本和环境变化，以仓库当前代码和本机实测为准。
 - **agent-web 是可选开发期验收工具**：通过 `AGENT_WEB_ROOT` 指向外部 checkout，固定提交 `fe543ea`，由 [tests/agent-web-compat.test.mjs](tests/agent-web-compat.test.mjs) 校验真实 HTTP 适配器与 10 个核心案例；不复制其源码，也不进入生产依赖。
 
 ## Roadmap

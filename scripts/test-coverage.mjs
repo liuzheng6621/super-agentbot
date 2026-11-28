@@ -35,6 +35,7 @@ const child = spawn(
     `--test-coverage-functions=${functions}`,
     '--test-coverage-include=server/**',
     '--test',
+    '--test-concurrency=2',
     ...files,
   ],
   {

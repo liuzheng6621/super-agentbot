@@ -48,9 +48,9 @@
 | W15 | P2 | CI 浏览器必跑 | `.github/workflows/ci.yml`、`tests/` | CI 安装真实浏览器；浏览器用例跳过仅在本地允许，CI 跳过失败；至少覆盖登录、状态和工作区入口 DOM 断言。 | 已完成（`tests/folder-picker.test.mjs`（浏览器必跑）） |
 | W16 | P2 | 前端最小拆分 | `public/app.js` | 按低风险 feature 拆 2-3 个 ESM 模块；不引入构建；行为与现有测试保持不变。 | 已完成（`public/lib/format.js`、`public/lib/status.js`） |
 | W17 | P2 | 类型与覆盖率门槛 | `package.json`、`tests/` | JSDoc `tsc --allowJs --checkJs --noEmit` 或等价零运行时方案；核心模块覆盖率下限可配置且 CI 可见；引入 devDependency 需说明理由。 | 已完成（`npm run check:types`、`npm run test:coverage`） |
-| W18 | P2 | 文档与仓库卫生 | `README.md`、`docs/` | Gitee / GitHub 地址分流正确；README 首屏定位、快速开始和边界；数字口径标环境或区间；品牌大小写统一。 | 未开始 |
-| W19 | P2 | 辩论角度覆盖接入 | `server/debate-analysis.mjs`、`server/orchestrator.mjs`、`public/app.js` | 检测侧已完成（`proposalDiversity` 输出 `angleCoverage` 与 `angle-coverage-low`，`tests/debate.test.mjs:156` 有断言）；本项只做消费侧：警告写入任务事件并在 UI 可见，重复提案扣分补独立断言，不重复实现检测逻辑。 | 未开始 |
-| W20 | P2 | Automation await_event 跨实例加固 | `server/store.mjs`、`server/automation-runner.mjs` | durable `await_event` 的等待、eventId 匹配、幂等唤醒、取消、对账和租约互斥已完成，不重做；本项只补 delta：跨实例 claim 冲突可恢复、唤醒事件身份不可重放的显式测试、API 与 UI 状态一致。 | 未开始 |
+| W18 | P2 | 文档与仓库卫生 | `README.md`、`docs/` | Gitee / GitHub 地址分流正确；README 首屏定位、快速开始和边界；数字口径标环境或区间；品牌大小写统一。 | 已完成（`README.md` 双仓分流、启动探测口径、数字口径与边界） |
+| W19 | P2 | 辩论角度覆盖接入 | `server/debate-analysis.mjs`、`server/orchestrator.mjs`、`public/app.js` | 检测侧已完成（`proposalDiversity` 输出 `angleCoverage` 与 `angle-coverage-low`，`tests/debate.test.mjs:156` 有断言）；本项只做消费侧：警告写入任务事件并在 UI 可见，重复提案扣分补独立断言，不重复实现检测逻辑。 | 已完成（`tests/debate-coverage.test.mjs`） |
+| W20 | P2 | Automation await_event 跨实例加固 | `server/store.mjs`、`server/automation-runner.mjs` | durable `await_event` 的等待、eventId 匹配、幂等唤醒、取消、对账和租约互斥已完成，不重做；本项只补 delta：跨实例 claim 冲突可恢复、唤醒事件身份不可重放的显式测试、API 与 UI 状态一致。 | 已完成（`tests/automation-event-race.test.mjs`） |
 
 ## 3. 实施顺序
 
@@ -67,9 +67,11 @@
 
 ## 4. 统一验收
 
-```powershell
+```bash
 npm test
 npm run check:syntax
+npm run check:types
+npm run test:coverage
 ```
 
 安全项额外要求：

@@ -1805,6 +1805,7 @@ export async function runDebate(task, { speed = 1, signal, forced = [] } = {}) {
   const latest = store.getTask(task.id).debate;
   const ranking = rankProposals(latest.proposals);
   const diversity = proposalDiversity(latest.proposals);
+  recordDebateDiversity(task.id, diversity);
   const winner = ranking[0];
   const voteCount = ranking.reduce((sum, p) => sum + p.votes, 0);
   const degraded = voteCount === 0;
@@ -2072,6 +2073,22 @@ export function stepAgentCandidates(step, preferred = null) {
     return ordered.filter((agent) => agent.mode === 'cli' && agent.cli?.command);
   }
   return ordered;
+}
+
+/** 把角度覆盖 / 重复提案告警写进任务事件，UI 靠 decision.diversity 同步展示。 */
+export function recordDebateDiversity(taskId, diversity) {
+  if (!taskId || !diversity?.issues?.length) return null;
+  return store.addTaskEvent(taskId, {
+    type: 'debate.diversity',
+    stepId: 'debate',
+    data: {
+      issues: diversity.issues,
+      angleKeys: diversity.angleKeys,
+      angleCoverage: diversity.angleCoverage,
+      duplicateIds: diversity.duplicateIds,
+      maxSimilarity: diversity.maxSimilarity,
+    },
+  });
 }
 
 export async function runQualityGate(task, step, signal) {
