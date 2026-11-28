@@ -467,12 +467,20 @@ test('文件夹选择器在真实浏览器中可见、可浏览并保留中文�
       identityChip: !!document.querySelector('#identityChip'),
       authModal: !!document.querySelector('#authModal'),
       authModalOpen: document.querySelector('#authModal').open,
+      taskFilters: !!document.querySelector('#taskFilters'),
+      missionCard: !!document.querySelector('#missionCard'),
+      inspectorCollapsed: document.querySelector('.app').classList.contains('insp-collapsed'),
+      inspectorExpand: !!document.querySelector('#inspectorExpand'),
     }))()`);
     assert.equal(shell.workspaceEntry, true, '状态页必须渲染工作区入口');
     assert.equal(shell.taskList, true, '状态页必须渲染任务列表');
     assert.equal(shell.identityChip, true, '状态页必须渲染主体标识');
     assert.equal(shell.authModal, true, '登录弹窗必须在 DOM 中');
     assert.equal(shell.authModalOpen, false, '无 Token 回环不需要登录');
+    assert.equal(shell.taskFilters, true, '任务筛选必须常驻左栏');
+    assert.equal(shell.missionCard, true, '任务概览卡槽位必须存在');
+    assert.equal(shell.inspectorCollapsed, true, '详情面板默认收起，避免三栏同时抢占注意力');
+    assert.equal(shell.inspectorExpand, true, '收起后必须保留展开入口');
 
     const initial = await page.evaluate(`(() => {
       const button = document.querySelector('#dirPick');

@@ -488,6 +488,7 @@ Token 在界面右侧「统计」面板，或 `GET /api/hook-token`（需 `opera
 | [平台演进路线](docs/agent-platform-roadmap.md) | 当前能力、已完成里程碑、边界与后续方向 |
 | [OpenBot 融合计划](docs/agentforge-openbot-plan.md) | M3-M5 的依赖顺序、完成证据与 backlog |
 | [安全复审与 W1-W20](docs/hardening-plan-2026-11-28.md) | 安全复审发现、工作项、实施顺序与统一验收 |
+| [界面升级方案](docs/ui-upgrade-2026-11-28.md) | 信息架构、交互简化、视觉层次与复杂任务呈现的目标、范围与优先级 |
 | [修复与验收计划](docs/fix-plan.md) | 历史缺陷、验证证据、残余风险与待决策项 |
 | [文件、读图与上下文设计](docs/design-io-image-context.md) | 设计判断、实现结果、未完成能力与取舍 |
 | [发布规范](docs/release.md) | 版本源、发布检查清单与双远端同步 |

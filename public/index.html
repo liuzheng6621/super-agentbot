@@ -35,41 +35,52 @@
             <span class="plus" aria-hidden="true">+</span> 新建协作任务
           </button>
 
-          <section class="rail-section">
+          <section class="rail-section grow rail-tasks">
             <header class="rail-head">
-              <span>团队 / CREW</span>
-              <em id="agentCount">00</em>
-            </header>
-            <div class="agent-list" id="agentList"></div>
-            <button class="link-btn" id="addAgentBtn">+ 接入新的智能体</button>
-          </section>
-
-          <section class="rail-section">
-            <header class="rail-head">
-              <span>本机 CLI</span>
-              <em id="probeState">未探测</em>
-            </header>
-            <div class="probe-list" id="probeList">
-              <p class="hint">扫描本机 claude / codex / kimi / gemini 等命令行工具；体检会真实调用一次，只有跑通的才会占执行席位。</p>
-            </div>
-            <button class="link-btn" id="probeBtn">扫描本机 CLI</button>
-            <button class="link-btn" id="adoptBtn">接入工具池</button>
-            <button class="link-btn" id="rebalanceBtn">智能分工</button>
-            <button class="link-btn" id="realTeamBtn">体检并换真实席位</button>
-            <button class="link-btn" id="providerBtn">Provider 配置</button>
-            <button class="link-btn" id="automationBtn">Automation 定时任务</button>
-            <button class="link-btn" id="approvalBtn">命令审批</button>
-          </section>
-
-          <section class="rail-section grow">
-            <header class="rail-head">
-              <span>历史任务</span>
+              <span>任务 / TASKS</span>
               <em id="taskCount">00</em>
             </header>
+            <div class="task-search">
+              <input id="taskSearch" type="search" placeholder="搜索标题或目标" autocomplete="off" />
+            </div>
+            <div class="task-filters" id="taskFilters" role="group" aria-label="任务筛选">
+              <button class="tf active" data-filter="all">全部</button>
+              <button class="tf" data-filter="active">进行中</button>
+              <button class="tf" data-filter="attention">待处理</button>
+              <button class="tf" data-filter="done">已交付</button>
+            </div>
             <div class="task-list" id="taskList"></div>
             <button class="link-btn" id="loadMoreTasks" hidden>加载更多历史任务</button>
             <button class="link-btn" id="overviewBtn">跨任务总览</button>
           </section>
+
+          <details class="rail-fold" id="teamFold">
+            <summary class="rail-head">
+              <span>团队 / CREW</span>
+              <em id="agentCount">00</em>
+            </summary>
+            <div class="agent-list" id="agentList"></div>
+            <button class="link-btn" id="addAgentBtn">+ 接入新的智能体</button>
+          </details>
+
+          <details class="rail-fold" id="toolsFold">
+            <summary class="rail-head">
+              <span>工具与设置 / SETUP</span>
+              <em id="probeState">未探测</em>
+            </summary>
+            <div class="probe-list" id="probeList">
+              <p class="hint">扫描本机 claude / codex / kimi / gemini 等命令行工具；体检会真实调用一次，只有跑通的才会占执行席位。</p>
+            </div>
+            <div class="rail-tools">
+              <button class="link-btn" id="probeBtn">扫描本机 CLI</button>
+              <button class="link-btn" id="adoptBtn">接入工具池</button>
+              <button class="link-btn" id="rebalanceBtn">智能分工</button>
+              <button class="link-btn" id="realTeamBtn">体检并换真实席位</button>
+              <button class="link-btn" id="providerBtn">Provider 配置</button>
+              <button class="link-btn" id="automationBtn">Automation 定时任务</button>
+              <button class="link-btn" id="approvalBtn">命令审批</button>
+            </div>
+          </details>
 
           <div class="rail-foot">
             <span class="dot-live" id="connDot"></span>
@@ -91,14 +102,28 @@
             </div>
             <div class="topbar-actions">
               <span class="pill" id="statusPill" data-status="idle">待命</span>
-              <button class="btn btn-ghost" id="runBtn" hidden>重新编排</button>
+              <button class="btn btn-primary" id="runBtn" hidden>开始协作</button>
               <button class="btn btn-ghost danger" id="stopBtn" hidden>停止</button>
-              <button class="icon-btn" id="flowSettingsBtn" title="工作流设置" aria-label="工作流设置">⚙</button>
-              <button class="shift-switch" id="shiftBtn" aria-pressed="false" aria-label="切换夜巡模式">
-                <span class="shift-icon" aria-hidden="true">☾</span>
-                <span class="shift-copy"><small>SHIFT</small><b id="shiftLabel">DAY</b></span>
-                <span class="shift-track" aria-hidden="true"><i></i></span>
-              </button>
+              <div class="more-wrap">
+                <button
+                  class="icon-btn"
+                  id="moreBtn"
+                  aria-haspopup="true"
+                  aria-expanded="false"
+                  aria-label="更多操作"
+                  title="更多操作"
+                >⋯</button>
+                <div class="more-menu" id="moreMenu" hidden>
+                  <button type="button" class="menu-item" data-more="workspace">打开工作区</button>
+                  <button type="button" class="menu-item" data-more="export-md">导出 Markdown</button>
+                  <button type="button" class="menu-item" data-more="export-html">导出 HTML</button>
+                  <span class="menu-sep" aria-hidden="true"></span>
+                  <button type="button" class="menu-item" id="flowSettingsBtn">工作流设置</button>
+                  <button type="button" class="menu-item" id="shiftBtn" aria-pressed="false">
+                    夜巡模式 <b id="shiftLabel">DAY</b>
+                  </button>
+                </div>
+              </div>
               <button class="icon-btn only-mobile" id="inspectorToggle" aria-label="打开编排面板">≡</button>
             </div>
           </header>
@@ -162,6 +187,9 @@
               <div class="hero-team" id="heroTeam"></div>
             </section>
 
+            <!-- 任务概览：先给结论，再给细节 -->
+            <section class="mission" id="missionCard" hidden></section>
+
             <!-- 时间线 -->
             <section class="timeline" id="timeline" hidden></section>
             <div class="scroll-pad"></div>
@@ -177,16 +205,21 @@
                   <span class="dir-ico">📁</span>
                   <span class="dir-label" id="dirLabel">自动新建工作区</span>
                 </button>
-                <div class="flow-mode mini" id="composerMode" role="group" aria-label="开工方式">
-                  <button class="fm active" data-mode="debate">先讨论</button>
-                  <button class="fm" data-mode="direct">直接开工</button>
-                </div>
-                <div class="flow-mode mini priority-mode" id="composerPriority" role="group" aria-label="任务优先级">
-                  <button class="fm active" data-priority="normal" title="普通优先级">普通</button>
-                  <button class="fm" data-priority="high" title="优先进入调度队列">高</button>
-                  <button class="fm" data-priority="low" title="让其他任务先执行">低</button>
-                </div>
-                <div class="mention-list" id="mentionList"></div>
+                <details class="composer-advanced" id="composerAdvanced">
+                  <summary class="adv-toggle" title="流程模式、优先级与成员">选项</summary>
+                  <div class="adv-body">
+                    <div class="flow-mode mini" id="composerMode" role="group" aria-label="开工方式">
+                      <button class="fm active" data-mode="debate">先讨论</button>
+                      <button class="fm" data-mode="direct">直接开工</button>
+                    </div>
+                    <div class="flow-mode mini priority-mode" id="composerPriority" role="group" aria-label="任务优先级">
+                      <button class="fm active" data-priority="normal" title="普通优先级">普通</button>
+                      <button class="fm" data-priority="high" title="优先进入调度队列">高</button>
+                      <button class="fm" data-priority="low" title="让其他任务先执行">低</button>
+                    </div>
+                    <div class="mention-list" id="mentionList"></div>
+                  </div>
+                </details>
                 <label class="attach-btn" title="添加图片">
                   <input type="file" id="imageInput" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
                   <svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
@@ -208,6 +241,10 @@
 
         <!-- ================= 右侧：编排 / 产物 ================= -->
         <aside class="inspector" id="inspector">
+          <button class="insp-expand" id="inspectorExpand" type="button" title="展开详情面板" aria-label="展开详情面板">
+            <span class="ie-arrow" aria-hidden="true">⟨</span>
+            <span class="ie-label">详情</span>
+          </button>
           <div class="insp-head">
             <div class="tabs" id="tabs">
               <button class="tab active" data-tab="context">上下文</button>
@@ -217,6 +254,7 @@
               <button class="tab" data-tab="files">产物</button>
               <button class="tab" data-tab="stats">统计</button>
             </div>
+            <button class="icon-btn insp-collapse" id="inspectorCollapse" title="收起详情面板" aria-label="收起详情面板">⟩</button>
             <button class="icon-btn only-mobile" id="inspectorClose" aria-label="关闭">×</button>
           </div>
 
