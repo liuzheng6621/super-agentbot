@@ -1427,8 +1427,15 @@ export class Store {
         const dirty = this._dirty.tasksAll || this._dirty.all || this._dirty.tasks.has(task.id);
         if (dirty || !local) this._shards.writeShard(task);
       }
-      for (const id of this._dirty.tasksRemoved) this._shards.removeShard(id);
+      for (const id of this._dirty.tasksRemoved) {
+        this._shards.removeShard(id);
+        this._baseTaskHashes.delete(id);
+      }
       this._shards.writeIndex(merged.tasks.map((task) => task.id));
+      // 分片一落盘它就是新的基线；否则下一次 flush 会把自己的写当成别人的改动。
+      for (const task of merged.tasks) {
+        this._baseTaskHashes.set(task.id, cryptoHash(JSON.stringify(task)));
+      }
       this.persistenceStats.taskShards = (this.persistenceStats.taskShards || 0) + 1;
       // db.json 只保留元数据，tasks 保持空数组兼容旧的五键形状。
       const json = `{"agents":${JSON.stringify(merged.agents)},"profiles":${JSON.stringify(merged.profiles)},"providers":${JSON.stringify(merged.providers)},"tasks":[],"settings":${JSON.stringify(merged.settings)}}`;
