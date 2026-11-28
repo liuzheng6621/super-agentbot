@@ -19,6 +19,7 @@ import {
   PRIORITY_TEXT,
   AUTOMATION_STATUS_LABEL,
 } from "./lib/status.js";
+import { decisionItems, ddClip } from "./lib/decisions.js";
 
 const S = {
   agents: [],
@@ -3222,31 +3223,6 @@ async function actOnApproval(id, action) {
   }
 }
 
-function missionNotes(task) {
-  const notes = [];
-  if (task.pendingConfirmation) {
-    notes.push({ tone: "warn", text: "成本超过阈值，等待你确认后才会开工" });
-  }
-  const quality = task.quality || {};
-  if (quality.status === "failed") {
-    notes.push({ tone: "err", text: quality.reason || "质量门未通过，需要修复后重跑" });
-  }
-  if (quality.status === "no-test-entry") {
-    notes.push({ tone: "warn", text: "没有找到可执行的测试入口，交付不会被判定为通过" });
-  }
-  if (quality.selfReview) {
-    notes.push({
-      tone: "warn",
-      text: `评审与实现同模型（${quality.reviewerModel || "未配置"}），独立性有限`,
-    });
-  }
-  if (task.waitingReason) notes.push({ tone: "info", text: task.waitingReason });
-  if (!notes.length && task.status === "done") {
-    notes.push({ tone: "ok", text: "全部工序与质量门通过，可以直接使用产物" });
-  }
-  return notes.slice(0, 3);
-}
-
 function renderMission() {
   const card = $("#missionCard");
   if (!card) return;
@@ -3256,9 +3232,11 @@ function renderMission() {
     return;
   }
   card.hidden = false;
-  const done = t.plan?.filter((step) => step.status === "done").length || 0;
-  const steps = t.plan?.length || 0;
+
+  const items = decisionItems(t, S.approvals);
+  const flow = deriveFlow(t);
   const quality = t.quality || {};
+  const statusText = t.pendingConfirmation ? "待确认" : STATUS_TEXT[t.status] || t.status;
   const gate =
     quality.status === "passed"
       ? "质量门通过"
@@ -3278,40 +3256,86 @@ function renderMission() {
       : t.status === "running"
         ? "进行中"
         : "—";
-  const notes = missionNotes(t);
-  const statusText = t.pendingConfirmation ? "待确认" : STATUS_TEXT[t.status] || t.status;
-  const confirmAction = t.pendingConfirmation
-    ? '<button type="button" class="btn btn-primary sm" id="missionConfirm">确认开工</button>'
-    : "";
+  const currentIndex = flow.stages.findIndex((stage) =>
+    ["active", "error", "blocked", "warning"].includes(stage.status),
+  );
+  const stageLabel = flow.current
+    ? flow.current.label
+    : ["done", "error", "stopped"].includes(t.status)
+      ? "已收口"
+      : "准备中";
+  const stageAt = currentIndex >= 0 ? currentIndex + 1 : t.status === "done" ? 5 : 1;
+  const calmText =
+    t.status === "done"
+      ? "全部工序与质量门通过，可以直接使用产物。"
+      : "团队正在自主推进，完成后会通知你；过程细节随时可以展开。";
 
+  const segments = flow.stages
+    .map((stage) => {
+      const state = ["done", "skipped"].includes(stage.status)
+        ? "done"
+        : ["error", "blocked", "warning"].includes(stage.status)
+          ? "error"
+          : stage.status === "active"
+            ? "active"
+            : "pending";
+      return `<span class="dd-seg" data-state="${state}" aria-hidden="true"></span>`;
+    })
+    .join("");
+
+  const cards = items.length
+    ? `<div class="dd-cards">${items
+        .map(
+          (item) => `
+      <article class="dd-card" data-tone="${item.tone}">
+        <div class="dd-card-head">
+          <span class="dd-dot" aria-hidden="true"></span>
+          <b>${escapeHtml(ddClip(item.title, 72))}</b>
+        </div>
+        <p class="dd-detail">${escapeHtml(ddClip(item.detail, 120))}</p>
+        <div class="dd-actions">${item.actions
+          .map(
+            (action) =>
+              `<button type="button" class="dd-btn${action.primary ? " primary" : ""}" data-decision-action="${action.action}"${
+                action.approvalId ? ` data-approval-id="${escapeHtml(action.approvalId)}"` : ""
+              }${action.decision ? ` data-decision="${action.decision}"` : ""}>${escapeHtml(action.label)}</button>`,
+          )
+          .join("")}</div>
+      </article>`,
+        )
+        .join("")}</div>`
+    : `<div class="dd-calm"><span class="dd-calm-mark" aria-hidden="true"></span><p>${escapeHtml(calmText)}</p></div>`;
+
+  card.dataset.attention = items.length ? "1" : "0";
   card.innerHTML = `
-    <div class="mission-head">
-      <div class="mission-status" data-status="${t.pendingConfirmation ? "needs_attention" : t.status}">
-        <span class="ms-dot" aria-hidden="true"></span>
+    <div class="dd-head">
+      <div class="dd-title">
+        <span class="dd-mark" data-tone="${items.length ? "attention" : "calm"}" aria-hidden="true"></span>
         <div>
-          <b>${escapeHtml(statusText)}</b>
-          <small>${escapeHtml(gate)}${quality.round ? ` · 第 ${quality.round} 轮` : ""}</small>
+          <b>${items.length ? `需要你拍板 ${items.length} 件` : "无需你介入"}</b>
+          <small>${escapeHtml(statusText)} · ${escapeHtml(gate)}${quality.round ? ` · 第 ${quality.round} 轮` : ""}</small>
         </div>
       </div>
-      <div class="mission-metrics">
+      <span class="dd-task">${escapeHtml(ddClip(t.title || "当前任务", 34))}</span>
+    </div>
+    ${cards}
+    <div class="dd-backstage">
+      <div class="dd-backstage-head">
+        <span>${items.length ? "后台仍在推进 · 其余无需你介入" : "后台自主推进 · 5 位成员"}</span>
+        <span>阶段 ${stageAt} / 5 · ${escapeHtml(stageLabel)}</span>
+      </div>
+      <div class="dd-progress" role="img" aria-label="五阶段进度：${escapeHtml(stageLabel)}">${segments}</div>
+      <div class="dd-metrics">
         <div><small>用时</small><b>${escapeHtml(elapsed)}</b></div>
-        <div><small>工序</small><b>${done}/${steps}</b></div>
+        <div><small>工序</small><b>${flow.doneSteps}/${flow.totalSteps}</b></div>
         <div><small>改动文件</small><b>${t.changes ?? t.fileChanges?.length ?? 0}</b></div>
         <div><small>Tokens</small><b>${(t.stats?.tokens || 0).toLocaleString()}</b></div>
       </div>
-      ${confirmAction}
-      <button type="button" class="mission-open" id="missionOpen">执行详情 →</button>
-    </div>
-    ${
-      notes.length
-        ? `<ul class="mission-notes">${notes
-            .map(
-              (note) =>
-                `<li data-tone="${note.tone}"><span class="mn-mark" aria-hidden="true"></span>${escapeHtml(note.text)}</li>`,
-            )
-            .join("")}</ul>`
-        : ""
-    }`;
+      <div class="dd-foot">
+        <span class="dd-gate">${escapeHtml(gate)}</span>
+        <button type="button" class="mission-open" id="missionOpen">执行详情 →</button>
+      </div>
+    </div>`;
 }
 
 function applyBubbleClamp() {
@@ -3718,6 +3742,7 @@ function handleEvent(ev) {
     case "approvals.changed": {
       S.approvals = ev.approvals || [];
       renderApprovals();
+      renderMission();
       break;
     }
     case "commands.changed": {
@@ -4829,25 +4854,48 @@ function bind() {
     /* ignore */
   }
 
-  /* 概览卡上的确认开工 */
+  /* 决策台：动作全部复用已有 API 或纯导航，不引入新后端能力 */
+  function openInspector(tab) {
+    document.querySelector(".app")?.classList.remove("insp-collapsed");
+    try {
+      localStorage.setItem("agentforge:inspector", "0");
+    } catch {
+      /* ignore */
+    }
+    if (tab) switchTab(tab);
+  }
+
   $("#missionCard")?.addEventListener("click", async (event) => {
     if (event.target.closest("#missionOpen")) {
-      document.querySelector(".app")?.classList.remove("insp-collapsed");
+      openInspector();
+      return;
+    }
+    const button = event.target.closest("[data-decision-action]");
+    if (!button) return;
+    const action = button.dataset.decisionAction;
+    if (action === "detail") {
+      openInspector();
+      return;
+    }
+    if (action === "debate") {
+      openInspector("debate");
+      return;
+    }
+    if (action === "confirm") {
+      if (!S.task) return;
       try {
-        localStorage.setItem("agentforge:inspector", "0");
-      } catch {
-        /* ignore */
+        const confirmed = await api(`/api/tasks/${S.task.id}/confirm`, { method: "POST" });
+        S.task = confirmed.task;
+        renderAll();
+        toast("已确认，团队开工", "ok");
+      } catch (err) {
+        toast(`确认失败：${err.message}`, "err");
       }
       return;
     }
-    if (!event.target.closest("#missionConfirm") || !S.task) return;
-    try {
-      const confirmed = await api(`/api/tasks/${S.task.id}/confirm`, { method: "POST" });
-      S.task = confirmed.task;
-      renderAll();
-      toast("已确认，团队开工", "ok");
-    } catch (err) {
-      toast(`确认失败：${err.message}`, "err");
+    if (action === "approval") {
+      await actOnApproval(button.dataset.approvalId, button.dataset.decision);
+      renderMission();
     }
   });
 

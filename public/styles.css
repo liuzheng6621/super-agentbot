@@ -7096,3 +7096,333 @@ summary,
     line-height: 1.5;
   }
 }
+
+/* =========================================================
+   决策台（2026-11-28）：先给需要你拍板的事，过程收进后台
+   ========================================================= */
+
+.decision-desk {
+  max-width: 960px;
+  margin: 0 auto 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  border: 2px solid var(--edge);
+  background: var(--card);
+  box-shadow: 4px 4px 0 var(--hard);
+  transition: box-shadow var(--dur-2) var(--ease-press);
+}
+
+.decision-desk[hidden] {
+  display: none;
+}
+
+.decision-desk[data-attention="1"] {
+  box-shadow: 4px 4px 0 var(--orange);
+}
+
+.dd-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.dd-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.dd-title b {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.dd-title small {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dd-mark {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border: 2px solid var(--edge);
+  background: var(--leaf);
+  transform: rotate(45deg);
+}
+
+.dd-mark[data-tone="attention"] {
+  background: var(--orange);
+  animation: dd-mark-pulse 1.8s ease-in-out infinite;
+}
+
+.dd-task {
+  margin-left: auto;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--muted);
+  border-bottom: 1px dashed var(--line);
+  padding-bottom: 2px;
+}
+
+.dd-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px;
+}
+
+.dd-card {
+  --dd-tone: var(--sky);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1.5px solid var(--edge);
+  background: color-mix(in srgb, var(--dd-tone) 14%, var(--card));
+}
+
+.dd-card[data-tone="warn"] {
+  --dd-tone: var(--yellow);
+}
+
+.dd-card[data-tone="info"] {
+  --dd-tone: var(--sky);
+}
+
+.dd-card[data-tone="err"] {
+  --dd-tone: var(--orange);
+}
+
+.dd-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dd-card-head b {
+  font-size: 13.5px;
+  font-weight: 700;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.dd-dot {
+  width: 9px;
+  height: 9px;
+  flex: none;
+  border: 1.5px solid var(--edge);
+  background: var(--dd-tone);
+}
+
+.dd-detail {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fg);
+}
+
+.dd-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: auto;
+}
+
+.dd-btn {
+  min-height: 32px;
+  padding: 6px 12px;
+  border: 1.5px solid var(--edge);
+  background: var(--card);
+  color: var(--fg);
+  font: 700 12px/1.4 var(--f-body);
+  cursor: pointer;
+  transition:
+    transform var(--dur-1) var(--ease-press),
+    background-color var(--dur-2) var(--ease-press);
+}
+
+.dd-btn:hover {
+  background: var(--sunken);
+  transform: translate(-1px, -1px);
+}
+
+.dd-btn:active {
+  transform: translate(1px, 1px);
+}
+
+.dd-btn.primary {
+  background: var(--orange);
+  color: var(--edge);
+}
+
+.dd-btn.primary:hover {
+  background: var(--yellow);
+}
+
+.dd-calm {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1.5px dashed var(--edge);
+  background: var(--sunken);
+}
+
+.dd-calm-mark {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--leaf);
+  border: 1.5px solid var(--edge);
+}
+
+.dd-calm p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.dd-backstage {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1.5px dashed var(--line);
+}
+
+.dd-backstage-head {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dd-backstage-head span:last-child {
+  margin-left: auto;
+}
+
+.dd-progress {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.dd-seg {
+  height: 8px;
+  border: 1px solid var(--edge);
+  background: var(--sunken);
+}
+
+.dd-seg[data-state="done"] {
+  background: var(--leaf);
+}
+
+.dd-seg[data-state="error"] {
+  background: var(--orange);
+}
+
+.dd-seg[data-state="active"] {
+  background: var(--sky);
+  animation: dd-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes dd-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes dd-mark-pulse {
+  50% {
+    opacity: 0.5;
+  }
+}
+
+.dd-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dd-metrics div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dd-metrics small {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dd-metrics b {
+  font-family: var(--f-pixel);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.dd-foot {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.dd-gate {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+@media (max-width: 720px) {
+  .decision-desk {
+    padding: 12px;
+  }
+
+  .dd-title b {
+    font-size: 16px;
+  }
+
+  .dd-task {
+    max-width: 100%;
+    margin-left: 0;
+  }
+
+  .dd-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 480px) {
+  .dd-cards {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dd-btn {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dd-mark[data-tone="attention"],
+  .dd-seg[data-state="active"] {
+    animation: none;
+  }
+
+  .dd-btn:hover,
+  .dd-btn:active {
+    transform: none;
+  }
+}
