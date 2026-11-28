@@ -49,21 +49,24 @@ export function testEvidence(output = '') {
   const jestFail = readCount(/(\d+)\s+failing/i);
   const pytestPass = readCount(/(\d+)\s+passed/i);
   const pytestFail = readCount(/(\d+)\s+failed/i);
+  const nodeSummaryPass = readCount(/^\s*ℹ\s*pass\s+(\d+)\s*$/im);
+  const nodeSummaryFail = readCount(/^\s*ℹ\s*fail\s+(\d+)\s*$/im);
   const cargoOk = /test result:\s*ok\./i.test(text);
   const cargoFail = readCount(/(\d+)\s+failed/i);
   const goOk = /^ok\s+\S+/m.test(text);
   const goFail = /^FAIL\s+\S+/m.test(text);
 
-  const passedFirst = nodePass ?? jestPass ?? pytestPass;
+  const passedFirst = nodePass ?? nodeSummaryPass ?? jestPass ?? pytestPass;
   const passed = passedFirst === null || passedFirst === undefined
     ? tapOk || (cargoOk ? 1 : 0) || (goOk ? 1 : 0)
     : passedFirst;
-  const failedFirst = nodeFail ?? jestFail ?? pytestFail;
+  const failedFirst = nodeFail ?? nodeSummaryFail ?? jestFail ?? pytestFail;
   const failed = failedFirst === null || failedFirst === undefined
     ? tapNotOk + (cargoFail || 0) + (goFail ? 1 : 0)
     : failedFirst;
   const hasEvidence =
     nodePass !== null ||
+    nodeSummaryPass !== null ||
     jestPass !== null ||
     pytestPass !== null ||
     tapOk > 0 ||
@@ -76,7 +79,14 @@ export function testEvidence(output = '') {
     hasEvidence,
     passed: Math.max(0, Number(passed) || 0),
     failed: Math.max(0, Number(failed) || 0),
-    source: nodePass !== null ? 'node-test' : jestPass !== null ? 'jest' : pytestPass !== null ? 'pytest' : 'generic',
+    source:
+      nodePass !== null || nodeSummaryPass !== null
+        ? 'node-test'
+        : jestPass !== null
+          ? 'jest'
+          : pytestPass !== null
+            ? 'pytest'
+            : 'generic',
   };
 }
 

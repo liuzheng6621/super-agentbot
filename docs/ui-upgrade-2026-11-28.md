@@ -325,3 +325,39 @@
   拦截 `/api/tasks` 请求确认 `goal` 长度 348、首行为自然语言主目标、含硬约束段、开工按钮状态正确恢复；
   全程 `window.onerror` / `unhandledrejection` 均为 0。
 - 截图：`docs/ux-final-ic-desktop.png`、`docs/ux-final-ic-mobile.png`（本地验收产物，已忽略入库）。
+---
+## 12. 成员泳道与时间回放 · 2026-11-28
+
+### 12.1 目标与数据模型
+
+> 把混在一条时间线里的过程消息，变成「按人分行的泳道拓扑 + 可拖动的时间轴回放」，让用户直接看出谁在并行、谁在等待、哪里被质量门挡住。
+
+纯前端模块，零后端改动：
+
+- `public/lib/swimlane.js` 只从 `task.messages` 派生：
+  - `deriveLanes()` 按成员名分泳道，系统 / 质量门 / 计划 / 摘要 / 决策消息归入系统泳道，用户消息单独一条；
+  - 连续同类消息按 ≤45s 时间窗折叠成块（实现 ×12，而不是 12 个点）；
+  - `buildTimeline()` 汇出总时长、并行度峰值、里程碑、瓶颈窗口与最长空窗；
+  - `replaySnapshot()` 给定任意毫秒时刻，返回每条泳道的 active / completed / upcoming 状态。
+- 消息缺时间戳时按输入序号补虚拟时间，保证稳定渲染；乱序时间戳统一排序后派生。
+
+### 12.2 界面与交互
+
+- 工作台「执行详情」新增「泳道」视图；每行一个成员，横向按时间比例排列，颜色沿用成员现有配色。
+- 质量门、方案裁决、完成等里程碑横跨泳道，一眼看出失败前的最后活跃者。
+- 底部 scrubber 支持拖动与播放；拖动后立即显示「此刻谁在做什么」快照。`prefers-reduced-motion` 下播放改为步进。
+- 泳道块可聚焦并有可读 label；scrubber 用 `role="slider"` + 键盘步进；快照容器 `aria-live="polite"`。
+- ≤980px 泳道纵向堆叠但保留时间比例；≤480px 触摸区 ≥44px、12px 字阶下限，时间块按比例排列。
+
+### 12.3 验证
+
+- `npm test`：55 个测试文件全绿，其中 `tests/swimlane.test.mjs` 12 个用例覆盖空态、单人、并行、折叠、乱序时间戳、里程碑、瓶颈、回放边界。
+- `npm run check:syntax`：116/116；`npm run check:types`：52 文件全绿。
+- CDP 真实 DOM 端到端（`scripts/ui-swimlane-shot.mjs`）：
+  - 选中多成员任务 `234a2fdb...`，26 条消息派生 9 条泳道、26 个时间块，`MAX PARALLEL = 3`，最长空窗 15s；
+  - 拖动 scrubber 后 `#wcSwimlaneLive` 快照正确更新；
+  - 桌面 1440 与移动端 390 均渲染成功；
+  - 诊断中曾捕获 `lanes.map is not a function`，已修复渲染层解构错误。
+- 默认态截图无回归：`docs/ux-default-desktop.png`（本地验收产物，不强制入库）。
+- 泳道截图按仓库既有约定为本地验收产物：`docs/ux-final-swimlane-desktop.png` / `-mobile.png`（`.gitignore` 已覆盖，不入库）。
+

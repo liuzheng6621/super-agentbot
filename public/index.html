@@ -488,6 +488,7 @@
                 <button class="wc-view-tab" type="button" data-wc-view="overview">总览</button>
                 <button class="wc-view-tab" type="button" data-wc-view="graph">DAG</button>
                 <button class="wc-view-tab" type="button" data-wc-view="replay">回放</button>
+                <button class="wc-view-tab" type="button" data-wc-view="swimlane">泳道</button>
               </div>
               <span class="wc-file-state" id="wcFileState">选择一个文件开始</span>
             </div>
@@ -614,6 +615,17 @@
                 </div>
               </div>
               <div class="wc-replay" id="wcReplay"></div>
+            </section>
+
+            <section class="wc-view" id="wcSwimlaneView" hidden>
+              <div class="wc-lanes-head">
+                <div>
+                  <span class="wc-eyebrow">MEMBER SWIMLANES</span>
+                  <h3>谁在并行，谁在等待</h3>
+                </div>
+                <span class="wc-run-status" id="wcSwimlaneCount">00</span>
+              </div>
+              <div class="wc-swimlane" id="wcSwimlane"></div>
             </section>
           </main>
 

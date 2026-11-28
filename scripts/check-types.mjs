@@ -46,7 +46,8 @@ function checkFunctionDocs(source, file) {
     if (!/@param|@returns|@return\b/.test(block)) continue;
 
     let fnLine = end + 1;
-    while (fnLine < lines.length && !/function\s+[A-Za-z_$]|=>/.test(lines[fnLine])) {
+    const signaturePattern = /(?:export\s+)?function\s+[A-Za-z_$]|=>/;
+    while (fnLine < lines.length && !signaturePattern.test(lines[fnLine])) {
       if (/^\s*(?:export\s+)?(?:const|let)\s+[A-Za-z_$]/.test(lines[fnLine])) break;
       fnLine += 1;
       if (fnLine - end > 3) break;
@@ -66,8 +67,9 @@ function checkFunctionDocs(source, file) {
     );
     if (params.length && signature) {
       const argsPart = signature.slice(signature.indexOf('(') + 1, signature.lastIndexOf(')'));
+      const paramPattern = (name) => new RegExp(String.raw`(^|[\s,{])${name}(?:\s*(?:,|=|:|\})|$)`);
       for (const name of params) {
-        if (!new RegExp(`(^|[\\s,{])${name}\\s*(?:,|=|:|\\})`).test(argsPart)) {
+        if (!paramPattern(name).test(argsPart)) {
           problems.push(`${file}:${index + 1} @param ${name} 不在签名中（${signatureLine.trim().slice(0, 80)}）`);
         }
       }
