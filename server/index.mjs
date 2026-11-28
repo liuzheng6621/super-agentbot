@@ -1293,11 +1293,18 @@ const server = http.createServer(async (req, res) => {
           code: 'external-workspace-forbidden',
         });
       }
+      const mode = body.mode === 'manual' ? 'manual' : 'auto';
+      const costEstimate = store.estimateTaskTokens({ mode });
+      const costGate = Number(store.db.settings.costGateTokens) || 0;
+      const requiresConfirmation =
+        costGate > 0 && costEstimate.ready && Number(costEstimate.high) > costGate;
       let task;
       try {
         task = store.createTask({
           goal,
-          mode: body.mode === 'manual' ? 'manual' : 'auto',
+          costEstimate,
+          pendingConfirmation: requiresConfirmation,
+          mode,
           priority: body.priority,
           workspace: typeof body.workspace === 'string' ? body.workspace : '',
           isolation: body.isolation === 'worktree' ? 'worktree' : 'direct',
@@ -1314,11 +1321,37 @@ const server = http.createServer(async (req, res) => {
           code: err.code || '',
         });
       }
+      if (requiresConfirmation) {
+        return json(res, 202, {
+          task: taskDetail(store.getTask(task.id)),
+          requiresConfirmation: true,
+          estimate: costEstimate,
+          costGateTokens: costGate,
+          message: `历史同模式任务预计消耗 ${costEstimate.low}-${costEstimate.high} tokens，超过确认阈值 ${costGate}；确认后才会开始。`,
+        });
+      }
       const speed = Number(body.speed) || 1;
       if (body.autoRun !== false) {
         scheduleTask(task.id, { speed, source: 'api.create' });
       }
       return json(res, 201, { task: taskDetail(store.getTask(task.id)) });
+    }
+
+    const confirmMatch = pathname.match(/^\/api\/tasks\/([\w-]+)\/confirm$/);
+    if (confirmMatch && method === 'POST') {
+      const task = visibleTask(principal, confirmMatch[1]);
+      if (!task) return json(res, 404, { error: '任务不存在' });
+      if (!task.pendingConfirmation) {
+        return json(res, 409, { error: '任务不在待确认状态', code: 'task-not-pending' });
+      }
+      store.updateTask(task.id, { pendingConfirmation: false });
+      store.addTaskEvent(task.id, {
+        type: 'task.cost.confirmed',
+        runId: task.runId || null,
+        data: { estimate: task.costEstimate || null, actorId: principal?.id || '' },
+      });
+      scheduleTask(task.id, { speed: 1, source: 'api.confirm' });
+      return json(res, 200, { task: taskDetail(store.getTask(task.id)) });
     }
 
     const taskMcpMatch = pathname.match(/^\/api\/tasks\/([\w-]+)\/mcp\/call$/);

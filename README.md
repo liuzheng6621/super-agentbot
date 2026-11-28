@@ -381,6 +381,7 @@ Token 已带最小主体和作用域：`AGENTFORGE_API_TOKEN` 是跨租户 owner
 | `GET` | `/api/stream` | SSE 事件流 |
 | `GET` | `/api/health` | 健康检查（含 Scheduler 快照） |
 | `POST` | `/api/shutdown` | 优雅退出 |
+| `POST` | `/api/tasks/:id/confirm` | 成本确认：放行被阈值挂起的任务 |
 | `POST` | `/api/hooks/:token` | 外部触发（Bot Hook）；推荐改用 `X-Hook-Token` 请求头 |
 | `GET` | `/api/hook-token` | 读取 Hook Token 与开关状态（`operator:admin`） |
 | `POST` | `/api/hook-token/rotate` | 轮换 Hook Token（`operator:admin`） |
@@ -420,7 +421,7 @@ Token 在界面右侧「统计」面板，或 `GET /api/hook-token`（需 `opera
 | `AGENTFORGE_OTLP_HEADERS` | 空 | OTLP 请求头 JSON；敏感值不会进入 `/api/state` |
 | `AGENTFORGE_OTLP_TIMEOUT_MS` | `5000` | OTLP 单次导出超时，最小 100ms |
 
-工作流参数（讨论开关与规模、工序并发、全局任务并发、返工轮次）在界面 ⚙ 里改，落 `data/db.json` 的 `settings`。Provider Profile 在左栏「Provider 配置」或 `/api/providers` 管理；`apiKeyRef` 只保存环境变量名，真实值由服务进程环境提供。`cliBindings` 按命令名保存参数模板，可用 `{{model}}`、`{{baseUrl}}`、`{{apiKey}}`、`{{providerId}}`、`{{providerName}}` 和 `{{env:NAME}}`；Agent 的 `fallbackProviderIds` 决定备用顺序。
+工作流参数（讨论开关与规模、工序并发、全局任务并发、返工轮次）在界面 ⚙ 里改，落 `data/db.json` 的 `settings`。`costGateTokens`（默认 `0` = 关闭）按同模式历史任务的真实 token 用量给区间；预计上限超过阈值时任务先挂起为「待确认」，在列表或弹窗里确认后才调度，预估只给 token 区间，没有价格来源时不换算费用。Provider Profile 在左栏「Provider 配置」或 `/api/providers` 管理；`apiKeyRef` 只保存环境变量名，真实值由服务进程环境提供。`cliBindings` 按命令名保存参数模板，可用 `{{model}}`、`{{baseUrl}}`、`{{apiKey}}`、`{{providerId}}`、`{{providerName}}` 和 `{{env:NAME}}`；Agent 的 `fallbackProviderIds` 决定备用顺序。
 
 ## 项目结构
 

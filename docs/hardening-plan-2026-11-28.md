@@ -34,7 +34,7 @@
 | W1 | P0 | 评审身份与模型独立性 | `server/review-independence.mjs`、`server/orchestrator.mjs`、`public/app.js` | 独立性判定包含 resolved Provider、model、CLI command；同模型自审写入 `self-review` 事件并在 `/api/state` 与 UI 可见；多角色场景 reviewer 身份与实现者不同。 | 已完成（`tests/review-independence.test.mjs`） |
 | W2 | P0 | 质量门反伪造与环境隔离 | `server/test-entry.mjs`、`server/orchestrator.mjs`、`server/adapters.mjs` | trivial `scripts.test`（`exit 0`、空 echo、占位符）判失败；本次变更文件与测试文件无交集时给出显式状态；runner 输出无 pass/fail 证据时 fail closed；保留退出码、超时和输出记录；质量门子进程只继承最小环境白名单，Provider / CLI 密钥不进入测试命令（F7）。 | 已完成（`tests/quality-forgery.test.mjs`） |
 | W3 | P0 | 启动成本边界 | `server/team.mjs`、`server/index.mjs` | 默认启动只做本地存在性、版本和配置探测；真实提示词调用只能由显式 probe 或体检触发；保留 `AGENTFORGE_SKIP_TEAM_BOOTSTRAP` 兼容。 | 已完成（`tests/team-startup.test.mjs`） |
-| W4 | P1 | 成本预估与确认门 | `server/index.mjs`、`server/store.mjs`、`public/app.js` | 任务创建前按同模式历史 usage 给 token 区间，不伪造费用换算；超过阈值时任务进入待确认且 UI 可见。 | 未开始 |
+| W4 | P1 | 成本预估与确认门 | `server/index.mjs`、`server/store.mjs`、`public/app.js` | 任务创建前按同模式历史 usage 给 token 区间，不伪造费用换算；超过阈值时任务进入待确认且 UI 可见。 | 已完成（`tests/cost-gate.test.mjs`） |
 | W5 | P1 | Provider 并发跨进程仲裁 | `server/scheduler.mjs`、`server/store.mjs`、`server/store-leases.mjs` | Provider 并发计数进入 `.leases.json`；两实例并发测试不超过配置配额；冲突有等待原因和审计。 | 未开始 |
 | W6 | P1 | Automation claim 心跳 | `server/store.mjs`、`server/automation-runner.mjs` | 运行中 claim 定期续约；进程崩溃后 TTL 到期可回收；幂等和取消语义测试覆盖。 | 未开始 |
 | W7 | P1 | 任务分片持久化 | `server/store.mjs` 或新 persistence 模块 | `tasks/<id>.json` + 索引；原子写、崩溃恢复、旧 `db.json` 迁移和备份；跨实例合并写测试。 | 未开始 |

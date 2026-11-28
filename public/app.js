@@ -533,13 +533,17 @@ function renderTasks() {
             t.waitingReason || "",
           )}">
             <span class="t-title">${escapeHtml(t.title)}</span>
-            <span class="t-meta"><span>${PRIORITY_TEXT[t.priority] || ""}</span><span>${STATUS_TEXT[t.status] || t.status}${
+            <span class="t-meta"><span>${PRIORITY_TEXT[t.priority] || ""}</span><span>${
+              t.pendingConfirmation ? "待确认" : STATUS_TEXT[t.status] || t.status
+            }${
               t.status === "queued" && t.queuePosition ? ` #${t.queuePosition}` : ""
             }</span><span>${t.doneSteps}/${t.steps || 0}</span><span>${t.files}F</span></span>
             ${
-              t.status === "queued" && t.waitingReason
-                ? `<span class="t-wait">${escapeHtml(t.waitingReason)}</span>`
-                : ""
+              t.pendingConfirmation
+                ? `<span class="t-wait">历史同模式预计 ${t.costEstimate?.low ?? "?"}-${t.costEstimate?.high ?? "?"} tokens，确认后开工</span>`
+                : t.status === "queued" && t.waitingReason
+                  ? `<span class="t-wait">${escapeHtml(t.waitingReason)}</span>`
+                  : ""
             }
           </div>`,
         )
@@ -3368,7 +3372,8 @@ async function createTask(goal) {
     };
     if (S.dir) body.workspace = S.dir;
     if (S.dir && S.worktree) body.isolation = "worktree";
-    const { task } = await api("/api/tasks", { method: "POST", body });
+    const created = await api("/api/tasks", { method: "POST", body });
+    const task = created.task;
     S.task = task;
     S.workspace = null;
     S.workspacePreviewData = null;
@@ -3383,7 +3388,22 @@ async function createTask(goal) {
     switchTab(S.flowMode === "direct" ? "plan" : "debate");
     renderAll();
     loadWorkspace();
-    toast(S.flowMode === "direct" ? "团队已按「直接开工」开工" : "团队已开工，先出方案再实施", "ok");
+    if (created.requiresConfirmation) {
+      const est = created.estimate || {};
+      const ok = window.confirm(
+        `历史同模式任务预计消耗 ${est.low}-${est.high} tokens，超过确认阈值 ${created.costGateTokens}。\n确认后才会开工，是否继续？`,
+      );
+      if (ok) {
+        const confirmed = await api(`/api/tasks/${task.id}/confirm`, { method: "POST" });
+        S.task = confirmed.task;
+        renderAll();
+        toast("已确认，团队开工", "ok");
+      } else {
+        toast("已保留为待确认任务，点任务卡片可再确认", "info");
+      }
+    } else {
+      toast(S.flowMode === "direct" ? "团队已按「直接开工」开工" : "团队已开工，先出方案再实施", "ok");
+    }
   } catch (err) {
     toast(`创建失败：${err.message}`, "err");
   } finally {
@@ -4629,9 +4649,21 @@ function bind() {
   });
 
   /* 任务列表 */
-  $("#taskList").addEventListener("click", (e) => {
+  $("#taskList").addEventListener("click", async (e) => {
     const item = e.target.closest(".task-item");
-    if (item) selectTask(item.dataset.task);
+    if (!item) return;
+    selectTask(item.dataset.task);
+    const pending = S.tasks.find((t) => t.id === item.dataset.task)?.pendingConfirmation;
+    if (!pending) return;
+    if (!window.confirm("该任务因预计成本超过阈值被挂起，现在确认开工？")) return;
+    try {
+      const confirmed = await api(`/api/tasks/${item.dataset.task}/confirm`, { method: "POST" });
+      S.task = confirmed.task;
+      renderAll();
+      toast("已确认，团队开工", "ok");
+    } catch (err) {
+      toast(`确认失败：${err.message}`, "err");
+    }
   });
   $("#loadMoreTasks").addEventListener("click", loadMoreTasks);
 

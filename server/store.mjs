@@ -578,6 +578,8 @@ function emptyDb() {
       dynamicPlanEnabled: true,
       maxPlanSteps: 12,
       timeouts: defaultTimeouts(),
+      // 成本确认门：0 表示关闭；非零时按同模式历史 token 区间判断是否需要人工确认。
+      costGateTokens: 0,
       // 目录白名单：空数组表示未配置，保持零配置行为；非空时白名单外一律拒绝。
       workspaceRoots: [],
       fsBrowseRoots: [],
@@ -2016,6 +2018,8 @@ class Store {
 
   createTask({
     goal,
+    costEstimate = null,
+    pendingConfirmation = false,
     mode = 'auto',
     priority = 'normal',
     workspace = '',
@@ -2113,6 +2117,8 @@ class Store {
       trace: null,
       recovery: null,
       repairRound: 0,
+      costEstimate: costEstimate || null,
+      pendingConfirmation: !!pendingConfirmation,
       planVersion: 0,
       planVersions: [],
       autoReplans: [],
@@ -2172,6 +2178,8 @@ class Store {
       trace: task.trace ? { ...task.trace } : null,
       recovery: task.recovery ? { ...task.recovery } : null,
       repairRound: task.repairRound || 0,
+      pendingConfirmation: task.pendingConfirmation === true,
+      costEstimate: task.costEstimate || null,
       planVersion: task.planVersion || 0,
       planVersions: (task.planVersions || []).length,
       quality: task.quality || { status: 'pending' },
@@ -2247,6 +2255,8 @@ class Store {
     }
     if (patch.simSpeed !== undefined)
       s.simSpeed = clamp(patch.simSpeed, 1, 20, s.simSpeed);
+    if (patch.costGateTokens !== undefined)
+      s.costGateTokens = clamp(patch.costGateTokens, 0, 10000000, s.costGateTokens);
     if (patch.workspaceRoots !== undefined) {
       s.workspaceRoots = normalizeRoots(patch.workspaceRoots)
         .map((item) => item.slice(0, 500))
@@ -2262,6 +2272,31 @@ class Store {
     this.save({ settings: true });
     this.broadcast({ type: 'settings.changed', settings: { ...s } });
     return { ...s };
+  }
+
+  /** Token 区间只来自同模式历史任务的真实用量；没有价格来源就不换算费用。 */
+  estimateTaskTokens({ mode = 'auto' } = {}) {
+    const rows = (this.db.tasks || [])
+      .filter((task) => (task.mode || 'auto') === mode)
+      .map((task) =>
+        (task.usageLedger || []).reduce(
+          (sum, entry) => sum + (Number(entry.tokensIn) || 0) + (Number(entry.tokensOut) || 0),
+          0,
+        ),
+      )
+      .filter((total) => total > 0)
+      .sort((a, b) => a - b);
+    const pick = (ratio, round = Math.floor) =>
+      rows[Math.min(rows.length - 1, round(ratio * (rows.length - 1)))];
+    const ready = rows.length >= 3;
+    return {
+      ready,
+      samples: rows.length,
+      low: ready ? pick(0.1) : null,
+      median: ready ? pick(0.5) : null,
+      high: ready ? pick(0.9, Math.ceil) : null,
+      cost: null,
+    };
   }
 
   rotateHookToken() {
