@@ -246,7 +246,11 @@ function md(src) {
     if (codeSlot) {
       closeList();
       const c = codes[Number(codeSlot[1])];
-      out.push(`<pre><code>${escapeHtml(c.code.replace(/\n$/, ""))}</code></pre>`);
+      out.push(
+        `<pre tabindex="0" role="group" aria-label="代码块"><code>${escapeHtml(
+          c.code.replace(/\n$/, ""),
+        )}</code></pre>`,
+      );
       continue;
     }
 
@@ -3320,9 +3324,11 @@ function applyBubbleClamp() {
     button.type = "button";
     button.className = "bubble-more";
     button.textContent = "展开全文";
+    button.setAttribute("aria-expanded", "false");
     button.addEventListener("click", () => {
       const open = bubble.classList.toggle("is-open");
       button.textContent = open ? "收起" : "展开全文";
+      button.setAttribute("aria-expanded", String(open));
     });
     bubble.after(button);
   });

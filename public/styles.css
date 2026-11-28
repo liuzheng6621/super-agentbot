@@ -6662,3 +6662,437 @@ kbd {
 #ticker {
   display: none;
 }
+
+/* =========================================================
+   体验打磨（2026-11-28）：反馈、层级、对齐与一致性
+   同样的像素印刷语言，只补齐状态、节奏和细节
+   ========================================================= */
+
+:root {
+  --dur-1: 120ms;
+  --dur-2: 180ms;
+  --dur-3: 240ms;
+  --ease-press: steps(3, end);
+  --on-accent: #0d2826;
+  --muted: #47645a;
+  --ink-soft: #2f4c46;
+  --stage-x: clamp(14px, 3vw, 36px);
+  --focus: #2f9fb0;
+}
+
+/* 关键修复：关闭状态的 details 不再生成隐藏盒子（否则浮层会盖住输入框） */
+details:not([open]) > *:not(summary) {
+  display: none !important;
+}
+
+/* ---------- 统一反馈：按下 / 悬停 / 焦点 ---------- */
+.btn,
+.send-btn,
+.icon-btn,
+.tf,
+.menu-item,
+.link-btn,
+.chip,
+.bubble-more,
+.mission-open,
+.dir-pick,
+summary,
+.tab {
+  transition:
+    transform var(--dur-1) var(--ease-press),
+    box-shadow var(--dur-1) var(--ease-press),
+    background-color var(--dur-2) var(--ease-press),
+    border-color var(--dur-2) var(--ease-press),
+    color var(--dur-2) var(--ease-press);
+}
+
+.btn:hover,
+.send-btn:hover,
+.bubble-more:hover,
+.mission-open:hover {
+  transform: translate(-1px, -1px);
+}
+
+.btn:active,
+.send-btn:active,
+.bubble-more:active,
+.mission-open:active,
+.icon-btn:active,
+.tf:active,
+.chip:active,
+.dir-pick:active {
+  transform: translate(2px, 2px);
+  box-shadow: 1px 1px 0 var(--hard);
+}
+
+.btn-primary,
+.btn-primary:hover,
+.btn-primary:active {
+  color: var(--on-accent);
+}
+
+:where(button, a, input, textarea, select, summary, [tabindex]):focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* ---------- 层级与对齐：一条统一的左右轴线 ---------- */
+.topbar,
+.flowbar,
+.composer {
+  padding-left: var(--stage-x);
+  padding-right: var(--stage-x);
+}
+
+.flowbar {
+  padding-top: 8px;
+  padding-bottom: 4px;
+}
+
+.topbar-title {
+  letter-spacing: -0.01em;
+}
+
+.mission,
+.scroll > .timeline {
+  width: min(960px, 100%);
+}
+
+.mission-metrics b,
+.task-item .t-meta,
+.runs,
+.usage-num,
+.stat-num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 字号下限：可见文本不小于 11px ---------- */
+.rail-section .rail-head span,
+.rail-fold .rail-head span,
+.rail-head em,
+.tf,
+.task-item .t-meta,
+.mission-metrics small,
+.agent-role,
+.tag,
+.tip,
+.link-btn,
+.dir-label,
+.composer-bar .fm,
+.mention,
+.menu-item {
+  font-size: 11px;
+}
+
+.mission-metrics small {
+  letter-spacing: 0.08em;
+}
+
+/* ---------- 浮层：出现有节奏，消失不拖沓 ---------- */
+.more-menu:not([hidden]) {
+  animation: menu-in var(--dur-2) var(--ease-press);
+  transform-origin: top right;
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+}
+
+.composer-advanced[open] .adv-body {
+  animation: menu-in var(--dur-2) var(--ease-press);
+  transform-origin: bottom left;
+}
+
+/* ---------- 面板折叠：宽度过渡，内容先淡出 ---------- */
+.app {
+  transition: grid-template-columns var(--dur-3) var(--ease-press);
+}
+
+.app.insp-collapsed .insp-head,
+.app.insp-collapsed .insp-body {
+  opacity: 0;
+}
+
+/* ---------- 流式输出：只有正在生成时才闪动 ---------- */
+.msg.streaming .bubble::after {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 1em;
+  margin-left: 4px;
+  vertical-align: -2px;
+  background: var(--orange);
+  animation: caret 1s steps(2, end) infinite;
+}
+
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* 气泡折叠的渐隐边界与按钮对齐 */
+.bubble.is-clamped {
+  max-height: 360px;
+}
+
+.bubble-more {
+  margin-left: 44px;
+}
+
+/* ---------- 滚动条：细、低对比、可抓 ---------- */
+.scroll,
+.agent-list,
+.probe-list,
+.task-list {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(23, 61, 59, 0.28) transparent;
+}
+
+.scroll::-webkit-scrollbar {
+  width: 10px;
+}
+
+.scroll::-webkit-scrollbar-thumb {
+  background: rgba(23, 61, 59, 0.24);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+.scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(23, 61, 59, 0.4);
+  background-clip: padding-box;
+}
+
+/* ---------- 响应式细节 ---------- */
+@media (max-width: 720px) {
+  .mission {
+    padding: 12px;
+  }
+
+  .mission-metrics {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 16px;
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .topbar-sub {
+    display: none;
+  }
+
+  .bubble-more {
+    margin-left: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app,
+  .more-menu,
+  .adv-body,
+  .msg.streaming .bubble::after {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  .btn:hover,
+  .btn:active,
+  .send-btn:hover,
+  .send-btn:active,
+  .bubble-more:hover,
+  .bubble-more:active {
+    transform: none;
+  }
+}
+
+/* 对比度：弱化用颜色而不是整体透明度，避免灰到看不清 */
+.avatar {
+  color: #0a2321;
+}
+
+.flow-node[data-status="skipped"] {
+  opacity: 1;
+  color: #4a675d;
+  border-color: rgba(23, 61, 59, 0.28);
+  border-style: dashed;
+}
+
+.flow-node[data-status="skipped"] .fn-idx,
+.fn-idx {
+  opacity: 1;
+  font-size: 11px;
+}
+
+.fn-body small {
+  font-size: 10.5px;
+}
+
+.task-item .t-wait,
+.rail-head em {
+  color: #47645a;
+}
+
+/* 字号体系收敛：标签与元信息统一到 12px，正文 13.5px，标题 21px */
+.rail-section .rail-head span,
+.rail-fold .rail-head span,
+.rail-head em,
+.tf,
+.task-item .t-wait,
+.mission-metrics small,
+.agent-role,
+.tag,
+.tip,
+.link-btn,
+.dir-label,
+.composer-bar .fm,
+.mention,
+.menu-item {
+  font-size: 12px;
+}
+
+.task-item .t-meta {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.task-item .t-meta span {
+  white-space: nowrap;
+}
+
+.flow-node[data-status="skipped"] .fn-body small,
+.flow-node[data-status="skipped"] .fn-body b {
+  color: #4a675d;
+}
+
+.fn-body small {
+  color: var(--muted);
+}
+
+/* ================= 体验收尾：可读性 / 对比度 / 触摸友好 ================= */
+
+/* 1) 阶段条小字：0.7 透明度会把 #4a675d 混成 #80948b，
+      对比度掉到 3.2:1（axe 判 serious）。改为实色，稳定 ≥ 4.5:1 */
+.fn-body small,
+.page.night .fn-body small,
+.fn-idx,
+.page.night .fn-idx {
+  opacity: 1;
+}
+
+.fn-body small {
+  color: #3f5d53;
+}
+
+.page.night .fn-body small {
+  color: #b9d8cd;
+}
+
+.flow-node[data-status="blocked"] {
+  opacity: 1;
+  color: #3f5d53;
+  border-color: rgba(23, 61, 59, 0.45);
+}
+
+/* 2) 信息性微标签统一到 12px 下限，消除"蚂蚁字"造成的层级混乱 */
+.rail-foot,
+#connState,
+.identity-chip,
+.topbar-kicker,
+.topbar-kicker span,
+.topbar-sub,
+.pill,
+.rail-head,
+.rail-head em,
+.agent-group-head,
+.agent-group-head em,
+.quit-btn,
+.eyebrow,
+.eyebrow-id,
+.compose-label,
+.hero-side,
+.title-stamp,
+.kbd-hint,
+.adv-body,
+.composer-advanced > summary,
+.bubble-more,
+.mission-open {
+  font-size: 12px;
+}
+
+/* 英文小标签放大后收紧字距，避免挤破阶段条与顶栏 */
+.topbar-kicker {
+  letter-spacing: 0.8px;
+}
+
+.fn-body small {
+  letter-spacing: 0.2px;
+}
+
+/* 3) 移动端触摸区 ≥44×44（WCAG 2.5.8，与审计同口径） */
+@media (max-width: 480px) {
+  .btn,
+  .send-btn,
+  .icon-btn,
+  .tf,
+  .link-btn,
+  .chip,
+  .bubble-more,
+  .mission-open,
+  .dir-pick,
+  .fm,
+  .menu-item,
+  .tab,
+  .flow-node,
+  .composer-box textarea,
+  #heroInput {
+    min-height: 44px;
+  }
+
+  .icon-btn,
+  .send-btn,
+  .tf,
+  .bubble-more,
+  .mission-open,
+  .link-btn {
+    min-width: 44px;
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]) {
+    min-height: 44px;
+  }
+
+  .topbar-actions .btn {
+    font-size: 12px;
+  }
+
+  /* 触摸区放大后顶栏按钮会挤掉标题：改为「标题行 + 操作行」两行结构 */
+  .topbar {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  .topbar-kicker {
+    display: none;
+  }
+
+  .topbar-actions {
+    flex: 1 1 100%;
+    justify-content: flex-end;
+  }
+
+  .flow-node {
+    padding-top: 7px;
+    padding-bottom: 7px;
+  }
+
+  .composer-box textarea,
+  #heroInput {
+    line-height: 1.5;
+  }
+}

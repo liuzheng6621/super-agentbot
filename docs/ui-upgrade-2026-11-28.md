@@ -97,3 +97,61 @@
 - 截图：1680 / 1366 / 820 三档，覆盖任务态与空态。
 - 浏览器用例（`tests/folder-picker.test.mjs`）新增断言：任务筛选常驻、概览卡槽位存在、详情默认收起且保留展开入口。
 - 回归：`npm test`、`npm run check:syntax`、`npm run check:types` 全绿。
+
+## 9. 体验打磨：交互反馈 / 层级 / 响应式（frontend-fidelity）
+
+> 用 `frontend-fidelity` 的 CDP 审计（axe-core 4.14 + desktop/tablet/mobile 三视口探针）建立量化基线，
+> 在不改像素印刷视觉语言、不改核心内容与功能的前提下，只打磨「手感」与「可读性」。
+
+### 9.1 审计前后
+
+| 指标 | 基线 | 收尾后 |
+| --- | --- | --- |
+| axe `color-contrast` serious 节点 | 5（阶段条 `small` 仅 3.16:1） | **0** |
+| error | 6 | 1（静态几何误报，见 9.4） |
+| warn | 36 | 15 |
+| 移动端点击区 < 44×44 | 26+ | **0** |
+| console / HTTP 错误 | 0 | 0 |
+| CLS（desktop / light） | 0.043 | 0.000 |
+
+### 9.2 关键改动
+
+**交互反馈与一致性（`styles.css`）**
+- 引入 `--dur-1/2/3`、`--ease-press`、`--focus`，把按钮、筛选、菜单、链接、折叠项的
+  hover / active / focus-visible 收敛为同一套时长与位移，并统一 `outline` 焦点环。
+- `details:not([open]) > *:not(summary) { display: none !important; }`：
+  关闭状态的「选项」浮层不再生成隐藏盒子压住输入框（基线输入框重叠的根因）。
+- 菜单展开、栅格切换、流式光标、滚动条统一动效；`prefers-reduced-motion: reduce` 全量降级。
+
+**可读性与对比度**
+- 阶段条 `small` 原本 `opacity: .7`，把 `#4a675d` 混成 `#80948b`（3.16:1，axe serious）；
+  改为 `opacity: 1` + 实色 `#3f5d53`（夜间 `#b9d8cd`），稳定 ≥ 4.5:1。
+- `skipped / blocked` 阶段由整体透明度改为实色 + 虚线边框表达弱化，不再「灰到看不清」。
+- 顶栏 / 侧栏信息性微标签（连接状态、身份 chip、kicker、副标题、pill、分组标题等）
+  统一到 12px 下限；英文标签同步收紧字距，避免放大后挤破阶段条。
+- `public/app.js`：代码块 `<pre>` 可聚焦（`tabindex="0" role="group" aria-label="代码块"`），
+  「展开全文」按钮补 `aria-expanded` 并随展开状态同步。
+
+**响应式（≤480px）**
+- 按钮 / 输入框 / 筛选 / 阶段节点补 `min-height: 44px`，图标按钮补 `min-width: 44px`
+  （WCAG 2.5.8，与审计同口径）。
+- 顶栏改「标题行 + 操作行」两行：触摸区放大后不再把任务标题挤成「给…」；
+  装饰性 kicker 在窄屏让位给标题。
+- 概览卡指标保持两列，输入区行高放宽。
+
+### 9.3 回归
+
+- `npm run check:syntax` 109/109、`npm run check:types` 48 文件、
+  `node tests/run-tests.mjs unit` 52 个测试文件全部通过。
+- 截图：`docs/ux-final-desktop.png`（1440×900）、`docs/ux-final-mobile.png`（390×844）。
+
+### 9.4 已知非缺陷项
+
+- `element-overlap: button.bubble-more / textarea`：审计用 `getBoundingClientRect` 做静态相交，
+  而「展开全文」按钮位于 `.scroll` 滚动容器裁剪区之外（y = 809–834，容器底边 ≈ 806），
+  视觉上被裁剪且被不透明 composer 覆盖，桌面截图已确认无真实重叠。
+  属工具对滚动容器的静态几何误报，未为刷绿而改动布局。
+- `font-too-small` 15 条：该控制台有意保留紧凑密度，正文内 171 处 <12px 元素属内容层
+  （代码块、表格、元信息）；已把 UI chrome 的信息性文字统一到 12px，装饰性微标签保留设计尺寸。
+- dark 主题 CLS 0.15：审计在运行时注入 `.page.night` 触发主题重排，非页面运行时抖动
+  （light 桌面 CLS 0.000）。
