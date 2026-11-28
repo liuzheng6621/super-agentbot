@@ -20,6 +20,7 @@ import {
   AUTOMATION_STATUS_LABEL,
 } from "./lib/status.js";
 import { decisionItems, ddClip } from "./lib/decisions.js";
+import { buildTimeline, deriveLanes, replaySnapshot } from "./lib/swimlane.js";
 import {
   ROLE_ORDER,
   CONSTRAINT_LIBRARY,
@@ -82,6 +83,9 @@ const S = {
   overview: null,
   graph: null,
   replay: null,
+  swimlaneReplayMs: null,
+  swimlanePlaying: false,
+  swimlaneTimer: null,
   overviewLoading: false,
   workspaceDiffPath: "",
   workspaceDiff: null,
@@ -2011,6 +2015,139 @@ function renderWorkspaceReplay() {
   $("#wcReplay").innerHTML = workspaceConsoleReplayHtml();
 }
 
+function swimlanePercent(value, total) {
+  return Math.min(100, Math.max(0, (value / Math.max(1, total)) * 100));
+}
+
+function swimlaneSegmentHtml(segment, timeline) {
+  const left = swimlanePercent(segment.start - timeline.startMs, timeline.totalMs);
+  const width = Math.max(0.7, swimlanePercent(segment.end - segment.start, timeline.totalMs));
+  const countText = segment.count > 1 ? ` ×${segment.count}` : "";
+  return `<div class="wc-swimlane-block" style="--block-start:${left.toFixed(3)}%;--block-width:${width.toFixed(3)}%" data-kind="${escapeHtml(
+    segment.kind,
+  )}" data-done="${segment.done}" tabindex="0">
+      <b>${escapeHtml(segment.label + countText)}</b>
+      <span>${escapeHtml(segment.preview || "")}</span>
+    </div>`;
+}
+
+function renderWorkspaceSwimlane() {
+  const countNode = $("#wcSwimlaneCount");
+  const root = $("#wcSwimlane");
+  if (!countNode || !root) return;
+  const task = S.task;
+  const messages = task?.messages || [];
+  countNode.textContent = pad2(messages.length);
+  if (!messages.length) {
+    stopSwimlanePlayback();
+    root.innerHTML = '<p class="wc-empty-line">任务还没有可分析的消息。</p>';
+    return;
+  }
+  const { lanes } = deriveLanes({ messages, agents: S.agents });
+  const timeline = buildTimeline({ messages, agents: S.agents });
+  const atMs = Number.isFinite(S.swimlaneReplayMs)
+    ? Math.min(timeline.endMs, Math.max(timeline.startMs, S.swimlaneReplayMs))
+    : timeline.endMs;
+  S.swimlaneReplayMs = atMs;
+  const snapshot = replaySnapshot({ messages, agents: S.agents }, atMs);
+  root.innerHTML = `
+    <div class="wc-swimlane-summary">
+      <div><b>${escapeHtml(String(timeline.maxParallel))}</b><span>MAX PARALLEL</span></div>
+      <div><b>${escapeHtml(String(lanes.length))}</b><span>LANES</span></div>
+      <div><b>${escapeHtml(String(timeline.milestones.length))}</b><span>MILESTONES</span></div>
+      <div><b>${escapeHtml(timeline.longestIdle ? `${Math.round((timeline.longestIdle.end - timeline.longestIdle.start) / 1000)}s` : "0s")}</b><span>IDLE PEAK</span></div>
+    </div>
+    <div class="wc-swimlane-grid" id="wcSwimlaneGrid" style="--lane-count:${lanes.length}">
+      ${lanes
+        .map(
+          (lane) => `<div class="wc-swimlane-row" data-lane-id="${escapeHtml(lane.id)}" style="--lane-c:${escapeHtml(lane.color)}">
+          <div class="wc-swimlane-name"><b>${escapeHtml(lane.label)}</b><span>${escapeHtml(lane.role)}</span></div>
+          <div class="wc-swimlane-track" aria-label="${escapeHtml(`${lane.label} 时间块`)}">${
+          lane.segments.map((segment) => swimlaneSegmentHtml(segment, timeline)).join("")
+          }</div>
+        </div>`,
+        )
+        .join("")}
+      <div class="wc-swimlane-milestones">
+        ${timeline.milestones
+          .map(
+            (milestone) => `<span style="--block-start:${swimlanePercent(
+              milestone.at - timeline.startMs,
+              timeline.totalMs,
+            ).toFixed(3)}%">${escapeHtml(milestone.label)}</span>`,
+          )
+          .join("")}
+      </div>
+    </div>
+    <div class="wc-swimlane-player">
+      <button class="btn btn-ghost sm" id="wcSwimlanePlay" type="button" aria-label="${escapeHtml(
+        S.swimlanePlaying ? "暂停回放" : "播放回放",
+      )}">${S.swimlanePlaying ? "暂停" : "播放"}</button>
+      <input class="wc-swimlane-scrubber" id="wcSwimlaneScrubber" type="range"
+        min="${timeline.startMs}" max="${timeline.endMs}" step="100" value="${atMs}"
+        aria-label="时间回放位置" role="slider" aria-valuemin="${timeline.startMs}"
+        aria-valuemax="${timeline.endMs}" aria-valuenow="${atMs}" />
+      <span class="wc-swimlane-time">${escapeHtml(fmtTime(atMs))}</span>
+    </div>
+    <div class="wc-swimlane-live" id="wcSwimlaneLive" aria-live="polite">
+      ${snapshot.lanes
+        .map(
+          (lane) => `<div class="wc-swimlane-status" style="--lane-c:${escapeHtml(lane.color)}">
+          <b>${escapeHtml(lane.label)}</b>
+          <span>${escapeHtml(lane.active ? `${lane.active.label} · ${lane.active.count}` : `${lane.completed} 完成 · ${lane.upcoming} 等待`)}</span>
+        </div>`,
+        )
+        .join("")}
+    </div>`;
+}
+
+function stopSwimlanePlayback() {
+  if (S.swimlaneTimer) {
+    clearInterval(S.swimlaneTimer);
+    S.swimlaneTimer = null;
+  }
+  S.swimlanePlaying = false;
+}
+
+function seekSwimlane(value) {
+  const timeline = S.task ? buildTimeline({ messages: S.task.messages || [], agents: S.agents }) : null;
+  if (!timeline || !timeline.totalMs) return;
+  S.swimlaneReplayMs = Math.min(timeline.endMs, Math.max(timeline.startMs, Number(value)));
+  renderWorkspaceSwimlane();
+}
+
+function playSwimlane() {
+  const timeline = S.task ? buildTimeline({ messages: S.task.messages || [], agents: S.agents }) : null;
+  if (!timeline?.totalMs) return;
+  const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
+  if (reducedMotion) {
+    seekSwimlane((S.swimlaneReplayMs || timeline.startMs) + 1000);
+    return;
+  }
+  if (S.swimlanePlaying) {
+    stopSwimlanePlayback();
+    renderWorkspaceSwimlane();
+    return;
+  }
+  if (!Number.isFinite(S.swimlaneReplayMs) || S.swimlaneReplayMs >= timeline.endMs) {
+    S.swimlaneReplayMs = timeline.startMs;
+  }
+  S.swimlanePlaying = true;
+  renderWorkspaceSwimlane();
+  S.swimlaneTimer = setInterval(() => {
+    const current = buildTimeline({ messages: S.task?.messages || [], agents: S.agents });
+    if (!current?.totalMs) return stopSwimlanePlayback();
+    const next = (S.swimlaneReplayMs || current.startMs) + 1000;
+    if (next >= current.endMs) {
+      S.swimlaneReplayMs = current.endMs;
+      stopSwimlanePlayback();
+    } else {
+      S.swimlaneReplayMs = next;
+    }
+    renderWorkspaceSwimlane();
+  }, 500);
+}
+
 async function loadWorkspaceOverview({ force = false } = {}) {
   if (S.overviewLoading && !force) return;
   S.overviewLoading = true;
@@ -2086,6 +2223,7 @@ function renderWorkspaceConsole() {
     S.workspacePreviewData = null;
     S.graph = null;
     S.replay = null;
+    stopSwimlanePlayback();
     S.workspaceDiffPath = "";
     S.workspaceDiff = null;
     $("#wcTitle").textContent = "未选择任务";
@@ -2103,6 +2241,7 @@ function renderWorkspaceConsole() {
     $("#wcAudit").innerHTML = '<p class="wc-empty-line">选择任务后显示工具审计。</p>';
     $("#wcGraph").innerHTML = '<p class="wc-empty-line">选择任务后显示 DAG。</p>';
     $("#wcReplay").innerHTML = '<p class="wc-empty-line">选择任务后显示时间回放。</p>';
+    $("#wcSwimlane").innerHTML = '<p class="wc-empty-line">选择任务后显示成员泳道。</p>';
     $("#wcContext").innerHTML = "";
     $("#wcPolicy").innerHTML = "";
     $("#wcSummary").innerHTML = "";
@@ -2118,6 +2257,7 @@ function renderWorkspaceConsole() {
     $("#wcAuditCount").textContent = "00";
     $("#wcGraphCount").textContent = "00";
     $("#wcReplayCount").textContent = "00";
+    $("#wcSwimlaneCount").textContent = "00";
     $("#wcGraphSummary").innerHTML = "";
     renderWorkspaceConsoleFile();
     return;
@@ -2188,7 +2328,7 @@ function renderWorkspaceConsole() {
 }
 
 function setWorkspaceConsoleView(view, { render = true } = {}) {
-  const next = ["file", "execution", "plan", "messages", "audit", "diff", "overview", "graph", "replay"].includes(view) ? view : "file";
+  const next = ["file", "execution", "plan", "messages", "audit", "diff", "overview", "graph", "replay", "swimlane"].includes(view) ? view : "file";
   S.workspaceConsoleView = next;
   $$("#wcViewTabs [data-wc-view]").forEach((button) => {
     button.classList.toggle("active", button.dataset.wcView === next);
@@ -2202,6 +2342,7 @@ function setWorkspaceConsoleView(view, { render = true } = {}) {
   $("#wcOverviewView").hidden = next !== "overview";
   $("#wcGraphView").hidden = next !== "graph";
   $("#wcReplayView").hidden = next !== "replay";
+  $("#wcSwimlaneView").hidden = next !== "swimlane";
   const stateLabel = {
     execution: "按成员查看工序、依赖与运行事件",
     plan: `计划版本 V${S.task?.planVersion || 0} · 快照不可变`,
@@ -2211,6 +2352,7 @@ function setWorkspaceConsoleView(view, { render = true } = {}) {
     overview: "跨任务状态、当前工序与阻塞原因",
     graph: "按依赖分层展示可并行工序",
     replay: "按时间合并消息、事件与文件变更",
+    swimlane: "按成员观察并行、等待与质量门位置",
   }[next];
   if (stateLabel) $("#wcFileState").textContent = stateLabel;
   else renderWorkspaceConsoleFile();
@@ -2218,6 +2360,7 @@ function setWorkspaceConsoleView(view, { render = true } = {}) {
   if (render && next === "overview") loadWorkspaceOverview({ force: true });
   if (render && next === "graph") loadWorkspaceGraph();
   if (render && next === "replay") loadWorkspaceReplay();
+  if (render && next === "swimlane") renderWorkspaceSwimlane();
 }
 
 async function loadWorkspaceConsoleDiff() {
@@ -5532,6 +5675,18 @@ function bind() {
   $("#wcOverviewRefresh").addEventListener("click", () => loadWorkspaceOverview({ force: true }));
   $("#wcGraphRefresh").addEventListener("click", loadWorkspaceGraph);
   $("#wcReplayRefresh").addEventListener("click", loadWorkspaceReplay);
+  $("#wcViewTabs").addEventListener("keydown", (e) => {
+    if (e.target.closest('[data-wc-view="swimlane"]') && (e.key === "Enter" || e.key === " ")) {
+      e.preventDefault();
+      setWorkspaceConsoleView("swimlane");
+    }
+  });
+  $("#wcSwimlane").addEventListener("click", (e) => {
+    if (e.target.id === "wcSwimlanePlay") playSwimlane();
+  });
+  $("#wcSwimlane").addEventListener("input", (e) => {
+    if (e.target.id === "wcSwimlaneScrubber") seekSwimlane(e.target.value);
+  });
   $("#wcOverviewList").addEventListener("click", async (e) => {
     const row = e.target.closest("[data-task-id]");
     if (!row) return;
