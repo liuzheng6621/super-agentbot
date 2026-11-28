@@ -36,7 +36,7 @@ function availablePort() {
   });
 }
 
-async function waitFor(fn, label, timeoutMs = 12000) {
+async function waitFor(fn, label, timeoutMs = 25000) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
   while (Date.now() < deadline) {

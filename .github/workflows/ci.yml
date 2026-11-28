@@ -40,6 +40,11 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
+      - name: Set up Chrome (Linux)
+        id: chrome
+        if: runner.os == 'Linux'
+        uses: browser-actions/setup-chrome@v1
+
       - name: Prepare log directory
         run: mkdir -p artifacts
 
@@ -58,8 +63,14 @@ jobs:
           npm run test:coverage 2>&1 | tee "artifacts/coverage-${RUNNER_OS}-node-${{ matrix.node }}.log"
 
       - name: Browser availability
+        env:
+          AGENTFORGE_BROWSER_PATH: ${{ runner.os == 'Linux' && steps.chrome.outputs.chrome-path || '' }}
         run: |
           set -e
+          if [ -n "$AGENTFORGE_BROWSER_PATH" ] && [ -x "$AGENTFORGE_BROWSER_PATH" ]; then
+            echo "browser: $AGENTFORGE_BROWSER_PATH"
+            exit 0
+          fi
           found=""
           for candidate in \
             "/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" \
@@ -80,6 +91,9 @@ jobs:
 
       - name: Test
         if: always()
+        env:
+          # Linux 用 setup-chrome 下载的 Chrome；Windows/macOS 走 Edge / Chrome 候选路径。
+          AGENTFORGE_BROWSER_PATH: ${{ runner.os == 'Linux' && steps.chrome.outputs.chrome-path || '' }}
         run: |
           set -o pipefail
           npm test 2>&1 | tee "artifacts/test-${RUNNER_OS}-node-${{ matrix.node }}.log"

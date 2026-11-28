@@ -23,9 +23,11 @@ if (!files.length) {
 
 // 每个测试文件独立数据目录：分片与租约都以数据目录为边界，
 // 共享目录会让不同用例看到彼此的任务，产生跨文件假失败。
+const cpuCount = os.cpus()?.length || 2;
+const defaultConcurrency = Math.max(2, Math.min(4, cpuCount - 1));
 const concurrency = Math.max(
   1,
-  Math.min(8, Number(process.env.AGENTFORGE_TEST_CONCURRENCY) || 4),
+  Math.min(8, Number(process.env.AGENTFORGE_TEST_CONCURRENCY) || defaultConcurrency),
 );
 
 function dataDirFor(file) {
