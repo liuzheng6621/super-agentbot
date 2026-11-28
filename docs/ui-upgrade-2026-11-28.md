@@ -155,3 +155,65 @@
   （代码块、表格、元信息）；已把 UI chrome 的信息性文字统一到 12px，装饰性微标签保留设计尺寸。
 - dark 主题 CLS 0.15：审计在运行时注入 `.page.night` 触发主题重排，非页面运行时抖动
   （light 桌面 CLS 0.000）。
+
+## 10. 委托台：从「监控台」到「委托台」（第二轮）
+
+> 前两轮把控制台做对、做干净，但范式没变：仍是用户盯着 AI 干活、自己从过程里翻结论。
+> 本轮换掉前提：系统主动收敛过程，只在需要人拍板时打扰。
+
+### 10.1 设计目标
+
+| 从 | 到 |
+| --- | --- |
+| 首屏 = 消息流 / 概览指标 | 首屏 = 需要你拍板的事 |
+| 用户自己找结论 | 系统把结论与待办推送到面前 |
+| 过程越复杂，信息越多 | 复杂度留在后台，按需展开 |
+| 交互 = 滚动 + 逐层点开 | 交互 = 一次决策 + 随时追溯 |
+
+卖点从「看得清」变成「不用看」。
+
+### 10.2 决策信号（不新增后端字段）
+
+`public/lib/decisions.js` 把状态里已有的信号聚合为最多 3 张卡，纯函数、可单测：
+
+| 信号 | 来源 | 动作 |
+| --- | --- | --- |
+| 成本待确认 | `pendingConfirmation` + `costEstimate` | 确认开工 → `POST /api/tasks/:id/confirm`；查看估算 → 展开详情 |
+| 命令待审批 | `S.approvals` 中 `pending` | 批准/拒绝 → `PATCH /api/approvals/:id` |
+| 质量门失败 | `quality.status === "failed"` | 查看失败详情 → 展开详情 |
+| 无测试入口 | `quality.status === "no-test-entry"` | 查看工序 |
+| 方案降级裁决 / 多样性不足 | `debate.decision` + `diversity` | 查看方案对比 → 切到讨论 tab |
+| 同模型自审 | `quality.selfReview` | 查看评审 |
+| 等待原因 | `waitingReason` | 查看链路 |
+
+所有动作复用已有 API 或纯导航，不引入新后端能力，也不承诺不存在的操作。
+
+### 10.3 界面结构
+
+- **决策态**：标题「需要你拍板 N 件」+ 最多 3 张卡（黄 / 青 / 红语义色、橙色主按钮），容器硬投影切为橙色形成视觉焦点。
+- **静默态**：无决策项时只显示「无需你介入」与一句结论，不铺陈过程。
+- **后台进度**：5 段阶段条（已完成 / 进行中 / 异常 / 待执行）+ 用时、工序、改动文件、Tokens 四项指标 + 「执行详情 →」。
+- **状态驱动情绪**：决策标记与进行中阶段条做 1.8s 呼吸动效，`prefers-reduced-motion` 全量降级。
+- `#missionCard` 的 id 保持不变（浏览器用例断言不破），class 由 `.mission` 改为 `.decision-desk`。
+
+### 10.4 响应式
+
+≤720px 指标改两列、标题缩到 16px；≤480px 决策卡单列、按钮 ≥44×44，顶栏保持「标题行 + 操作行」两行。
+
+### 10.5 验收
+
+- 新增 `public/lib/decisions.js`（沿用 W16 的前端 ESM 拆分约定）与 `tests/decisions.test.mjs`
+  （10 个用例覆盖 7 类信号、优先级顺序、三卡上限、截断与辅助函数）。
+- `check:syntax` 111/111、`check:types` 49 文件、`run-tests.mjs unit` 53 个测试文件全绿。
+- 前端保真审计（light 三视口）：axe 违规 0、console / HTTP 错误 0、desktop CLS 0.000，
+  warn 15（与上一轮持平，均为内容层紧凑排版的 `font-too-small`）。
+- 截图：`docs/ux-final-dd-desktop.png`（静默态）、`docs/ux-final-dd-decision.png`（决策态样例注入）、
+  `docs/ux-final-dd-mobile.png` / `docs/ux-final-dd-mobile-decision.png`（移动端）。
+- CDP 验证：注入决策态后点击「查看估算」，`insp-collapsed` 正确移除，事件委托生效。
+
+### 10.6 已知非缺陷项
+
+`element-overlap`（本轮 tablet：`<button.bubble-more>` 与 `<button.dir-pick>`）：审计用
+`getBoundingClientRect` 做静态相交，而「展开全文」按钮位于 `.scroll` 滚动容器裁剪区之外，视觉上被裁剪
+且被不透明 composer 覆盖。上一轮同一误报出现在 desktop，本轮因首屏高度变化转移到 tablet，说明是工具对
+滚动容器的固有局限而非布局缺陷；截图已确认无真实重叠，未为刷绿改动结构。
