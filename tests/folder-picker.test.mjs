@@ -342,6 +342,10 @@ async function startEdge() {
     [
       '--headless=new',
       '--disable-gpu',
+      // CI 容器里 Chrome 的沙箱与 /dev/shm 不可用，必须显式关闭。
+      '--no-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-setuid-sandbox',
       '--no-first-run',
       '--no-default-browser-check',
       `--user-data-dir=${profile}`,

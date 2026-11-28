@@ -77,6 +77,10 @@ const workers = Array.from({ length: Math.min(concurrency, queue.length) }, asyn
       const passMatch = result.output.match(/^# pass (\d+)/m);
       console.log(`[test] ok ${file} (${passMatch ? passMatch[1] : '?'} tests)`);
     } else {
+      // GitHub Actions 会把 ::error:: 提取成注解，失败文件在运行页就能看到。
+      if (process.env.GITHUB_ACTIONS === 'true') {
+        console.error(`::error file=${file}::测试文件失败 ${file}`);
+      }
       console.error(`[test] FAIL ${file}\n${result.output}`);
     }
   }
