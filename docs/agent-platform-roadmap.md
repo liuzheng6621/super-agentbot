@@ -271,7 +271,7 @@ M3 不包含：自由 shell、Agent 自审批、MCP 写工具、Provider fill-fi
 
 ## 下一阶段 backlog
 
-> OpenBot 融合计划的执行拆分与验收标准见 [agentforge-openbot-plan.md](agentforge-openbot-plan.md)；当前缺陷与验收进度见 [fix-plan.md](fix-plan.md)。本表只保留能力边界和尚未实施项，不重复给出另一套优先级。
+> OpenBot 融合计划的执行拆分与验收标准见 [agentforge-openbot-plan.md](agentforge-openbot-plan.md)；当前缺陷与验收进度见 [fix-plan.md](fix-plan.md)。2026-11-28 安全复审后的执行计划见 [hardening-plan-2026-11-28.md](hardening-plan-2026-11-28.md) W1-W20，安全、成本、持久化和工程化条目以该文件为准。本表只保留能力边界和尚未实施项，不重复给出另一套优先级。
 
 以下条目来自本轮与 OpenHands / OpenBot 能力对照，M3-M5 已完成项和已完成的 agent-web 开发期验收已移出：
 
