@@ -2,8 +2,23 @@
    AGENTFORGE · 前端逻辑
    ========================================================= */
 
-const $ = (sel, root = document) => root.querySelector(sel);
-const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+import {
+  $,
+  $$,
+  escapeHtml,
+  pad2,
+  fmtMs,
+  fmtTime,
+  fmtBytes,
+  initials,
+} from "./lib/format.js";
+import {
+  STATUS_TEXT,
+  ROLE_META,
+  STEP_STATUS_TEXT,
+  PRIORITY_TEXT,
+  AUTOMATION_STATUS_LABEL,
+} from "./lib/status.js";
 
 const S = {
   agents: [],
@@ -103,33 +118,6 @@ function toast(text, type = "") {
     setTimeout(() => node.remove(), 220);
   }, 2400);
 }
-
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-const initials = (name = "?") => (name.replace(/[^\w\u4e00-\u9fa5]/g, "").slice(0, 2) || "AI").toUpperCase();
-
-const fmtTime = (ts) => {
-  const d = new Date(ts || Date.now());
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-};
-
-const fmtBytes = (n) => (n > 1024 ? `${(n / 1024).toFixed(1)}K` : `${n || 0}B`);
-
-const fmtMs = (ms) => {
-  if (!ms) return "—";
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
-};
-
-const pad2 = (n) => String(n).padStart(2, "0");
 
 function authHeaders(base = {}) {
   const headers = { ...base };
@@ -486,37 +474,6 @@ function renderHeroStats() {
 
 /* ---------------- 渲染：任务列表 ---------------- */
 
-const STATUS_TEXT = {
-  idle: "待命",
-  queued: "排队中",
-  running: "协作中",
-  stopping: "停止中",
-  done: "已交付",
-  stopped: "已停止",
-  error: "出错",
-  needs_attention: "待人工确认",
-};
-
-const ROLE_META = {
-  planner: { short: "规划", order: 1 },
-  architect: { short: "架构", order: 2 },
-  coder: { short: "实现", order: 3 },
-  tester: { short: "测试", order: 4 },
-  reviewer: { short: "评审", order: 5 },
-};
-
-const STEP_STATUS_TEXT = {
-  pending: "等待上游",
-  queued: "排队中",
-  running: "执行中",
-  retrying: "重试中",
-  done: "完成",
-  error: "失败",
-  blocked: "上游中断",
-  stopped: "已停止",
-  skipped: "已跳过",
-};
-
 function isDegradedDecision(decision, debateStatus = "") {
   return (
     !!decision?.degraded ||
@@ -560,12 +517,6 @@ function renderTasks() {
   }
   renderHeroStats();
 }
-
-const PRIORITY_TEXT = {
-  high: "高",
-  normal: "普通",
-  low: "低",
-};
 
 const TASK_SUMMARY_FIELDS = [
   "id",
@@ -2830,20 +2781,6 @@ function setFlowMode(mode) {
 /* ---------------- 渲染总入口 ---------------- */
 
 /* ---------------- 定时任务 ---------------- */
-
-const AUTOMATION_STATUS_LABEL = {
-  idle: "待运行",
-  paused: "已暂停",
-  scheduled: "已排队",
-  running: "运行中",
-  waiting: "等待上一轮",
-  "event-waiting": "等待事件",
-  woken: "事件已唤醒",
-  done: "已完成",
-  failed: "失败",
-  "retry-waiting": "等待重试",
-  stopped: "已停止",
-};
 
 function fmtDateTime(ts) {
   if (!ts) return "—";

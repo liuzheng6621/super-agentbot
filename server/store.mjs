@@ -32,6 +32,7 @@ import {
   taskLeaseIsLive,
 } from './leases.mjs';
 import { resolveParentSpanId, safeSpanId } from './events.mjs';
+import { removeTaskSpill } from './gc.mjs';
 import { normalizeExecutionPolicy } from './cli-policy.mjs';
 import { normalizeRoots, withinAnyRoot } from './path-roots.mjs';
 import { normalizeMcpServer } from './mcp.mjs';
@@ -2351,6 +2352,8 @@ export class Store {
     if (!task) return false;
     this.db.tasks = this.db.tasks.filter((t) => t.id !== id);
     removeWorktree(task);
+    // 任务删掉后它的 spill 目录不再有引用；共享附件交给引用扫描处理。
+    removeTaskSpill(id);
     // 外部目录是用户自己的项目，删任务不能连目录一起删
     const own = path.resolve(task.workspace).startsWith(path.resolve(WORKSPACE_DIR) + path.sep);
     if (!task.external && own) {

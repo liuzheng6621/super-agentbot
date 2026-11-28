@@ -108,7 +108,7 @@ AgentForge 当前定位是**单机 / 团队服务基线**：一个 Node.js 进�
 **工程**
 
 - 📦 **零依赖、零构建** — 纯 Node.js + 原生 ESM，`node server/index.mjs` 就起来，前端不打包、不装包管理器。
-- ✅ **统一验证入口** — `npm test` 统一设置隔离数据目录后运行真实测试；`npm run check:syntax` 检查全部 `.js/.mjs`。覆盖范围按领域列在下方[测试](#测试)章节。
+- ✅ **统一验证入口** — `npm test` 统一设置隔离数据目录后运行真实测试；`npm run check:syntax` 检查全部 `.js/.mjs`；`npm run check:types` 是零依赖 JSDoc/语法门（`@param` 必须匹配签名、返回值必须带类型）；`npm run test:coverage` 对核心模块跑覆盖率并强制 lines ≥ 40%、functions ≥ 35%。覆盖范围按领域列在下方[测试](#测试)章节。
 
 ## 快速开始
 
@@ -496,6 +496,8 @@ Token 在界面右侧「统计」面板，或 `GET /api/hook-token`（需 `opera
 ```bash
 npm test
 npm run check:syntax
+npm run check:types
+npm run test:coverage
 ```
 
 测试按领域组织，数量随用例增减，不在 README 固定：
@@ -511,7 +513,7 @@ npm run check:syntax
 | 可观测性与集成 | trace / span、OTLP、运行记录导出与脱敏、Automation 调度 / 重试 / 幂等 / 事件等待、agent-web 可选夹具 |
 | CLI 适配 | argv / stdin、Windows `.cmd` 参数、命令解析缓存、Provider Profile 注入、自动回退、团队体检 |
 
-CI 在 Ubuntu / Windows × Node 20 / 22 上运行 `npm test` 和 `npm run check:syntax`。真实外部 CLI 的安装、授权和完整交付仍需单独的环境验收。
+CI 在 Ubuntu / Windows × Node 20 / 22 上运行 `npm test`、`npm run check:syntax` 和 `npm run check:types`；Ubuntu / Node 22 额外跑覆盖率门。浏览器用例在 CI 中不允许跳过（`AGENTFORGE_REQUIRE_BROWSER_TESTS=1`，并预检 Edge / Chrome 是否存在），本地缺少浏览器时才允许显式跳过。真实外部 CLI 的安装、授权和完整交付仍需单独的环境验收。
 
 ## 已知边界
 

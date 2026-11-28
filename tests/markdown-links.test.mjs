@@ -4,11 +4,19 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const source = fs.readFileSync(new URL('../public/app.js', import.meta.url), 'utf8');
-const start = source.indexOf('function escapeHtml');
+const start = source.indexOf('function safeMarkdownHref');
 const end = source.indexOf('const splitRow', start);
 assert.ok(start >= 0 && end > start, 'public/app.js Markdown helpers must remain extractable');
 
-const context = vm.createContext({ URL });
+// escapeHtml 已抽到 public/lib/format.js；这里提供等价实现，保持切片可独立执行。
+const escapeHtml = (value) =>
+  String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+const context = vm.createContext({ URL, escapeHtml });
 vm.runInContext(source.slice(start, end), context);
 const { inlineMd } = context;
 

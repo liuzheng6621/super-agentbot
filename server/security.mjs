@@ -265,6 +265,7 @@ function requiredScope(method, pathname) {
   if (pathname === '/api/hook-token' || pathname === '/api/hook-token/rotate') {
     return 'operator:admin';
   }
+  if (pathname === '/api/maintenance/gc') return 'operator:admin';
   if (
     pathname === '/api/probe' ||
     pathname === '/api/team/ensure' ||

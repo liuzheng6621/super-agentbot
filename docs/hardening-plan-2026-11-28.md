@@ -43,11 +43,11 @@
 | W10 | P0 | 回环与无 Token 加固 | `server/security.mjs`、`server/index.mjs` | 非 GET 无 Token 请求必须同源 `Origin + Sec-Fetch-Site`；Host 校验拒绝 DNS rebinding；insecure remote 拒绝 `operator:admin` 且不得授予 owner；覆盖 CSRF / rebinding 场景。 | 已完成（`tests/http-hardening.test.mjs`） |
 | W11 | P1 | Spill 与附件根目录校验 | `server/fs.mjs`、`server/attachments.mjs` | locator 必须解析到 `spillRoot()` / `attachmentRoot()` 内；符号链接逃逸拒绝；哈希与大小校验保留。 | 已完成（`tests/spill-root.test.mjs`） |
 | W12 | P1 | Hook Token 规范化 | `server/index.mjs`、`server/store.mjs` | 支持 header Token；路径 Token 仅兼容模式；可轮换或禁用；GET 降级为无敏感摘要；`hookToken` 从 `/api/state` 剔除。 | 已完成（`tests/hook-token.test.mjs`） |
-| W13 | P2 | 附件与 spill GC | `server/attachments.mjs`、`server/fs.mjs`、`server/store.mjs` | 基于任务删除级联或保留期加引用扫描；共享内容寻址文件只按引用计数清理；GC 后仍可读回的回归测试。 | 未开始 |
-| W14 | P2 | 通用 API 限流 | `server/index.mjs`、`server/security.mjs` | 认证失败、任务创建、FS 浏览有 per-principal / per-IP 固定窗口或 token bucket；超限 429 且审计可见。 | 未开始 |
-| W15 | P2 | CI 浏览器必跑 | `.github/workflows/ci.yml`、`tests/` | CI 安装真实浏览器；浏览器用例跳过仅在本地允许，CI 跳过失败；至少覆盖登录、状态和工作区入口 DOM 断言。 | 未开始 |
-| W16 | P2 | 前端最小拆分 | `public/app.js` | 按低风险 feature 拆 2-3 个 ESM 模块；不引入构建；行为与现有测试保持不变。 | 未开始 |
-| W17 | P2 | 类型与覆盖率门槛 | `package.json`、`tests/` | JSDoc `tsc --allowJs --checkJs --noEmit` 或等价零运行时方案；核心模块覆盖率下限可配置且 CI 可见；引入 devDependency 需说明理由。 | 未开始 |
+| W13 | P2 | 附件与 spill GC | `server/attachments.mjs`、`server/fs.mjs`、`server/store.mjs` | 基于任务删除级联或保留期加引用扫描；共享内容寻址文件只按引用计数清理；GC 后仍可读回的回归测试。 | 已完成（`tests/storage-gc.test.mjs`） |
+| W14 | P2 | 通用 API 限流 | `server/index.mjs`、`server/security.mjs` | 认证失败、任务创建、FS 浏览有 per-principal / per-IP 固定窗口或 token bucket；超限 429 且审计可见。 | 已完成（`tests/rate-limit.test.mjs`） |
+| W15 | P2 | CI 浏览器必跑 | `.github/workflows/ci.yml`、`tests/` | CI 安装真实浏览器；浏览器用例跳过仅在本地允许，CI 跳过失败；至少覆盖登录、状态和工作区入口 DOM 断言。 | 已完成（`tests/folder-picker.test.mjs`（浏览器必跑）） |
+| W16 | P2 | 前端最小拆分 | `public/app.js` | 按低风险 feature 拆 2-3 个 ESM 模块；不引入构建；行为与现有测试保持不变。 | 已完成（`public/lib/format.js`、`public/lib/status.js`） |
+| W17 | P2 | 类型与覆盖率门槛 | `package.json`、`tests/` | JSDoc `tsc --allowJs --checkJs --noEmit` 或等价零运行时方案；核心模块覆盖率下限可配置且 CI 可见；引入 devDependency 需说明理由。 | 已完成（`npm run check:types`、`npm run test:coverage`） |
 | W18 | P2 | 文档与仓库卫生 | `README.md`、`docs/` | Gitee / GitHub 地址分流正确；README 首屏定位、快速开始和边界；数字口径标环境或区间；品牌大小写统一。 | 未开始 |
 | W19 | P2 | 辩论角度覆盖接入 | `server/debate-analysis.mjs`、`server/orchestrator.mjs`、`public/app.js` | 检测侧已完成（`proposalDiversity` 输出 `angleCoverage` 与 `angle-coverage-low`，`tests/debate.test.mjs:156` 有断言）；本项只做消费侧：警告写入任务事件并在 UI 可见，重复提案扣分补独立断言，不重复实现检测逻辑。 | 未开始 |
 | W20 | P2 | Automation await_event 跨实例加固 | `server/store.mjs`、`server/automation-runner.mjs` | durable `await_event` 的等待、eventId 匹配、幂等唤醒、取消、对账和租约互斥已完成，不重做；本项只补 delta：跨实例 claim 冲突可恢复、唤醒事件身份不可重放的显式测试、API 与 UI 状态一致。 | 未开始 |

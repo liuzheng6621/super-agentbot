@@ -16,7 +16,7 @@ import { withinRoot } from './path-roots.mjs';
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 /** 跟随 AGENTFORGE_DATA_DIR（测试用临时目录），否则落在仓库 data/spill。 */
-function spillRoot() {
+export function spillRoot() {
   const base = process.env.AGENTFORGE_DATA_DIR
     ? path.resolve(process.env.AGENTFORGE_DATA_DIR)
     : path.join(REPO_ROOT, 'data');

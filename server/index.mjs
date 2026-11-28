@@ -67,6 +67,8 @@ import {
   validateListenSecurity,
 } from './security.mjs';
 import { normalizeRoots, withinAnyRoot } from './path-roots.mjs';
+import { gcStorage } from './gc.mjs';
+import { FixedWindowLimiter } from './rate-limit.mjs';
 import {
   automationRunnerSnapshot,
   automationSnapshot,
@@ -98,6 +100,36 @@ const PORT = Number(process.env.PORT || 8787);
 // 本地桌面场景只监听回环；被托管平台注入 PORT 时（容器 / 云沙箱）需要对外绑定
 const HOST = process.env.HOST || (process.env.PORT ? '0.0.0.0' : '127.0.0.1');
 const SECURITY = resolveSecurityConfig(process.env);
+// 固定窗口限流：认证失败按 IP，任务创建与目录浏览按主体。
+const RATE_LIMITS = {
+  auth: new FixedWindowLimiter({ windowMs: 60_000, max: 10 }),
+  tasks: new FixedWindowLimiter({ windowMs: 60_000, max: 30 }),
+  fs: new FixedWindowLimiter({ windowMs: 60_000, max: 60 }),
+};
+
+function enforceRateLimit(res, limiter, key, limit, meta = {}) {
+  const result = limiter.hit(key, { limit });
+  if (result.ok) return true;
+  store.recordSecurityEvent({
+    type: 'api.rate_limited',
+    method: meta.method || '',
+    path: meta.path || '',
+    requestId: meta.requestId || '',
+    remoteAddress: meta.remoteAddress || '',
+    origin: meta.origin || '',
+    reason: `固定窗口超限（${result.count}/${result.limit}）`,
+    tenantId: meta.tenantId || 'default',
+    actorId: meta.actorId || '',
+    actorKind: meta.actorKind || '',
+  });
+  res.setHeader('Retry-After', String(Math.max(1, Math.ceil(result.retryAfterMs / 1000))));
+  json(res, 429, {
+    error: '请求过于频繁，请稍后重试',
+    code: 'rate-limited',
+    retryAfterMs: result.retryAfterMs,
+  });
+  return false;
+}
 const LISTEN_SECURITY = validateListenSecurity({ host: HOST, config: SECURITY });
 if (!LISTEN_SECURITY.ok) {
   console.error(`  ✗ ${LISTEN_SECURITY.error}`);
@@ -503,6 +535,23 @@ const server = http.createServer(async (req, res) => {
     if (!isHook && !isPublicHealth) {
       const auth = authenticateApi(req, url, SECURITY);
       if (!auth.ok) {
+        if (
+          !enforceRateLimit(
+            res,
+            RATE_LIMITS.auth,
+            `auth:${clientAddress(req) || 'unknown'}`,
+            10,
+            {
+              method,
+              path: pathname,
+              requestId,
+              remoteAddress: clientAddress(req),
+              origin: requestOrigin(req),
+            },
+          )
+        ) {
+          return;
+        }
         store.recordSecurityEvent({
           type: 'api.auth.denied',
           method,
@@ -1133,6 +1182,20 @@ const server = http.createServer(async (req, res) => {
 
     /* ---- 目录选择器（本机服务，供「选文件夹开工」用） ---- */
     if (pathname === '/api/fs' && method === 'GET') {
+      if (
+        !enforceRateLimit(res, RATE_LIMITS.fs, `fs:${principal?.id || 'anonymous'}`, 60, {
+          method,
+          path: pathname,
+          requestId,
+          remoteAddress: clientAddress(req),
+          origin: requestOrigin(req),
+          tenantId: principal?.tenantId || 'default',
+          actorId: principal?.id || '',
+          actorKind: principal?.kind || '',
+        })
+      ) {
+        return;
+      }
       const raw = String(searchParams.get('path') || '').trim();
       const browseRoots = normalizeRoots(store.db.settings.fsBrowseRoots);
       if (!raw) {
@@ -1254,6 +1317,20 @@ const server = http.createServer(async (req, res) => {
 
     /* ---- 任务 ---- */
     if (pathname === '/api/tasks' && method === 'POST') {
+      if (
+        !enforceRateLimit(res, RATE_LIMITS.tasks, `task:${principal?.id || 'anonymous'}`, 30, {
+          method,
+          path: pathname,
+          requestId,
+          remoteAddress: clientAddress(req),
+          origin: requestOrigin(req),
+          tenantId: principal?.tenantId || 'default',
+          actorId: principal?.id || '',
+          actorKind: principal?.kind || '',
+        })
+      ) {
+        return;
+      }
       const body = await readBody(req);
       const goal = String(body.goal || '').trim();
       if (goal.length < 2) return json(res, 400, { error: '目标太短，至少 2 个字' });
@@ -1702,6 +1779,30 @@ const server = http.createServer(async (req, res) => {
         });
         return json(res, 200, call.result);
       }
+    }
+
+    if (pathname === '/api/maintenance/gc' && method === 'POST') {
+      const body = await readBody(req).catch(() => ({}));
+      const retentionDays = Math.max(
+        0,
+        Math.min(365, Number(body.retentionDays ?? store.db.settings.workspaceTrashRetentionDays) || 0),
+      );
+      const stats = gcStorage({
+        tasks: store.tasks,
+        retentionDays,
+        dryRun: body.dryRun === true,
+      });
+      store.recordSecurityEvent({
+        type: 'storage.gc',
+        method,
+        path: pathname,
+        requestId,
+        actorId: principal?.id || '',
+        actorKind: principal?.kind || '',
+        tenantId: principal?.tenantId || 'default',
+        reason: `清理 spill ${stats.spill.removed} / 附件 ${stats.attachments.removed}`,
+      });
+      return json(res, 200, { ok: true, ...stats });
     }
 
     /* ---- 外部 bot webhook ---- */
