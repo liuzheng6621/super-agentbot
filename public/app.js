@@ -28,6 +28,8 @@ const S = {
   roleTools: {},
   executionPolicies: [],
   tasks: [],
+  taskFilter: "all",
+  taskQuery: "",
   pagination: null,
   loadingMoreTasks: false,
   task: null,
@@ -244,7 +246,11 @@ function md(src) {
     if (codeSlot) {
       closeList();
       const c = codes[Number(codeSlot[1])];
-      out.push(`<pre><code>${escapeHtml(c.code.replace(/\n$/, ""))}</code></pre>`);
+      out.push(
+        `<pre tabindex="0" role="group" aria-label="代码块"><code>${escapeHtml(
+          c.code.replace(/\n$/, ""),
+        )}</code></pre>`,
+      );
       continue;
     }
 
@@ -482,9 +488,34 @@ function isDegradedDecision(decision, debateStatus = "") {
   );
 }
 
+function visibleTasks() {
+  const query = String(S.taskQuery || "").trim().toLowerCase();
+  const filter = S.taskFilter || "all";
+  return S.tasks.filter((task) => {
+    if (query) {
+      const haystack = `${task.title || ""} ${task.goal || ""}`.toLowerCase();
+      if (!haystack.includes(query)) return false;
+    }
+    if (filter === "active") {
+      return ["running", "queued", "stopping"].includes(task.status) || task.pendingConfirmation;
+    }
+    if (filter === "attention") {
+      return (
+        task.pendingConfirmation === true ||
+        ["needs_attention", "error", "stopped"].includes(task.status) ||
+        task.quality?.status === "failed" ||
+        task.quality?.status === "timeout"
+      );
+    }
+    if (filter === "done") return task.status === "done";
+    return true;
+  });
+}
+
 function renderTasks() {
-  $("#taskList").innerHTML = S.tasks.length
-    ? S.tasks
+  const list = visibleTasks();
+  $("#taskList").innerHTML = list.length
+    ? list
         .map(
           (t) => `<div class="task-item ${S.task?.id === t.id ? "active" : ""}" data-task="${t.id}" title="${escapeHtml(
             t.waitingReason || "",
@@ -505,7 +536,9 @@ function renderTasks() {
           </div>`,
         )
         .join("")
-    : '<p class="hint">还没有任务，先描述一个目标。</p>';
+    : `<p class="hint">${
+        S.tasks.length ? "没有符合筛选条件的任务。" : "还没有任务，先描述一个目标。"
+      }</p>`;
   $("#taskCount").textContent = pad2(S.pagination?.total ?? S.tasks.length);
   const loadMore = $("#loadMoreTasks");
   if (loadMore) {
@@ -663,6 +696,8 @@ function renderTopbar() {
   const busy = !!t && (t.status === "running" || t.status === "stopping" || t.status === "queued");
   $("#stopBtn").hidden = !busy || t?.status === "stopping";
   $("#runBtn").hidden = !t || busy;
+  $("#runBtn").textContent =
+    !t ? "开始协作" : ["done", "stopped", "error", "needs_attention"].includes(t.status) ? "重新运行" : "开始协作";
 
   $("#composerTip").textContent = t
     ? "群聊 · @成员 指定回复"
@@ -737,7 +772,12 @@ function messageHtml(m) {
 
 function renderMessages() {
   const wrap = $("#timeline");
+  const scroller = $("#scroll");
   const t = S.task;
+  const taskChanged = S.lastRenderedTaskId !== t?.id;
+  S.lastRenderedTaskId = t?.id;
+  const nearBottom =
+    !!scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 120;
   if (!t || !t.messages?.length) {
     wrap.hidden = true;
     $("#hero").hidden = false;
@@ -754,7 +794,13 @@ function renderMessages() {
       return sep + messageHtml(m);
     })
     .join("");
-  scrollToBottom(true);
+  applyBubbleClamp();
+  if (taskChanged) {
+    // 新任务先看结论，不要一进来就被滚到最底部
+    if (scroller) scroller.scrollTop = 0;
+  } else if (nearBottom) {
+    scrollToBottom(true);
+  }
 }
 
 function patchMessage(msg) {
@@ -3176,12 +3222,125 @@ async function actOnApproval(id, action) {
   }
 }
 
+function missionNotes(task) {
+  const notes = [];
+  if (task.pendingConfirmation) {
+    notes.push({ tone: "warn", text: "成本超过阈值，等待你确认后才会开工" });
+  }
+  const quality = task.quality || {};
+  if (quality.status === "failed") {
+    notes.push({ tone: "err", text: quality.reason || "质量门未通过，需要修复后重跑" });
+  }
+  if (quality.status === "no-test-entry") {
+    notes.push({ tone: "warn", text: "没有找到可执行的测试入口，交付不会被判定为通过" });
+  }
+  if (quality.selfReview) {
+    notes.push({
+      tone: "warn",
+      text: `评审与实现同模型（${quality.reviewerModel || "未配置"}），独立性有限`,
+    });
+  }
+  if (task.waitingReason) notes.push({ tone: "info", text: task.waitingReason });
+  if (!notes.length && task.status === "done") {
+    notes.push({ tone: "ok", text: "全部工序与质量门通过，可以直接使用产物" });
+  }
+  return notes.slice(0, 3);
+}
+
+function renderMission() {
+  const card = $("#missionCard");
+  if (!card) return;
+  const t = S.task;
+  if (!t) {
+    card.hidden = true;
+    return;
+  }
+  card.hidden = false;
+  const done = t.plan?.filter((step) => step.status === "done").length || 0;
+  const steps = t.plan?.length || 0;
+  const quality = t.quality || {};
+  const gate =
+    quality.status === "passed"
+      ? "质量门通过"
+      : quality.status === "failed"
+        ? "质量门未通过"
+        : quality.status === "timeout"
+          ? "测试超时"
+          : quality.status === "no-test-entry"
+            ? "无测试入口"
+            : quality.status === "running"
+              ? "质量门运行中"
+              : "质量门待执行";
+  const elapsed = t.stats?.ms
+    ? fmtMs(t.stats.ms)
+    : t.endedAt && t.createdAt
+      ? fmtMs(t.endedAt - t.createdAt)
+      : t.status === "running"
+        ? "进行中"
+        : "—";
+  const notes = missionNotes(t);
+  const statusText = t.pendingConfirmation ? "待确认" : STATUS_TEXT[t.status] || t.status;
+  const confirmAction = t.pendingConfirmation
+    ? '<button type="button" class="btn btn-primary sm" id="missionConfirm">确认开工</button>'
+    : "";
+
+  card.innerHTML = `
+    <div class="mission-head">
+      <div class="mission-status" data-status="${t.pendingConfirmation ? "needs_attention" : t.status}">
+        <span class="ms-dot" aria-hidden="true"></span>
+        <div>
+          <b>${escapeHtml(statusText)}</b>
+          <small>${escapeHtml(gate)}${quality.round ? ` · 第 ${quality.round} 轮` : ""}</small>
+        </div>
+      </div>
+      <div class="mission-metrics">
+        <div><small>用时</small><b>${escapeHtml(elapsed)}</b></div>
+        <div><small>工序</small><b>${done}/${steps}</b></div>
+        <div><small>改动文件</small><b>${t.changes ?? t.fileChanges?.length ?? 0}</b></div>
+        <div><small>Tokens</small><b>${(t.stats?.tokens || 0).toLocaleString()}</b></div>
+      </div>
+      ${confirmAction}
+      <button type="button" class="mission-open" id="missionOpen">执行详情 →</button>
+    </div>
+    ${
+      notes.length
+        ? `<ul class="mission-notes">${notes
+            .map(
+              (note) =>
+                `<li data-tone="${note.tone}"><span class="mn-mark" aria-hidden="true"></span>${escapeHtml(note.text)}</li>`,
+            )
+            .join("")}</ul>`
+        : ""
+    }`;
+}
+
+function applyBubbleClamp() {
+  $$("#timeline .msg .bubble").forEach((bubble) => {
+    if (bubble.dataset.clampReady) return;
+    if (bubble.scrollHeight <= 460) return;
+    bubble.dataset.clampReady = "1";
+    bubble.classList.add("is-clamped");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "bubble-more";
+    button.textContent = "展开全文";
+    button.setAttribute("aria-expanded", "false");
+    button.addEventListener("click", () => {
+      const open = bubble.classList.toggle("is-open");
+      button.textContent = open ? "收起" : "展开全文";
+      button.setAttribute("aria-expanded", String(open));
+    });
+    bubble.after(button);
+  });
+}
+
 function renderAll() {
   renderAgents();
   renderTasks();
   renderIdentity();
   renderOtlpStatus();
   renderTopbar();
+  renderMission();
   renderMessages();
   renderPlan();
   renderDebate();
@@ -3950,8 +4109,10 @@ function openDirModal() {
 function applyShift(night) {
   $("#page").classList.toggle("night", night);
   $("#shiftBtn").setAttribute("aria-pressed", String(night));
-  $("#shiftLabel").textContent = night ? "NIGHT" : "DAY";
-  $(".shift-icon").textContent = night ? "☀" : "☾";
+  const shiftLabel = $("#shiftLabel");
+  if (shiftLabel) shiftLabel.textContent = night ? "NIGHT" : "DAY";
+  const shiftIcon = $(".shift-icon");
+  if (shiftIcon) shiftIcon.textContent = night ? "☀" : "☾";
   document.querySelector('meta[name="theme-color"]')?.setAttribute("content", night ? "#081c27" : "#fff4d6");
   try {
     localStorage.setItem("agentforge:night", night ? "1" : "0");
@@ -4602,6 +4763,94 @@ function bind() {
       toast(`确认失败：${err.message}`, "err");
     }
   });
+  /* 任务筛选与搜索 */
+  $("#taskSearch")?.addEventListener("input", (event) => {
+    S.taskQuery = event.target.value;
+    renderTasks();
+  });
+  $("#taskFilters")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-filter]");
+    if (!button) return;
+    S.taskFilter = button.dataset.filter;
+    $$("#taskFilters .tf").forEach((item) => item.classList.toggle("active", item === button));
+    renderTasks();
+  });
+
+  /* 更多操作菜单 */
+  const moreBtn = $("#moreBtn");
+  const moreMenu = $("#moreMenu");
+  const closeMore = () => {
+    if (!moreMenu || moreMenu.hidden) return;
+    moreMenu.hidden = true;
+    moreBtn?.setAttribute("aria-expanded", "false");
+  };
+  moreBtn?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    if (!moreMenu) return;
+    moreMenu.hidden = !moreMenu.hidden;
+    moreBtn.setAttribute("aria-expanded", String(!moreMenu.hidden));
+  });
+  moreMenu?.addEventListener("click", async (event) => {
+    const item = event.target.closest("[data-more]");
+    if (!item) return;
+    const action = item.dataset.more;
+    closeMore();
+    if (action === "workspace") {
+      openWorkspaceConsole();
+    } else if (action === "export-md" || action === "export-html") {
+      if (!S.task) {
+        toast("先选择一个任务", "err");
+        return;
+      }
+      downloadTaskTranscript(action === "export-md" ? "markdown" : "html");
+    }
+  });
+  document.addEventListener("click", (event) => {
+    if (!event.target.closest(".more-wrap")) closeMore();
+  });
+  $("#flowSettingsBtn")?.addEventListener("click", closeMore);
+  $("#shiftBtn")?.addEventListener("click", closeMore);
+
+  /* 详情面板折叠 */
+  const setInspectorCollapsed = (collapsed) => {
+    document.querySelector(".app")?.classList.toggle("insp-collapsed", collapsed);
+    try {
+      localStorage.setItem("agentforge:inspector", collapsed ? "1" : "0");
+    } catch {
+      /* 隐私模式下忽略 */
+    }
+  };
+  $("#inspectorCollapse")?.addEventListener("click", () => setInspectorCollapsed(true));
+  $("#inspectorExpand")?.addEventListener("click", () => setInspectorCollapsed(false));
+  try {
+    const stored = localStorage.getItem("agentforge:inspector");
+    if (stored !== "0") setInspectorCollapsed(true);
+  } catch {
+    /* ignore */
+  }
+
+  /* 概览卡上的确认开工 */
+  $("#missionCard")?.addEventListener("click", async (event) => {
+    if (event.target.closest("#missionOpen")) {
+      document.querySelector(".app")?.classList.remove("insp-collapsed");
+      try {
+        localStorage.setItem("agentforge:inspector", "0");
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    if (!event.target.closest("#missionConfirm") || !S.task) return;
+    try {
+      const confirmed = await api(`/api/tasks/${S.task.id}/confirm`, { method: "POST" });
+      S.task = confirmed.task;
+      renderAll();
+      toast("已确认，团队开工", "ok");
+    } catch (err) {
+      toast(`确认失败：${err.message}`, "err");
+    }
+  });
+
   $("#loadMoreTasks").addEventListener("click", loadMoreTasks);
 
   /* 运行 / 停止 */

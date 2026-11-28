@@ -21,3 +21,7 @@ shot-new.png
 shot-*.png
 artifacts/
 .playwright-cli/
+
+# 本地 UX 审计产物（仅用于验收，不入库）
+audit-report.json
+docs/ux-final-*.png
