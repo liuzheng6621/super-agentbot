@@ -27,7 +27,7 @@
 
 AgentForge 当前定位是**单机 / 团队服务基线**：一个 Node.js 进程即可运行，多个实例可以共享同一 JSON 数据目录并通过文件锁和租约协调。它不是分布式任务队列，也不是完整 SaaS；账号、RBAC、SSO、外部数据库和内核级 CLI 隔离仍在后续范围。
 
-- **真实质量门**：CLI 与模拟任务都执行工作区测试入口；没有入口、执行失败或超时都不能交付，并记录真实命令、退出码、耗时与输出。
+- **真实质量门**：CLI 与模拟任务都执行工作区测试入口；没有入口、执行失败、超时、或「退出码 0 但输出没有 pass/fail 证据」都不能交付；`exit 0` / `true` / 纯 echo 这类占位脚本不算测试入口。测试子进程只继承最小环境白名单，Provider 密钥不会进入测试命令。每次记录真实命令、退出码、耗时、输出、改动范围（是否动过测试文件）和通过/失败计数。
 - **项目技能注入**：从工作区、源工作区与用户级 `.agents/skills/*/SKILL.md` 装载技能，按触发词或 Agent 显式标签激活，注入提案、质询、裁决、工序、收口与聊天 prompt；激活记录会出现在 `/api/state`、任务详情和界面上下文中。
 - **运行记录导出**：`GET /api/tasks/:id/export?format=markdown|html` 导出质量门、计划、技能激活、协作消息、事件、产物与讨论记录，敏感值会脱敏。
 - **结构化评审结论**：评审必须输出扁平 JSON `VERDICT`，缺失、损坏或与 Blocker 矛盾的结论都不能放行；Blocker / Should 数量会进入工序记录和界面。
@@ -71,7 +71,7 @@ AgentForge 当前定位是**单机 / 团队服务基线**：一个 Node.js 进�
 - 🧠 **方案辩论先行** — 4 个执行席位 + 1 个工具池 CLI 各出一版方案（契约先行 / 最小闭环 / 测试先行 / 风险优先 / 分阶段交付），互相匿名打 1–10 分并各指一个硬伤，主持人按平均分裁决；只有 1 份有效提案或评分不足时会在裁决里标注置信度，不假装形成共识。
 - 🔀 **依赖图并行** — 架构定稿后「实现」与「测试设计」并行推进，DAG 校验依赖与环路，失败按依赖链传播，取消是即时生效而不是等当前工序跑完。
 - 🧭 **规划师动态 DAG** — `plan` 工序先单独执行，规划师按任务形状输出工序图；平台校验后应用并保留已完成的 `debate / plan`。同一 Agent 串行、不同 Agent 可并行，非法图回退模板并写 `plan.fallback`。
-- 🚦 **真实质量门** — 评审前真的执行测试命令，结构化 `VERDICT` 判为 PASS 且质量门 `passed` 才允许交付；FAIL 进入「修复 → 回归 → 复评」有界回环，轮次可配。测试入口按 `package.json scripts.test` → Makefile `test` → pytest 配置 → Cargo → Go → `tests/` 探测；没有入口标为 `no-test-entry`，失败或超时同样阻断交付。每次记录真实命令、来源、退出码、耗时和 stdout/stderr，真实 CLI 任务也走同一套质量门。
+- 🚦 **真实质量门** — 评审前真的执行测试命令，结构化 `VERDICT` 判为 PASS 且质量门 `passed` 才允许交付；FAIL 进入「修复 → 回归 → 复评」有界回环，轮次可配。测试入口按 `package.json scripts.test` → Makefile `test` → pytest 配置 → Cargo → Go → `tests/` 探测；占位脚本（`exit 0`、`true`、纯 echo、`no test specified`）会被跳过；没有入口标为 `no-test-entry`，失败、超时或无 pass/fail 证据同样阻断交付。每次记录真实命令、来源、退出码、耗时、stdout/stderr、证据来源和改动范围，真实 CLI 任务也走同一套质量门。
 - 🧩 **项目技能与用户技能** — 自动发现 `.agents/skills/*/SKILL.md`，支持 `name / description / triggers / roles / always / enabled` 前置字段；工作区技能覆盖源工作区与用户级同名技能。技能只注入提示词，不执行脚本，也不能绕过工具权限、质量门或用户目标。
 - 🧾 **可审计运行记录导出** — Markdown 适合归档和代码评审，HTML 适合直接打开阅读；导出前统一脱敏 API Key、Token、密码和 Bearer 凭据，并转义 HTML。
 - ✅ **结构化评审协议** — 只接受 `VERDICT: {"decision":"PASS|FAIL","blockers":0,"should":0}`；旧的自然语言 `VERDICT: PASS` 不再静默放行，`PASS` 携带 Blocker 也会被判为无效。
@@ -171,6 +171,8 @@ flowchart TD
 | `coder` | 落代码、写文件 | 源码文件 | codex → opencode → trae-cli → dsh |
 | `tester` | 用例矩阵、回归验证 | 测试用例、缺陷单 | opencode → crush → codex → gemini → dsh |
 | `reviewer` | 评审、PASS / FAIL 质量门 | 评审意见 | dsh → claude → kimi → qwen → gemini |
+
+评审独立性按 Agent、Provider、模型和 CLI 共同判定：同一 Agent 或同一 Provider + 同一模型都记为 `self-review`，写入任务事件并在统计面板提示，不再当成独立评审。
 
 席位采用 **主执行人 + 工具池**：每个角色只有一个主执行人，多接的 CLI 留在池里随时可上位。角色可增删改，提示词、命令、参数都能在界面上编辑。
 

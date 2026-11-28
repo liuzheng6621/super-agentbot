@@ -2476,7 +2476,13 @@ function renderStats() {
               : gate === "not-run" || (gate === "pending" && terminal)
                 ? "未执行"
                 : "待执行";
-  const gateHint = t.quality?.reason || t.quality?.command || "任务还在跑，质量门尚未开始";
+  const selfReview = t.quality?.selfReview === true;
+  const selfReviewHint = selfReview
+    ? `自审：${t.quality.reviewerProviderId || "?"}/${t.quality.reviewerModel || "?"}`
+    : "";
+  const gateHint =
+    (t.quality?.reason || t.quality?.command || "任务还在跑，质量门尚未开始") +
+    (selfReviewHint ? ` · ${selfReviewHint}` : "");
   const elapsed = stats.ms
     ? fmtMs(stats.ms)
     : t.running
