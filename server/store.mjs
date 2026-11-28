@@ -557,6 +557,9 @@ function emptyDb() {
     tasks: [],
     settings: {
       hookToken: randomUUID().replace(/-/g, '').slice(0, 24),
+      // Hook 入口默认开启；路径令牌保留兼容，推荐改用 X-Hook-Token 请求头。
+      hookTokenEnabled: true,
+      hookTokenPathEnabled: true,
       defaultMode: 'auto',
       simSpeed: 1,
       maxConcurrency: 2,
@@ -2207,6 +2210,9 @@ class Store {
       s.debateConcurrency = clamp(patch.debateConcurrency, 1, 4, s.debateConcurrency);
     if (typeof patch.dynamicPlanEnabled === 'boolean')
       s.dynamicPlanEnabled = patch.dynamicPlanEnabled;
+    if (typeof patch.hookTokenEnabled === 'boolean') s.hookTokenEnabled = patch.hookTokenEnabled;
+    if (typeof patch.hookTokenPathEnabled === 'boolean')
+      s.hookTokenPathEnabled = patch.hookTokenPathEnabled;
     if (patch.maxPlanSteps !== undefined)
       s.maxPlanSteps = clamp(patch.maxPlanSteps, 2, 12, s.maxPlanSteps);
     if (patch.maxConcurrency !== undefined)
@@ -2256,6 +2262,16 @@ class Store {
     this.save({ settings: true });
     this.broadcast({ type: 'settings.changed', settings: { ...s } });
     return { ...s };
+  }
+
+  rotateHookToken() {
+    const token = randomUUID().replace(/-/g, '').slice(0, 24);
+    this.db.settings.hookToken = token;
+    this.db.settings.hookTokenEnabled = true;
+    this.save({ settings: true });
+    // 不把新 token 广播出去：SSE 订阅者可能只有 read 作用域。
+    this.broadcast({ type: 'hook.rotated', at: Date.now() });
+    return token;
   }
 
   recordSecurityEvent(event = {}) {

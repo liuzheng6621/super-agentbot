@@ -188,6 +188,7 @@ function stateSettings() {
     securityAudit: _securityAudit,
     mcpServers: _mcpServers,
     automations: _automations,
+    hookToken: _hookToken,
     ...settings
   } = store.db.settings;
   return settings;
@@ -1671,13 +1672,75 @@ const server = http.createServer(async (req, res) => {
     }
 
     /* ---- 外部 bot webhook ---- */
+    const hookTokenMatch = pathname === '/api/hook-token';
+    if (hookTokenMatch && method === 'GET') {
+      const settings = store.db.settings;
+      return json(res, 200, {
+        enabled: settings.hookTokenEnabled !== false,
+        pathEnabled: settings.hookTokenPathEnabled !== false,
+        token: String(settings.hookToken || ''),
+        path: `/api/hooks/${settings.hookToken || ''}`,
+        header: 'X-Hook-Token',
+      });
+    }
+    if (pathname === '/api/hook-token/rotate' && method === 'POST') {
+      const token = store.rotateHookToken();
+      store.recordSecurityEvent({
+        type: 'hook.token.rotated',
+        method,
+        path: pathname,
+        requestId,
+        remoteAddress: clientAddress(req),
+        origin: requestOrigin(req),
+        actorId: principal?.id || '',
+        actorKind: principal?.kind || '',
+        tenantId: principal?.tenantId || 'default',
+        reason: 'Hook Token 已轮换',
+      });
+      return json(res, 200, {
+        ok: true,
+        token,
+        path: `/api/hooks/${token}`,
+        header: 'X-Hook-Token',
+      });
+    }
+
     const hookMatch = pathname.match(/^\/api\/hooks\/([\w-]+)$/);
     if (hookMatch) {
-      if (hookMatch[1] !== store.db.settings.hookToken) return json(res, 401, { error: 'token 无效' });
+      const settings = store.db.settings;
+      const expected = String(settings.hookToken || '');
+      const supplied = String(req.headers['x-hook-token'] || '').trim();
+      const pathAllowed = settings.hookTokenPathEnabled !== false;
+      // 请求头优先；路径令牌只在兼容模式下参与比对。
+      const candidate = supplied || (pathAllowed ? hookMatch[1] : '');
+      const ok =
+        settings.hookTokenEnabled !== false &&
+        expected &&
+        candidate &&
+        candidate.length === expected.length &&
+        crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(expected));
+      if (!ok) {
+        store.recordSecurityEvent({
+          type: 'hook.token.denied',
+          method,
+          path: pathname,
+          requestId,
+          remoteAddress: clientAddress(req),
+          origin: requestOrigin(req),
+          reason: supplied ? '请求头令牌无效' : '路径令牌无效或已禁用',
+          tenantId: 'default',
+          tokenSource: supplied ? 'header' : 'path',
+        });
+        return json(res, 401, { error: 'token 无效', code: 'hook-token-required' });
+      }
       if (method === 'GET') {
+        // 降级摘要：不返回任务标题、目标或事件，避免令牌即读全文。
+        const running = store.tasks.filter((t) => ['running', 'queued'].includes(t.status)).length;
         return json(res, 200, {
           ok: true,
-          tasks: store.tasks.slice(0, 5).map((t) => store.taskSummary(t)),
+          taskCount: store.tasks.length,
+          running,
+          latestStatus: store.tasks[0]?.status || '',
         });
       }
       if (method === 'POST') {

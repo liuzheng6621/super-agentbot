@@ -2433,10 +2433,23 @@ async function createWorkspaceFile() {
   }
 }
 
+async function ensureHookToken() {
+  if (S.hookToken !== undefined) return S.hookToken;
+  S.hookToken = "";
+  try {
+    const info = await api("/api/hook-token");
+    S.hookToken = info?.token || "";
+  } catch {
+    S.hookToken = "";
+  }
+  renderStats();
+  return S.hookToken;
+}
+
 function renderStats() {
   const t = S.task;
   const grid = $("#statGrid");
-  const hookUrl = `${location.origin}/api/hooks/${S.settings.hookToken || ""}`;
+  const hookUrl = `${location.origin}/api/hooks/${S.hookToken || ""}`;
   $("#hookUrl").textContent = hookUrl.replace(/^https?:\/\//, "");
 
   if (!t) {
@@ -4868,7 +4881,8 @@ function bind() {
   $("#wcReplan").addEventListener("click", replanWorkspaceTask);
 
   $("#copyHook").addEventListener("click", async () => {
-    const url = `${location.origin}/api/hooks/${S.settings.hookToken || ""}`;
+    await ensureHookToken();
+    const url = `${location.origin}/api/hooks/${S.hookToken || ""}`;
     try {
       await navigator.clipboard.writeText(url);
       toast("地址已复制", "ok");
@@ -4877,8 +4891,9 @@ function bind() {
     }
   });
 
-  $("#showCurl").addEventListener("click", () => {
-    const url = `${location.origin}/api/hooks/${S.settings.hookToken || ""}`;
+  $("#showCurl").addEventListener("click", async () => {
+    await ensureHookToken();
+    const url = `${location.origin}/api/hooks/${S.hookToken || ""}`;
     const box = $("#curlBox");
     box.textContent = `curl -X POST ${url} \\\n  -H "Content-Type: application/json" \\\n  -d '{"goal":"做一个并发安全的待办 API"}'`;
     box.hidden = !box.hidden;
@@ -5009,6 +5024,7 @@ async function boot() {
     S.commands = state.commands || [];
     S.approvals = state.approvals || [];
     S.security = state.security || null;
+    ensureHookToken();
     if (state.activeTask) {
       S.task = state.activeTask;
     } else if (state.activeTaskId) {

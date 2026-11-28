@@ -41,8 +41,8 @@
 | W8 | P2 | Store 门面拆分 | `server/store.mjs`、新 persistence / leases / events / trace 模块 | 只做机械搬移，公开 API 不破坏；每个模块有直接单元测试；全量测试通过。 | 未开始 |
 | W9 | P0 | 目录白名单 | `server/index.mjs`、`server/store.mjs`、`server/path-roots.mjs` | `/api/fs` 与 external workspace 使用独立可配置白名单；白名单外 403；非 owner/admin 主体禁 external workspace；worktree isolation 白名单同步生效。 | 已完成（`tests/path-allowlist.test.mjs`、`tests/http-hardening.test.mjs`） |
 | W10 | P0 | 回环与无 Token 加固 | `server/security.mjs`、`server/index.mjs` | 非 GET 无 Token 请求必须同源 `Origin + Sec-Fetch-Site`；Host 校验拒绝 DNS rebinding；insecure remote 拒绝 `operator:admin` 且不得授予 owner；覆盖 CSRF / rebinding 场景。 | 已完成（`tests/http-hardening.test.mjs`） |
-| W11 | P1 | Spill 与附件根目录校验 | `server/fs.mjs`、`server/attachments.mjs` | locator 必须解析到 `spillRoot()` / `attachmentRoot()` 内；符号链接逃逸拒绝；哈希与大小校验保留。 | 未开始 |
-| W12 | P1 | Hook Token 规范化 | `server/index.mjs`、`server/store.mjs` | 支持 header Token；路径 Token 仅兼容模式；可轮换或禁用；GET 降级为无敏感摘要；`hookToken` 从 `/api/state` 剔除。 | 未开始 |
+| W11 | P1 | Spill 与附件根目录校验 | `server/fs.mjs`、`server/attachments.mjs` | locator 必须解析到 `spillRoot()` / `attachmentRoot()` 内；符号链接逃逸拒绝；哈希与大小校验保留。 | 已完成（`tests/spill-root.test.mjs`） |
+| W12 | P1 | Hook Token 规范化 | `server/index.mjs`、`server/store.mjs` | 支持 header Token；路径 Token 仅兼容模式；可轮换或禁用；GET 降级为无敏感摘要；`hookToken` 从 `/api/state` 剔除。 | 已完成（`tests/hook-token.test.mjs`） |
 | W13 | P2 | 附件与 spill GC | `server/attachments.mjs`、`server/fs.mjs`、`server/store.mjs` | 基于任务删除级联或保留期加引用扫描；共享内容寻址文件只按引用计数清理；GC 后仍可读回的回归测试。 | 未开始 |
 | W14 | P2 | 通用 API 限流 | `server/index.mjs`、`server/security.mjs` | 认证失败、任务创建、FS 浏览有 per-principal / per-IP 固定窗口或 token bucket；超限 429 且审计可见。 | 未开始 |
 | W15 | P2 | CI 浏览器必跑 | `.github/workflows/ci.yml`、`tests/` | CI 安装真实浏览器；浏览器用例跳过仅在本地允许，CI 跳过失败；至少覆盖登录、状态和工作区入口 DOM 断言。 | 未开始 |

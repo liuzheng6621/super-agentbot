@@ -379,7 +379,9 @@ Token 已带最小主体和作用域：`AGENTFORGE_API_TOKEN` 是跨租户 owner
 | `GET` | `/api/stream` | SSE 事件流 |
 | `GET` | `/api/health` | 健康检查（含 Scheduler 快照） |
 | `POST` | `/api/shutdown` | 优雅退出 |
-| `POST` | `/api/hooks/:token` | 外部触发（Bot Hook） |
+| `POST` | `/api/hooks/:token` | 外部触发（Bot Hook）；推荐改用 `X-Hook-Token` 请求头 |
+| `GET` | `/api/hook-token` | 读取 Hook Token 与开关状态（`operator:admin`） |
+| `POST` | `/api/hook-token/rotate` | 轮换 Hook Token（`operator:admin`） |
 
 工作区读取接口支持可选的 `agentId` 查询参数；传入后会校验该 Agent 是否拥有 `workspace.read` / `workspace.search`。`/fs` 写入、移动、删除同样校验对应工具。
 
@@ -388,12 +390,14 @@ Token 已带最小主体和作用域：`AGENTFORGE_API_TOKEN` 是跨租户 owner
 一次 POST 就能让流水线开工，接机器人、CI 或自建系统：
 
 ```bash
-curl -X POST http://127.0.0.1:8787/api/hooks/<token> \
+# 推荐：令牌走请求头，路径不再携带密钥
+curl -X POST http://127.0.0.1:8787/api/hooks/bot \
+  -H "X-Hook-Token: <token>" \
   -H "Content-Type: application/json" \
   -d '{"goal":"做一个并发安全的待办 API"}'
 ```
 
-Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookToken`。
+Token 在界面右侧「统计」面板，或 `GET /api/hook-token`（需 `operator:admin`）。`/api/state` 不再返回 `hookToken`。路径令牌默认保留兼容，可用 `settings.hookTokenPathEnabled=false` 关闭；`settings.hookTokenEnabled=false` 可整体停用 Hook 入口。`GET /api/hooks/:token` 只返回任务计数与运行状态，不再回显任务摘要。
 
 ## 配置
 
@@ -407,7 +411,8 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 | `AGENTFORGE_OPERATOR_TOKEN` | 空 | 单租户 operator Token；可配 `AGENTFORGE_OPERATOR_ID`、`AGENTFORGE_OPERATOR_TENANT`、`AGENTFORGE_OPERATOR_TASK_LIMIT`、`AGENTFORGE_OPERATOR_SCOPES` |
 | `AGENTFORGE_AGENT_TOKENS` | 空 | Agent Token 的 JSON 数组或映射；每项可带 `id`、`tenantId`、`scopes`、`taskLimit` |
 | `AGENTFORGE_CORS_ORIGINS` | 空 | 逗号分隔的额外允许来源；同源请求始终允许，`*` 不会自动变成放开 |
-| `AGENTFORGE_ALLOW_INSECURE_REMOTE` | `0` | 显式设为 `1` 才允许无 Token 的非回环监听，仅用于受控实验环境 |
+| `AGENTFORGE_ALLOWED_HOSTS` | 空 | 逗号分隔的额外允许 `Host`；回环名和本机网卡地址默认允许，其余域名需显式登记（防 DNS rebinding） |
+| `AGENTFORGE_ALLOW_INSECURE_REMOTE` | `0` | 显式设为 `1` 才允许无 Token 的非回环监听；此时远程主体只有 operator 作用域，拿不到 owner 和 `operator:admin` |
 | `AGENTFORGE_SKIP_TEAM_BOOTSTRAP` | `0` | 设为 `1` 时跳过启动时自动体检组队，便于部署、测试和外部编排 |
 | `AGENTFORGE_OTLP_ENDPOINT` | 空 | OTLP/HTTP JSON trace 接收地址，例如 `http://127.0.0.1:4318/v1/traces` |
 | `AGENTFORGE_OTLP_HEADERS` | 空 | OTLP 请求头 JSON；敏感值不会进入 `/api/state` |
@@ -427,7 +432,8 @@ Token 在界面右侧「统计」面板，或 `data/db.json` 的 `settings.hookT
 │   ├── test-entry.mjs    测试入口探测、真实测试文件枚举与命令生成
 │   ├── cli-policy.mjs    工具能力推导、CLI 沙箱映射与严格策略预检
 │   ├── store.mjs         状态、席位、增量持久化、多实例锁 / 租约、事件总线、trace 与恢复
-│   ├── security.mjs      Token、CORS、监听边界与安全摘要
+│   ├── security.mjs      Token、CORS、Host 校验、监听边界与安全摘要
+│   ├── path-roots.mjs    目录白名单与路径包含判定
 │   ├── automation.mjs    定时任务、重试、历史、幂等与启动恢复
 │   ├── approvals.mjs     固定命令白名单、一次性审批与执行审计
 │   ├── mcp.mjs           只读 MCP 配置、白名单与调用审计
