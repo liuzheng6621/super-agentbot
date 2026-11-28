@@ -69,10 +69,12 @@ if (singleModuleFeature && prompt.includes('PLAN CONTRACT v1')) {
   write(
     'tests/greeting.test.js',
     [
+      "import test from 'node:test';",
       "import assert from 'node:assert/strict';",
       "import { greeting } from '../src/greeting.js';",
-      "assert.equal(greeting('世界'), '你好，世界！');",
-      "console.log('single-module CLI acceptance passed');",
+      "test('acceptance', () => {",
+      "  assert.equal(greeting('世界'), '你好，世界！');",
+      "});",
       '',
     ].join('\n'),
   );
@@ -137,11 +139,13 @@ if (singleModuleFeature && prompt.includes('PLAN CONTRACT v1')) {
   write(
     'tests/calculator.test.js',
     [
+      "import test from 'node:test';",
       "import assert from 'node:assert/strict';",
       "import { add } from '../src/calculator.js';",
-      "assert.equal(add(2, 3), 5);",
-      "assert.throws(() => add(Number.MAX_SAFE_INTEGER, 1), RangeError);",
-      "console.log('bug-fix CLI acceptance passed');",
+      "test('acceptance', () => {",
+      "  assert.equal(add(2, 3), 5);",
+      "  assert.throws(() => add(Number.MAX_SAFE_INTEGER, 1), RangeError);",
+      "});",
       '',
     ].join('\n'),
   );
@@ -166,12 +170,14 @@ if (singleModuleFeature && prompt.includes('PLAN CONTRACT v1')) {
   write(
     'tests/core.test.js',
     [
+      "import test from 'node:test';",
       "import assert from 'node:assert/strict';",
       "import { core } from '../src/core.js';",
       "import { api } from '../src/api.js';",
-      "assert.equal(core, 'core repaired');",
-      "assert.equal(api, 'api repaired');",
-      "console.log('dynamic plan repair fixture passed');",
+      "test('acceptance', () => {",
+      "  assert.equal(core, 'core repaired');",
+      "  assert.equal(api, 'api repaired');",
+      "});",
       '',
     ].join('\n'),
   );
@@ -232,12 +238,14 @@ if (singleModuleFeature && prompt.includes('PLAN CONTRACT v1')) {
   write(
     'tests/core.test.js',
     [
+      "import test from 'node:test';",
       "import assert from 'node:assert/strict';",
       "import { core } from '../src/core.js';",
       "import { api } from '../src/api.js';",
-      "assert.equal(core, 'core');",
-      "assert.equal(api, 'api');",
-      "console.log('dynamic plan fixture passed');",
+      "test('acceptance', () => {",
+      "  assert.equal(core, 'core');",
+      "  assert.equal(api, 'api');",
+      "});",
       '',
     ].join('\n'),
   );
@@ -250,10 +258,12 @@ if (singleModuleFeature && prompt.includes('PLAN CONTRACT v1')) {
   write(
     'tests/core.test.js',
     [
+      "import test from 'node:test';",
       "import assert from 'node:assert/strict';",
       "import { feature } from '../src/feature.js';",
-      "assert.equal(feature, 'feature');",
-      "console.log('fallback plan fixture passed');",
+      "test('acceptance', () => {",
+      "  assert.equal(feature, 'feature');",
+      "});",
       '',
     ].join('\n'),
   );

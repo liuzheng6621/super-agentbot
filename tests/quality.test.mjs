@@ -280,8 +280,12 @@ test('质量门会真的跑工作区里的测试入口，找不到入口就报 n
 
   const passing = store.createTask({
     goal: '质量门通过样本',
-    workspace: workspace({ 'package.json': JSON.stringify({ scripts: { test: 'node -e "process.exit(0)"' } }) })
-      .workspace,
+    // 退出码 0 不再算通过：必须带 pass/fail 证据。
+    workspace: workspace({
+      'package.json': JSON.stringify({
+        scripts: { test: 'node -e "console.log(\'# pass 1\');console.log(\'# fail 0\')"' },
+      }),
+    }).workspace,
   });
   const passed = await runQualityGate(passing, { round: 0 }, signal);
   assert.equal(passed.status, 'passed');

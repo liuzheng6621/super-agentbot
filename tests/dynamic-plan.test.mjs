@@ -138,7 +138,7 @@ test('真实 CLI 完成单模块新功能，中文、双引号和多行目标完
       );
       assert.match(
         fs.readFileSync(path.join(done.workspace, 'tests/greeting.test.js'), 'utf8'),
-        /single-module CLI acceptance passed/,
+        /test\('acceptance'/,
       );
       assert.ok(
         done.messages.some(

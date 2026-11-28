@@ -21,7 +21,7 @@ import { policySummary, resolveCliPolicy } from './cli-policy.mjs';
 import { commandKey } from './command-key.mjs';
 import { timeoutFor, timeoutSummary } from './timeouts.mjs';
 import { attachmentAbsolutePath, imageDataUrl } from './attachments.mjs';
-import { commandText, detectTestCommand } from './test-entry.mjs';
+import { commandText, detectTestCommand, testEvidence, testScope } from './test-entry.mjs';
 export { detectTestCommand } from './test-entry.mjs';
 import { isPlannerPlanComplete, parsePlannerPlan } from './plan-schema.mjs';
 import { buildContextPack as buildContextPackFromFiles } from './context-budget.mjs';
@@ -2121,13 +2121,33 @@ export async function runQualityGate(task, step, signal) {
     cwd: current.workspace,
     timeout,
     signal,
+    // 质量门只跑测试命令，不能继承 Provider 密钥（F7）。
+    sanitizeEnv: true,
   });
   throwIfAborted(signal);
 
   const timedOut = !!res.timedOut || res.code === -3;
-  const status = timedOut ? 'timeout' : res.code === 0 ? 'passed' : 'failed';
+  const evidence = testEvidence(`${res.stdout || ''}\n${res.stderr || ''}`);
+  const scope = testScope(current);
+  let status = 'passed';
+  let reason = '';
+  if (timedOut) {
+    status = 'timeout';
+    reason = '测试超时被终止';
+  } else if (res.code !== 0) {
+    status = 'failed';
+    reason = `测试退出码 ${res.code}`;
+  } else if (!evidence.hasEvidence) {
+    // 退出码 0 但没有 pass/fail 证据：空测试、exit 0、崩在断言前——一律 fail closed。
+    status = 'failed';
+    reason = '退出码为 0，但测试输出没有任何 pass/fail 证据，质量门 fail closed';
+  } else if (evidence.failed > 0) {
+    status = 'failed';
+    reason = `测试报告 ${evidence.failed} 项失败，但进程退出码为 0`;
+  }
   const quality = {
     status,
+    reason,
     command,
     label: detected.label,
     args: detected.args,
@@ -2136,6 +2156,8 @@ export async function runQualityGate(task, step, signal) {
     cli: cliMode,
     code: res.code,
     timedOut,
+    evidence,
+    scope,
     elapsed: Number.isFinite(Number(res.elapsed)) ? Number(res.elapsed) : Date.now() - startedAt,
     stdout: clip(String(res.stdout || '').trim(), 3000),
     stderr: clip(String(res.stderr || '').trim(), 3000),
@@ -2149,10 +2171,13 @@ export async function runQualityGate(task, step, signal) {
     stepId: step?.id || '',
     data: {
       status,
+      reason: quality.reason,
       command,
       source: detected.source,
       code: quality.code,
       timedOut: quality.timedOut,
+      evidence: quality.evidence,
+      scope: quality.scope,
       elapsed: quality.elapsed,
       timeout: quality.timeout,
       stdout: quality.stdout,
@@ -2168,7 +2193,7 @@ export async function runQualityGate(task, step, signal) {
     color: status === 'passed' ? '#34d399' : '#ff5538',
     kind: 'quality',
     done: true,
-    text: `**自动化质量门 · ${status === 'passed' ? '通过' : timedOut ? '超时' : '未通过'}**\n\n- 命令：\`${command}\`\n- 来源：${detected.source}\n- 退出码：\`${res.code}\`\n- 耗时：${quality.elapsed}ms${
+    text: `**自动化质量门 · ${status === 'passed' ? '通过' : timedOut ? '超时' : '未通过'}**\n\n- 命令：\`${command}\`\n- 来源：${detected.source}\n- 退出码：\`${res.code}\`\n- 通过/失败：${evidence.passed}/${evidence.failed}（证据：${evidence.hasEvidence ? evidence.source : '缺失'}）\n- 改动范围：${scope.status}${scope.changedFiles.length ? `（${scope.changedFiles.slice(0, 5).join('、')}）` : ''}\n- 耗时：${quality.elapsed}ms${
       quality.stdout ? `\n\n\`\`\`stdout\n${clip(quality.stdout, 1400)}\n\`\`\`` : ''
     }${quality.stderr ? `\n\n\`\`\`stderr\n${clip(quality.stderr, 1400)}\n\`\`\`` : ''
     }`,
