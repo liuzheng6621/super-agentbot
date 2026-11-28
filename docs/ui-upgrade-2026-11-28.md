@@ -217,3 +217,111 @@
 `getBoundingClientRect` 做静态相交，而「展开全文」按钮位于 `.scroll` 滚动容器裁剪区之外，视觉上被裁剪
 且被不透明 composer 覆盖。上一轮同一误报出现在 desktop，本轮因首屏高度变化转移到 tablet，说明是工具对
 滚动容器的固有局限而非布局缺陷；截图已确认无真实重叠，未为刷绿改动结构。
+
+---
+
+## 11. 意图画布（Intent Canvas）· 2026-11-28
+
+### 11.1 优化目标与范式
+
+前两轮解决「把控制台做对、把决策提到首屏」，第三轮换掉**输入范式**：原先一段自由文本
+`textarea` 把目标、约束、分工全压在一起，用户写完就失去结构，后端也只能靠猜。意图画布把「描述需求」
+变成「摆放意图」——**目标 / 子目标 / 约束**是可见可拖的卡片，右侧实时映射成 5 个成员工位，
+开工时再收敛成一段结构化文本。核心卖点是「先把意图摆清楚，再让团队开工」。
+
+**零后端改动**是硬约束，也是可行性依据：`POST /api/tasks` 只显式读取
+`goal / flowMode / priority / workspace / isolation / mode / speed / autoRun / clientMessageId / tenantId`，
+未知字段静默丢弃，`goal` 是唯一且无长度上限的自由文本。画布因此把卡片序列化成多行 `goal` 复用
+`createTask()`，不改路由、不改 store、不改任务模型。序列化**首行恒为自然语言主目标**，因为
+`store.mjs` 用 `goal.slice(0, 26)` 生成 `title`，若首行是「目标拆解：」会污染任务标题。
+
+### 11.2 信息架构
+
+画布挂在空态 `#hero` 的 `.hero-compose` 内，与 `#heroInput` 共存、互斥显隐，共用同一个开工按钮语义：
+
+```
+.compose-head    [INTENT CANVAS / 意图画布]        [文本 | 意图画布]
+.ic-foot         [N 卡片 · N 硬约束 · N 软约束 · N 工位] [先讨论后实施] [清空画布] [开工 →]
+.ic-grid
+  ├ 01 主目标     输入框 + 子目标卡片（可拖）+ 添加行
+  ├ 02 约束       10 条预置约束库（点击加入/移除）+ 自定义约束 + 已加入卡片（可拖）
+  └ 03 成员落位   5 个工位（Nova/Forge/Kilo/Probe/Lens），自动 / 已指定 两种标记
+    04 意图摘要   折叠预览「将发送给团队的内容」
+```
+
+进入画布模式时 `.page.ic-mode` 收起营销式首屏装饰（h1 / lead / eyebrow / hero-side / stats / team），
+把 hero 宽度从 780px 放宽到 1120px，让中栏真正成为编排工作台；切回文本模式全部恢复。
+工具条「指标 + 清空 + 开工」放在画布**顶部**而非底部，保证首屏可见（底部被固定 composer 挤压）。
+
+### 11.3 实时分工推导（核心算法）
+
+`deriveAssignments(state, agents)` 在 `public/lib/intent-canvas.js`，纯函数、浏览器与 Node 共用：
+
+1. 从 `S.agents` 取 `seat !== false` 的主执行席位，按 `ROLE_ORDER` 建 5 个工位（含空工位）。
+2. 每张卡带 `roleHints`：预置约束在库里显式声明（如「先写测试」→ tester，「不改现有 API」→ architect，
+   「安全与鉴权」→ architect+reviewer）；子目标/自定义约束走关键词启发式（测试/文档/接口/安全/性能/评审/UI）。
+3. **显式指派优先**：用户拖过或点选过的卡片记在 `state.assignments[cardId]`；否则取 `roleHints` 中
+   第一个实际存在的席位；都不命中落到 planner。
+4. 工位同时展示 `自动`（虚线）与 `已指定`（实线橙边）两种小卡，用户一眼能看出哪些是自己定的、
+   哪些是系统推断的，可随时用卡片上的 `↩` 回落自动。
+
+交互提供两条等价路径：HTML5 `dragstart/dragover/drop` 拖拽，以及**点选卡片 → 点工位**的两步式
+（键盘 Enter / Space 同样可用），`aria-live` 播报每次指派结果。
+
+### 11.4 序列化格式
+
+```
+做一个支持并发安全的待办清单 API，带单元测试和技术方案文档      ← 主目标（title 取前 26 字）
+
+目标拆解：
+- 设计并发控制与数据模型
+- 提供 REST 接口与 JWT 鉴权
+
+硬约束（必须满足）：
+- 先写测试
+- 不改现有 API
+
+软约束（尽量满足）：
+- 中文技术文档
+
+建议分工（供规划师参考，实际以动态编排为准）：
+- Forge（架构）：设计并发控制与数据模型、[约束] 不改现有 API
+- Probe（测试）：提供 REST 接口与 JWT 鉴权、[约束] 先写测试
+```
+
+分工段措辞明确写「供规划师参考」，避免后端 planner 误当成强制编排。`no-op` 时只返回主目标，
+不产生空段。开工后**保留约束与分工、只清空主目标**：一套工程规范可以复用为模板，同时
+`canvasReadiness()` 会因主目标为空禁用开工，防止误重复提交。
+
+### 11.5 视觉、动效与响应式
+
+- 沿用纸黄 + 墨绿 + 硬投影 + 像素字；画布底用 16px 点阵网格表达「纸面」，卡片左侧色条区分
+  目标（蓝）/硬约束（橙）/软约束（黄）。
+- 顶部工具条常驻；工位 drop 时橙色高亮 + 位移；指派播报 900ms flash；`prefers-reduced-motion` 全量降级。
+- ≤980px 单列；≤480px 所有按钮/输入/卡片 `min-height: 44px`，去掉内层硬投影避免多层边框叠成条纹。
+- 所有信息性文字走 12px 下限与实色（不用 `opacity` 弱化），对比度全部 ≥4.5:1。
+
+### 11.6 关键修复（验收中发现）
+
+| 问题 | 根因 | 修复 |
+| --- | --- | --- |
+| 移动端卡片删除按钮跑到视口外 | `.ic-cardlist` / `.ic-stations` 单列 grid 列宽 `auto`，被 flex 内容的 min-content 撑到 378px（容器仅 306px） | 全部改 `grid-template-columns: minmax(0, 1fr)`，卡片加 `min-width: 0` |
+| 画布态 axe 白字压橙底 3.17:1 | 硬约束选中态 `background: --orange; color: #fff` | 改墨绿底 + 纸白字，橙色仅作 `inset` 左侧强调条 |
+| `nested-interactive` ×5 | `div[role=button]` 卡片内嵌 `<button>` | 移除/取消按钮移到卡片外的 `.ic-card-row` 兄弟节点 |
+| `label-content-name-mismatch` ×10 | 卡片/工位的 `aria-label` 与可见文字不一致 | 去掉 `aria-label`，让可访问名称来自可见文字，操作提示改用 `title` |
+| 切模式后画布不渲染 | `renderIntentCanvas()` 里 `if (S.task) return` 过严 | 移除该守卫，改由 `renderAll()` 只在空态调用 |
+| 添加卡片后页面跳到中间 | `input.focus()` 触发滚动容器自动滚动 | 去掉强制 focus；切模式时 `#scroll.scrollTop = 0` |
+
+### 11.7 验证
+
+- `check:syntax` 113/113、`check:types` 50 文件、`run-tests.mjs unit` **54 个测试文件全绿**；
+  新增 `tests/intent-canvas.test.mjs` 14 个用例（约束库合法性、就绪校验、标题截断安全、
+  显式指派优先、席位缺失兜底、序列化分段、统计口径）。
+- 前端保真审计（默认态 light 三视口）：axe 0、console 0、HTTP 0；仅剩 1 条已知的
+  `bubble-more / dir-pick` 滚动容器静态误报。
+- **画布态专项 axe**（CDP 预置 localStorage 进入画布模式 + 注入内置 axe-core，desktop 1440 与 mobile 390）：
+  WCAG 2.1 A/AA 违规 **0**、画布内 <12px 文字 **0**。
+- CDP 端到端：8 张卡片 / 5 个工位全部落位，点选指派与原生 `DragEvent` 拖拽各 1 次显式指派生效；
+  拦截 `/api/tasks` 请求确认 `goal` 长度 348、首行为自然语言主目标、含硬约束段、开工按钮状态正确恢复；
+  全程 `window.onerror` / `unhandledrejection` 均为 0。
+- 截图：`docs/ux-final-ic-desktop.png`、`docs/ux-final-ic-mobile.png`（本地验收产物，已忽略入库）。
