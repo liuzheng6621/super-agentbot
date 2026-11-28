@@ -1208,7 +1208,7 @@ const server = http.createServer(async (req, res) => {
     }
     // 把内置演示席位换成真实 CLI：ensure 只补齐内置席位，refresh 强制重体检并重组
     if (pathname === '/api/team/ensure' && method === 'POST') {
-      return json(res, 200, await ensureRealTeam());
+      return json(res, 200, await ensureRealTeam({ probe: true }));
     }
     if (pathname === '/api/team/refresh' && method === 'POST') {
       clearResolveCache();
