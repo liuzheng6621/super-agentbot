@@ -146,7 +146,12 @@ export function collectCandidates(probed, agents = store.agents, cache = store.d
 }
 
 /** 对没有有效缓存的候选做真实调用体检（并发限制，返回带 health 的候选） */
-export async function checkCandidates(candidates, { timeout = HEALTH_TIMEOUT, concurrency = 4, force = false } = {}) {
+export async function checkCandidates(
+  candidates,
+  { timeout = HEALTH_TIMEOUT, concurrency = 4, force = false, probe = true } = {},
+) {
+  // probe=false：默认启动只做存在性/版本/配置探测，不发起真实提示词调用。
+  if (!probe) return candidates;
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'af-team-'));
   const need = candidates.filter((c) => force || !c.health);
   try {
@@ -199,7 +204,7 @@ function persistHealth(candidates) {
  * 把内置演示席位换成真实可用的 CLI。
  * 幂等：只有还存在内置席位（或 force）时才改席位；体检结果始终刷新。
  */
-export async function ensureRealTeam({ force = false, refreshHealth = false } = {}) {
+export async function ensureRealTeam({ force = false, refreshHealth = false, probe = false } = {}) {
   const probed = await probeClis();
   const found = probed.filter((c) => c.found);
   if (!found.length) {
@@ -207,7 +212,8 @@ export async function ensureRealTeam({ force = false, refreshHealth = false } = 
   }
 
   const candidates = collectCandidates(found);
-  await checkCandidates(candidates, { force: refreshHealth });
+  // 只有显式体检（refreshHealth）或显式 probe 才调用真实提示词。
+  await checkCandidates(candidates, { force: refreshHealth, probe: probe || refreshHealth });
   persistHealth(candidates);
 
   const health = candidates.map((c) => ({ key: c.key, label: c.label, ...(c.health || {}) }));

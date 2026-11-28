@@ -72,6 +72,7 @@ export function createMessageEnvelope(task, message = {}, options = {}) {
   );
   const causeBy = String(options.causeBy || message.causeBy || '');
   const stepId = String(options.stepId || message.stepId || '');
+  const executionId = String(options.executionId || message.executionId || '');
   const artifactRefs = Array.isArray(options.artifactRefs)
     ? options.artifactRefs
     : Array.isArray(message.artifactRefs)
@@ -87,6 +88,7 @@ export function createMessageEnvelope(task, message = {}, options = {}) {
     parentMessageId,
     artifactRefs: cloneJson(artifactRefs),
     stepId,
+    executionId,
     protocolVersion: MESSAGE_PROTOCOL_VERSION,
     route: {
       channel: 'task',
@@ -113,6 +115,7 @@ export function ensureMessageEnvelope(task, message = {}) {
     parentMessageId: message.parentMessageId,
     causeBy: message.causeBy,
     stepId: message.stepId,
+    executionId: message.executionId,
     artifactRefs: message.artifactRefs,
   }));
   return true;

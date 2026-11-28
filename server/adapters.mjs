@@ -206,10 +206,64 @@ function runtimePathEnv(env) {
  * 执行一次真实 CLI 调用，把 stdout 增量回调出去。
  * @returns {Promise<{code:number, stdout:string, stderr:string, elapsed:number}>}
  */
+const QUALITY_ENV_KEYS = new Set(
+  [
+    'PATH',
+    'Path',
+    'PATHEXT',
+    'SystemRoot',
+    'SystemDrive',
+    'windir',
+    'COMSPEC',
+    'ComSpec',
+    'TEMP',
+    'TMP',
+    'HOME',
+    'USERPROFILE',
+    'APPDATA',
+    'LOCALAPPDATA',
+    'PROGRAMDATA',
+    'PROGRAMFILES',
+    'PROGRAMFILES(X86)',
+    'NUMBER_OF_PROCESSORS',
+    'PROCESSOR_ARCHITECTURE',
+    'OS',
+    'LANG',
+    'LC_ALL',
+    'SHELL',
+    'PWD',
+    'TERM',
+    'NODE_ENV',
+    'NODE_OPTIONS',
+    'NODE_PATH',
+    'npm_config_cache',
+    'npm_config_prefix',
+    'npm_config_registry',
+  ].map((key) => key.toLowerCase()),
+);
+const SECRET_KEY = /(?:api[_-]?key|token|secret|password|credential|private[_-]?key|bearer)/i;
+
+/**
+ * Quality gates run untrusted test commands. Keep the OS/toolchain essentials
+ * and drop anything that looks like a Provider credential.
+ */
+export function qualityGateEnv(baseEnv = process.env) {
+  const env = {};
+  for (const [key, value] of Object.entries(baseEnv || {})) {
+    if (value === undefined) continue;
+    if (SECRET_KEY.test(key)) continue;
+    if (!QUALITY_ENV_KEYS.has(key.toLowerCase())) continue;
+    env[key] = value;
+  }
+  // npm/node on Windows need a PATH; fall back to the process PATH if missing.
+  if (!env.PATH && !env.Path) env.PATH = String(baseEnv?.PATH || baseEnv?.Path || '');
+  return env;
+}
+
 export function spawnCli(
   agent,
   prompt,
-  { cwd, onChunk, timeout = 180000, signal, completeWhen = null, settleMs = 0 } = {},
+  { cwd, onChunk, timeout = 180000, signal, completeWhen = null, settleMs = 0, sanitizeEnv = false } = {},
 ) {
   return new Promise((resolve) => {
     const started = Date.now();
@@ -254,17 +308,22 @@ export function spawnCli(
       });
       return;
     }
+    const baseEnv = sanitizeEnv
+      ? qualityGateEnv(process.env)
+      : {
+          ...process.env,
+          // 单个 CLI 的自定义环境变量（如 gemini 的 GEMINI_API_KEY / GOOGLE_GEMINI_BASE_URL）
+          ...(execAgent.cli.env || {}),
+          // Provider Profile 只把引用解析成子进程环境，不把明文密钥写回 store。
+          ...(execAgent.provider?.env || {}),
+        };
     const env = runtimePathEnv({
-      ...process.env,
+      ...baseEnv,
       FORCE_COLOR: '0',
       NO_COLOR: '1',
       // Python 系 CLI（trae-cli / aider / goose）在中文 Windows 的 GBK 代码页下打 emoji 会崩，统一给 UTF-8
       PYTHONUTF8: '1',
       PYTHONIOENCODING: 'utf-8',
-      // 单个 CLI 的自定义环境变量（如 gemini 的 GEMINI_API_KEY / GOOGLE_GEMINI_BASE_URL）
-      ...(execAgent.cli.env || {}),
-      // Provider Profile 只把引用解析成子进程环境，不把明文密钥写回 store。
-      ...(execAgent.provider?.env || {}),
     });
     // 质量门可能在 node --test 中运行 node --test；子测试进程不能继承父测试上下文。
     delete env.NODE_TEST_CONTEXT;

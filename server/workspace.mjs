@@ -864,6 +864,7 @@ export function writeWorkspaceEntry(task, relPath, content, meta = {}, agent = n
     lang: langOf(rel),
     agentId: meta.agentId || '',
     stepId: meta.stepId || '',
+    executionId: meta.executionId || '',
     beforeVersion,
     expectedVersion,
     principalKind: principal?.kind || (agent?.id ? 'agent' : 'owner'),

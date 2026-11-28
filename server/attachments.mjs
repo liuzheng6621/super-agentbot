@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { writeFileAtomic } from './fs.mjs';
+import { withinRoot } from './path-roots.mjs';
 
 export const ATTACHMENT_LIMITS = Object.freeze({
   maxBytes: 8 * 1024 * 1024,
@@ -200,6 +201,23 @@ export function admitImage(buffer, options = {}) {
 
 export function readAttachment(image, { maxBytes = ATTACHMENT_LIMITS.maxBytes } = {}) {
   const abs = attachmentAbsolutePath(image);
+  const root = path.resolve(attachmentRoot());
+  if (!withinRoot(path.resolve(abs), root)) {
+    throw new AttachError('IMAGE_OUTSIDE_ROOT', '图片附件路径超出附件根目录', 403);
+  }
+  let linkStat;
+  try {
+    linkStat = fs.lstatSync(abs);
+  } catch {
+    throw new AttachError('IMAGE_NOT_FOUND', '图片附件不存在或已被清理', 404);
+  }
+  if (linkStat.isSymbolicLink()) {
+    throw new AttachError('IMAGE_SYMLINK', '图片附件不能是符号链接', 403);
+  }
+  const realRoot = fs.existsSync(root) ? fs.realpathSync(root) : root;
+  if (!withinRoot(fs.realpathSync(abs), realRoot)) {
+    throw new AttachError('IMAGE_OUTSIDE_ROOT', '图片附件经符号链接逃逸出根目录', 403);
+  }
   let stat;
   try {
     stat = fs.statSync(abs);

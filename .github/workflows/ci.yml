@@ -28,6 +28,9 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      # CI 里浏览器用例不允许跳过：跳过等于失败。
+      AGENTFORGE_REQUIRE_BROWSER_TESTS: '1'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -37,6 +40,11 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
+      - name: Set up Chrome (Linux)
+        id: chrome
+        if: runner.os == 'Linux'
+        uses: browser-actions/setup-chrome@v1
+
       - name: Prepare log directory
         run: mkdir -p artifacts
 
@@ -45,8 +53,47 @@ jobs:
           set -o pipefail
           npm run check:syntax 2>&1 | tee "artifacts/syntax-${RUNNER_OS}-node-${{ matrix.node }}.log"
 
+      - name: Type gate
+        run: npm run check:types
+
+      - name: Coverage gate
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 22
+        run: |
+          set -o pipefail
+          npm run test:coverage 2>&1 | tee "artifacts/coverage-${RUNNER_OS}-node-${{ matrix.node }}.log"
+
+      - name: Browser availability
+        env:
+          AGENTFORGE_BROWSER_PATH: ${{ runner.os == 'Linux' && steps.chrome.outputs.chrome-path || '' }}
+        run: |
+          set -e
+          if [ -n "$AGENTFORGE_BROWSER_PATH" ] && [ -x "$AGENTFORGE_BROWSER_PATH" ]; then
+            echo "browser: $AGENTFORGE_BROWSER_PATH"
+            exit 0
+          fi
+          found=""
+          for candidate in \
+            "/c/Program Files (x86)/Microsoft/Edge/Application/msedge.exe" \
+            "/c/Program Files/Microsoft/Edge/Application/msedge.exe" \
+            "/c/Program Files/Google/Chrome/Application/chrome.exe" \
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
+            "/usr/bin/google-chrome" \
+            "/usr/bin/google-chrome-stable" \
+            "/usr/bin/chromium" \
+            "/usr/bin/chromium-browser"; do
+            if [ -x "$candidate" ]; then found="$candidate"; break; fi
+          done
+          if [ -z "$found" ]; then
+            echo "::error::CI 需要真实浏览器运行 DOM 验收；未找到 Edge/Chrome"
+            exit 1
+          fi
+          echo "browser: $found"
+
       - name: Test
         if: always()
+        env:
+          # Linux 用 setup-chrome 下载的 Chrome；Windows/macOS 走 Edge / Chrome 候选路径。
+          AGENTFORGE_BROWSER_PATH: ${{ runner.os == 'Linux' && steps.chrome.outputs.chrome-path || '' }}
         run: |
           set -o pipefail
           npm test 2>&1 | tee "artifacts/test-${RUNNER_OS}-node-${{ matrix.node }}.log"

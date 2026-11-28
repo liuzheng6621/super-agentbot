@@ -102,3 +102,77 @@ test('取消后停止调度且不启动新节点', async () => {
   await assert.rejects(pending, /abort/i);
   assert.deepEqual(visited, ['a']);
 });
+
+test('同一 Agent 的就绪节点串行，不同 Agent 仍可并行', async () => {
+  let activeSame = 0;
+  let peakSame = 0;
+  let activeOther = 0;
+  let peakOther = 0;
+  let activeAll = 0;
+  let peakAll = 0;
+  const contexts = new Map();
+  const order = [];
+  const result = await runDag(
+    [
+      { id: 'coder-a', agentId: 'coder-1', needs: [] },
+      { id: 'coder-b', agentId: 'coder-1', needs: [] },
+      { id: 'tester-a', agentId: 'tester-1', needs: [] },
+    ],
+    {
+      maxConcurrency: 3,
+      resourceKey: (step) => step.agentId,
+      run: async (step, context) => {
+        contexts.set(step.id, context);
+        activeAll += 1;
+        peakAll = Math.max(peakAll, activeAll);
+        if (step.agentId === 'coder-1') {
+          activeSame += 1;
+          peakSame = Math.max(peakSame, activeSame);
+        } else {
+          activeOther += 1;
+          peakOther = Math.max(peakOther, activeOther);
+        }
+        order.push(`start:${step.id}`);
+        await wait(30);
+        order.push(`end:${step.id}`);
+        if (step.agentId === 'coder-1') activeSame -= 1;
+        else activeOther -= 1;
+        activeAll -= 1;
+        return { ok: true };
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(peakSame, 1, '同一 Agent 不能并发执行两个节点');
+  assert.equal(peakOther, 1);
+  assert.equal(peakAll, 2, '不同 Agent 应能并行');
+  assert.ok(order.indexOf('start:tester-a') < order.indexOf('end:coder-a'));
+  assert.notEqual(contexts.get('coder-a').executionId, contexts.get('coder-b').executionId);
+  assert.equal(contexts.get('coder-a').stepId, 'coder-a');
+  assert.equal(contexts.get('coder-b').stepId, 'coder-b');
+  assert.equal(contexts.get('coder-a').agentId, 'coder-1');
+});
+
+test('资源约束不影响原有未声明资源键的并行行为', async () => {
+  let active = 0;
+  let peak = 0;
+  const result = await runDag(
+    [
+      { id: 'a', needs: [] },
+      { id: 'b', needs: [] },
+    ],
+    {
+      maxConcurrency: 2,
+      run: async () => {
+        active += 1;
+        peak = Math.max(peak, active);
+        await wait(20);
+        active -= 1;
+        return { ok: true };
+      },
+    },
+  );
+  assert.equal(result.ok, true);
+  assert.equal(peak, 2);
+});

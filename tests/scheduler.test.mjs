@@ -286,7 +286,11 @@ test('legacy tasks without priority load as normal without changing the db shape
     'settings',
     'tasks',
   ]);
-  assert.equal(saved.tasks[0].priority, 'normal');
+  const shards = fs
+    .readdirSync(path.join(legacyDir, 'tasks'))
+    .filter((name) => name.endsWith('.json') && name !== 'index.json')
+    .map((name) => JSON.parse(fs.readFileSync(path.join(legacyDir, 'tasks', name), 'utf8')));
+  assert.equal(shards[0].priority, 'normal');
   fs.rmSync(legacyDir, { recursive: true, force: true });
 });
 

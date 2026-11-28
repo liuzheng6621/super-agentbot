@@ -176,6 +176,47 @@ test('自审按 reviewerId 与 implementerId 判定，并在记录中带出双�
   assert.equal(store.taskSummary(saved).quality.selfReview, true, '/api/state 的任务摘要可见');
 });
 
+test('多 coder 场景聚合全部实现者，任一命中都标为自审', () => {
+  const coder = store.findAgentByRole('coder');
+  const tester = store.findAgentByRole('tester');
+  const secondCoder = store.addAgent({
+    name: 'Second coder',
+    role: 'coder',
+    title: 'Implementation pool',
+    seat: false,
+    mode: 'sim',
+  });
+  try {
+    const task = store.createTask({ goal: '多实现者独立性' });
+    store.setPlan(task.id, [
+      { id: 'core', title: '核心', role: 'coder', agentId: coder.id },
+      { id: 'api', title: 'API', role: 'coder', agentId: secondCoder.id },
+      { id: 'review', title: '评审', role: 'reviewer', agentId: tester.id },
+    ]);
+    store.updateStep(task.id, 'core', { status: 'done' });
+    store.updateStep(task.id, 'api', { status: 'done' });
+
+    const independent = reviewIndependenceFor(store.getTask(task.id), tester);
+    assert.deepEqual(
+      new Set(independent.implementerIds),
+      new Set([coder.id, secondCoder.id]),
+      'must retain every implementation agent',
+    );
+    assert.deepEqual(
+      new Set(independent.implementationStepIds),
+      new Set(['core', 'api']),
+    );
+    assert.equal(independent.selfReview, false);
+
+    const selfByFirst = reviewIndependenceFor(store.getTask(task.id), coder);
+    assert.equal(selfByFirst.selfReview, true, 'matching any coder is self review');
+    const selfBySecond = reviewIndependenceFor(store.getTask(task.id), secondCoder);
+    assert.equal(selfBySecond.selfReview, true, 'matching the last coder is self review');
+  } finally {
+    store.removeAgent(secondCoder.id);
+  }
+});
+
 test('上下文包可以直接复用目录快照，不再重复扫描', () => {
   const dir = workspace({ 'a.js': 'a' }).workspace;
   const task = { id: 'ctx-task', goal: '看板', workspace: dir, status: 'running', mode: 'auto', plan: [], messages: [] };
@@ -239,8 +280,12 @@ test('质量门会真的跑工作区里的测试入口，找不到入口就报 n
 
   const passing = store.createTask({
     goal: '质量门通过样本',
-    workspace: workspace({ 'package.json': JSON.stringify({ scripts: { test: 'node -e "process.exit(0)"' } }) })
-      .workspace,
+    // 退出码 0 不再算通过：必须带 pass/fail 证据。
+    workspace: workspace({
+      'package.json': JSON.stringify({
+        scripts: { test: 'node -e "console.log(\'# pass 1\');console.log(\'# fail 0\')"' },
+      }),
+    }).workspace,
   });
   const passed = await runQualityGate(passing, { round: 0 }, signal);
   assert.equal(passed.status, 'passed');
@@ -427,9 +472,8 @@ test('Provider 用量账本按 run 记录真实归属，未知成本保持 null'
   assert.equal(summary.usage.cost, null, '没有价格配置时不能伪造 0 成本');
 
   store.flush();
-  const saved = JSON.parse(
-    fs.readFileSync(path.join(temp, 'db.json'), 'utf8'),
-  ).tasks.find((item) => item.id === task.id);
+  const shardFile = path.join(temp, 'tasks', `${task.id}.json`);
+  const saved = JSON.parse(fs.readFileSync(shardFile, 'utf8'));
   assert.equal(saved.usageLedger[0].runId, 'run-usage-1');
   assert.equal(saved.usageLedger[0].tokensOut, 123);
 });

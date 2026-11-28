@@ -710,6 +710,10 @@
               <span class="fr-main">方案讨论<b>多成员提案 → 交叉评分 → 裁决后实施</b></span>
               <input type="checkbox" id="setDebateEnabled" class="switch" />
             </label>
+            <label class="flow-row">
+              <span class="fr-main">动态工序图<b>规划师按任务形状生成 DAG；非法计划自动回退模板</b></span>
+              <input type="checkbox" id="setDynamicPlanEnabled" class="switch" />
+            </label>
 
             <h4 class="flow-sec">讨论规模</h4>
             <div class="flow-grid">
@@ -737,6 +741,9 @@
               </label>
               <label class="field"><span>单步重试<em>CLI 启动失败后</em></span>
                 <select id="setMaxStepAttempts"></select>
+              </label>
+              <label class="field"><span>动态工序上限<em>2–12 个节点</em></span>
+                <select id="setMaxPlanSteps"></select>
               </label>
             </div>
 

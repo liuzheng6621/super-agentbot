@@ -494,6 +494,7 @@ export class ToolGateway {
     agentId = '',
     principal = null,
     stepId = '',
+    executionId = '',
     source = 'api',
     audit = true,
   } = {}) {
@@ -513,6 +514,7 @@ export class ToolGateway {
       principal: actor,
       agentId: actor.kind === 'agent' ? actor.id : String(agentId || ''),
       stepId: String(stepId || ''),
+      executionId: String(executionId || ''),
       source: String(source || 'api'),
       risk: tool.risk,
       arguments: auditArguments({ ...args, op }),
@@ -523,6 +525,7 @@ export class ToolGateway {
         type: 'tool.call.start',
         agentId: auditMeta.agentId,
         stepId: auditMeta.stepId,
+        executionId: auditMeta.executionId,
         data: auditMeta,
       });
     }
@@ -540,6 +543,7 @@ export class ToolGateway {
               type: 'tool.policy.denied',
               agentId: agent.id,
               stepId: auditMeta.stepId,
+              executionId: auditMeta.executionId,
               data: { ...auditMeta, error: message },
             });
           }
@@ -550,6 +554,7 @@ export class ToolGateway {
       const meta = {
         agentId: auditMeta.agentId,
         stepId: auditMeta.stepId,
+        executionId: auditMeta.executionId,
         principal: actor,
         callId,
         expectedVersion: normalized.expectedVersion || '',
@@ -564,6 +569,7 @@ export class ToolGateway {
           type: 'tool.call.end',
           agentId: auditMeta.agentId,
           stepId: auditMeta.stepId,
+          executionId: auditMeta.executionId,
           data: {
             ...auditMeta,
             status: 'ok',
@@ -588,6 +594,7 @@ export class ToolGateway {
           type: 'tool.call.end',
           agentId: auditMeta.agentId,
           stepId: auditMeta.stepId,
+          executionId: auditMeta.executionId,
           data: {
             ...auditMeta,
             status: err instanceof WorkspaceError && err.status === 403 ? 'denied' : 'error',

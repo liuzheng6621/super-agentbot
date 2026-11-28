@@ -144,6 +144,10 @@ export function resolveSecurityConfig(env = process.env) {
     tokenError,
     principals,
     allowedOrigins: parseAllowedOrigins(env.AGENTFORGE_CORS_ORIGINS),
+    allowedHosts: [
+      ...parseAllowedOrigins(env.AGENTFORGE_ALLOWED_HOSTS),
+      String(env.HOST || ''),
+    ].filter(Boolean),
     allowInsecureRemote: env.AGENTFORGE_ALLOW_INSECURE_REMOTE === '1',
   };
 }
@@ -184,17 +188,38 @@ function secureEqual(left, right) {
 
 export function authenticateApi(req, url, config) {
   if (!config?.tokenEnabled) {
+    // 零配置只对回环成立；远程监听即使显式放开也不授予 owner。
+    const address = clientAddress(req);
+    const loopback = !address || isLoopbackAddress(address);
+    if (loopback) {
+      return {
+        ok: true,
+        source: 'disabled',
+        principal: {
+          kind: 'owner',
+          id: 'owner',
+          name: 'Local Owner',
+          scopes: ['*'],
+          tenantId: '*',
+          taskLimit: 0,
+          source: 'loopback',
+        },
+      };
+    }
+    if (!config?.allowInsecureRemote) {
+      return { ok: false, reason: '缺少 API Token', source: '' };
+    }
     return {
       ok: true,
-      source: 'disabled',
+      source: 'insecure-remote',
       principal: {
-        kind: 'owner',
-        id: 'owner',
-        name: 'Local Owner',
-        scopes: ['*'],
-        tenantId: '*',
+        kind: 'operator',
+        id: 'insecure-remote',
+        name: 'Insecure Remote',
+        scopes: [...DEFAULT_OPERATOR_SCOPES],
+        tenantId: 'default',
         taskLimit: 0,
-        source: 'loopback',
+        source: 'insecure-remote',
       },
     };
   }
@@ -237,6 +262,10 @@ export function principalCanAccessTenant(principal, tenantId) {
 
 function requiredScope(method, pathname) {
   if (pathname === '/api/shutdown' || pathname === '/api/fs') return 'operator:admin';
+  if (pathname === '/api/hook-token' || pathname === '/api/hook-token/rotate') {
+    return 'operator:admin';
+  }
+  if (pathname === '/api/maintenance/gc') return 'operator:admin';
   if (
     pathname === '/api/probe' ||
     pathname === '/api/team/ensure' ||
@@ -317,6 +346,69 @@ export function corsHeaders(decision) {
 
 export function clientAddress(req) {
   return String(req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
+}
+
+export function isLoopbackAddress(address = '') {
+  const value = String(address || '').trim().toLowerCase().replace(/^::ffff:/, '');
+  if (!value) return false;
+  return value === '::1' || value === 'localhost' || value.startsWith('127.');
+}
+
+/** Strip the port and IPv6 brackets from a Host / Origin authority. */
+function hostName(value = '') {
+  let text = String(value || '').trim().toLowerCase();
+  if (!text) return '';
+  if (text.startsWith('[')) {
+    const end = text.indexOf(']');
+    return end > 0 ? text.slice(1, end) : text;
+  }
+  const colon = text.lastIndexOf(':');
+  if (colon > -1 && colon === text.indexOf(':')) text = text.slice(0, colon);
+  return text;
+}
+
+/**
+ * DNS rebinding defence: a browser keeps the attacker's Host name while the
+ * connection lands on 127.0.0.1, so only loopback names, the bind address and
+ * explicitly configured hosts may pass.
+ */
+export function hostAllowed(req, config = {}) {
+  const name = hostName(req.headers?.host);
+  if (!name) return { ok: false, reason: '请求缺少 Host 头' };
+  const loopbackNames = new Set(['127.0.0.1', '::1', 'localhost']);
+  if (loopbackNames.has(name)) return { ok: true, reason: '' };
+  const configured = (config.allowedHosts || []).map((item) => hostName(item)).filter(Boolean);
+  if (configured.includes(name)) return { ok: true, reason: '' };
+  // 允许用本机实际地址（LAN IP）访问，域名必须显式配置。
+  const local = String(req.socket?.localAddress || '').replace(/^::ffff:/, '').toLowerCase();
+  const looksLikeIp = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(name) || name.includes(':');
+  if (looksLikeIp && local && name === local) return { ok: true, reason: '' };
+  return { ok: false, reason: `Host 不在允许列表：${name}` };
+}
+
+/** Sec-Fetch-Site 由浏览器生成、页面脚本无法伪造；缺失说明不是浏览器请求。 */
+export function fetchMetadataAllowed(req) {
+  const site = String(req.headers?.['sec-fetch-site'] || '').trim().toLowerCase();
+  if (!site) return { ok: true, reason: '' };
+  if (site === 'same-origin' || site === 'none') return { ok: true, reason: '' };
+  return { ok: false, reason: `Sec-Fetch-Site=${site}` };
+}
+
+/**
+ * Per-request guard applied before authentication:
+ * Host must be allowed always; without a token, state-changing browser
+ * requests must prove same-origin fetch metadata.
+ */
+export function requestGuard(req, config = {}) {
+  const host = hostAllowed(req, config);
+  if (!host.ok) return { ok: false, code: 'host-not-allowed', reason: host.reason };
+  const method = String(req.method || 'GET').toUpperCase();
+  const mutating = method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS';
+  if (mutating && !config?.tokenEnabled) {
+    const meta = fetchMetadataAllowed(req);
+    if (!meta.ok) return { ok: false, code: 'cross-site-blocked', reason: meta.reason };
+  }
+  return { ok: true, code: '', reason: '' };
 }
 
 export function securitySummary({ host, config }) {

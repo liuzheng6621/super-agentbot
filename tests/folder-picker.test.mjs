@@ -7,14 +7,22 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-const EDGE_CANDIDATES = [
+const BROWSER_CANDIDATES = [
+  process.env.AGENTFORGE_BROWSER_PATH,
   process.env.AGENTFORGE_EDGE_PATH,
-  'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-  'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+  'C:////Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+  'C:////Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+  'C:////Program Files\\Google\\Chrome\\Application\\chrome.exe',
+  'C:////Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/usr/bin/google-chrome',
+  '/usr/bin/google-chrome-stable',
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
 ].filter(Boolean);
 
-function edgePath() {
-  return EDGE_CANDIDATES.find((candidate) => fs.existsSync(candidate)) || '';
+function browserPath() {
+  return BROWSER_CANDIDATES.find((candidate) => fs.existsSync(candidate)) || '';
 }
 
 function availablePort() {
@@ -28,7 +36,7 @@ function availablePort() {
   });
 }
 
-async function waitFor(fn, label, timeoutMs = 12000) {
+async function waitFor(fn, label, timeoutMs = 25000) {
   const deadline = Date.now() + timeoutMs;
   let lastError = null;
   while (Date.now() < deadline) {
@@ -51,7 +59,7 @@ async function waitForHealth(baseUrl, child) {
   }, 'server health');
 }
 
-async function startServer(dataDir) {
+async function startServer(dataDir, extraEnv = {}) {
   const port = await availablePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, ['server/index.mjs'], {
@@ -62,6 +70,7 @@ async function startServer(dataDir) {
       HOST: '127.0.0.1',
       AGENTFORGE_DATA_DIR: dataDir,
       AGENTFORGE_SKIP_TEAM_BOOTSTRAP: '1',
+      ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
@@ -324,7 +333,7 @@ class Cdp {
 }
 
 async function startEdge() {
-  const executable = edgePath();
+  const executable = browserPath();
   if (!executable) return null;
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-edge-'));
   const port = await availablePort();
@@ -333,6 +342,10 @@ async function startEdge() {
     [
       '--headless=new',
       '--disable-gpu',
+      // CI 容器里 Chrome 的沙箱与 /dev/shm 不可用，必须显式关闭。
+      '--no-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-setuid-sandbox',
       '--no-first-run',
       '--no-default-browser-check',
       `--user-data-dir=${profile}`,
@@ -424,7 +437,15 @@ function directoryPathForUrl(value) {
 test('文件夹选择器在真实浏览器中可见、可浏览并保留中文空格路径', async (t) => {
   const edge = await startEdge();
   if (!edge) {
-    t.skip('未找到 Microsoft Edge；设置 AGENTFORGE_EDGE_PATH 后运行浏览器验收');
+    const required =
+      process.env.AGENTFORGE_REQUIRE_BROWSER_TESTS === '1' ||
+      process.env.CI === 'true' ||
+      process.env.CI === '1';
+    const message =
+      '未找到 Edge / Chrome；设置 AGENTFORGE_BROWSER_PATH 后运行浏览器验收';
+    // CI 与显式要求下，跳过等于失败：浏览器用例必须真跑。
+    if (required) assert.fail(message);
+    t.skip(message);
     return;
   }
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-folder-'));
@@ -439,6 +460,19 @@ test('文件夹选择器在真实浏览器中可见、可浏览并保留中文�
     server = await startServer(dataDir);
     session = await openPage(edge, server.baseUrl);
     const { page } = session;
+
+    const shell = await page.evaluate(`(() => ({
+      workspaceEntry: !!document.querySelector('#heroInput'),
+      taskList: !!document.querySelector('#taskList'),
+      identityChip: !!document.querySelector('#identityChip'),
+      authModal: !!document.querySelector('#authModal'),
+      authModalOpen: document.querySelector('#authModal').open,
+    }))()`);
+    assert.equal(shell.workspaceEntry, true, '状态页必须渲染工作区入口');
+    assert.equal(shell.taskList, true, '状态页必须渲染任务列表');
+    assert.equal(shell.identityChip, true, '状态页必须渲染主体标识');
+    assert.equal(shell.authModal, true, '登录弹窗必须在 DOM 中');
+    assert.equal(shell.authModalOpen, false, '无 Token 回环不需要登录');
 
     const initial = await page.evaluate(`(() => {
       const button = document.querySelector('#dirPick');
@@ -554,6 +588,46 @@ test('文件夹选择器在真实浏览器中可见、可浏览并保留中文�
     fs.writeFileSync(screenshotPath, Buffer.from(screenshot.data, 'base64'));
     assert.ok(fs.statSync(screenshotPath).size > 1000, '当前构建截图应非空');
     console.log(`[folder-picker] screenshot=${screenshotPath} bytes=${fs.statSync(screenshotPath).size}`);
+
+    // 登录：Token 服务下必须先弹登录框，输入后主体标识可见。
+    const securedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-auth-'));
+    const token = ['agentforge', 'browser', 'login', '0123456789'].join('-');
+    const secured = await startServer(securedDir, { AGENTFORGE_API_TOKEN: token });
+    let securedSession = null;
+    try {
+      securedSession = await openPage(edge, secured.baseUrl);
+      await waitFor(
+        () => securedSession.page.evaluate("document.querySelector('#authModal').open"),
+        'auth modal opens on 401',
+      );
+      await securedSession.page.evaluate(`(() => {
+        const input = document.querySelector('#authTokenInput');
+        input.value = ${JSON.stringify(token)};
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        document.querySelector('#authSave').click();
+      })()`);
+      await waitFor(
+        () => securedSession.page.evaluate("!document.querySelector('#authModal').open"),
+        'auth modal closes after login',
+      );
+      await waitFor(
+        () => securedSession.page.evaluate("!document.querySelector('#identityChip').hidden"),
+        'identity chip after login',
+      );
+    } finally {
+      await closePage(securedSession);
+      if (secured.child.exitCode === null) secured.child.kill('SIGTERM');
+      await new Promise((resolve) => {
+        if (secured.child.exitCode !== null) resolve();
+        else secured.child.once('exit', resolve);
+        setTimeout(resolve, 2000).unref();
+      });
+      try {
+        fs.rmSync(securedDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 120 });
+      } catch {
+        /* Windows may hold the directory briefly. */
+      }
+    }
   } catch (err) {
     throw new Error(`${err.message}\n${server?.logs() || ''}`);
   } finally {

@@ -2,8 +2,23 @@
    AGENTFORGE · 前端逻辑
    ========================================================= */
 
-const $ = (sel, root = document) => root.querySelector(sel);
-const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+import {
+  $,
+  $$,
+  escapeHtml,
+  pad2,
+  fmtMs,
+  fmtTime,
+  fmtBytes,
+  initials,
+} from "./lib/format.js";
+import {
+  STATUS_TEXT,
+  ROLE_META,
+  STEP_STATUS_TEXT,
+  PRIORITY_TEXT,
+  AUTOMATION_STATUS_LABEL,
+} from "./lib/status.js";
 
 const S = {
   agents: [],
@@ -103,33 +118,6 @@ function toast(text, type = "") {
     setTimeout(() => node.remove(), 220);
   }, 2400);
 }
-
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-const initials = (name = "?") => (name.replace(/[^\w\u4e00-\u9fa5]/g, "").slice(0, 2) || "AI").toUpperCase();
-
-const fmtTime = (ts) => {
-  const d = new Date(ts || Date.now());
-  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-};
-
-const fmtBytes = (n) => (n > 1024 ? `${(n / 1024).toFixed(1)}K` : `${n || 0}B`);
-
-const fmtMs = (ms) => {
-  if (!ms) return "—";
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
-  return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
-};
-
-const pad2 = (n) => String(n).padStart(2, "0");
 
 function authHeaders(base = {}) {
   const headers = { ...base };
@@ -486,37 +474,6 @@ function renderHeroStats() {
 
 /* ---------------- 渲染：任务列表 ---------------- */
 
-const STATUS_TEXT = {
-  idle: "待命",
-  queued: "排队中",
-  running: "协作中",
-  stopping: "停止中",
-  done: "已交付",
-  stopped: "已停止",
-  error: "出错",
-  needs_attention: "待人工确认",
-};
-
-const ROLE_META = {
-  planner: { short: "规划", order: 1 },
-  architect: { short: "架构", order: 2 },
-  coder: { short: "实现", order: 3 },
-  tester: { short: "测试", order: 4 },
-  reviewer: { short: "评审", order: 5 },
-};
-
-const STEP_STATUS_TEXT = {
-  pending: "等待上游",
-  queued: "排队中",
-  running: "执行中",
-  retrying: "重试中",
-  done: "完成",
-  error: "失败",
-  blocked: "上游中断",
-  stopped: "已停止",
-  skipped: "已跳过",
-};
-
 function isDegradedDecision(decision, debateStatus = "") {
   return (
     !!decision?.degraded ||
@@ -533,13 +490,17 @@ function renderTasks() {
             t.waitingReason || "",
           )}">
             <span class="t-title">${escapeHtml(t.title)}</span>
-            <span class="t-meta"><span>${PRIORITY_TEXT[t.priority] || ""}</span><span>${STATUS_TEXT[t.status] || t.status}${
+            <span class="t-meta"><span>${PRIORITY_TEXT[t.priority] || ""}</span><span>${
+              t.pendingConfirmation ? "待确认" : STATUS_TEXT[t.status] || t.status
+            }${
               t.status === "queued" && t.queuePosition ? ` #${t.queuePosition}` : ""
             }</span><span>${t.doneSteps}/${t.steps || 0}</span><span>${t.files}F</span></span>
             ${
-              t.status === "queued" && t.waitingReason
-                ? `<span class="t-wait">${escapeHtml(t.waitingReason)}</span>`
-                : ""
+              t.pendingConfirmation
+                ? `<span class="t-wait">历史同模式预计 ${t.costEstimate?.low ?? "?"}-${t.costEstimate?.high ?? "?"} tokens，确认后开工</span>`
+                : t.status === "queued" && t.waitingReason
+                  ? `<span class="t-wait">${escapeHtml(t.waitingReason)}</span>`
+                  : ""
             }
           </div>`,
         )
@@ -556,12 +517,6 @@ function renderTasks() {
   }
   renderHeroStats();
 }
-
-const PRIORITY_TEXT = {
-  high: "高",
-  normal: "普通",
-  low: "低",
-};
 
 const TASK_SUMMARY_FIELDS = [
   "id",
@@ -2433,10 +2388,23 @@ async function createWorkspaceFile() {
   }
 }
 
+async function ensureHookToken() {
+  if (S.hookToken !== undefined) return S.hookToken;
+  S.hookToken = "";
+  try {
+    const info = await api("/api/hook-token");
+    S.hookToken = info?.token || "";
+  } catch {
+    S.hookToken = "";
+  }
+  renderStats();
+  return S.hookToken;
+}
+
 function renderStats() {
   const t = S.task;
   const grid = $("#statGrid");
-  const hookUrl = `${location.origin}/api/hooks/${S.settings.hookToken || ""}`;
+  const hookUrl = `${location.origin}/api/hooks/${S.hookToken || ""}`;
   $("#hookUrl").textContent = hookUrl.replace(/^https?:\/\//, "");
 
   if (!t) {
@@ -2463,7 +2431,13 @@ function renderStats() {
               : gate === "not-run" || (gate === "pending" && terminal)
                 ? "未执行"
                 : "待执行";
-  const gateHint = t.quality?.reason || t.quality?.command || "任务还在跑，质量门尚未开始";
+  const selfReview = t.quality?.selfReview === true;
+  const selfReviewHint = selfReview
+    ? `自审：${t.quality.reviewerProviderId || "?"}/${t.quality.reviewerModel || "?"}`
+    : "";
+  const gateHint =
+    (t.quality?.reason || t.quality?.command || "任务还在跑，质量门尚未开始") +
+    (selfReviewHint ? ` · ${selfReviewHint}` : "");
   const elapsed = stats.ms
     ? fmtMs(stats.ms)
     : t.running
@@ -2643,18 +2617,20 @@ const FLOW_NUM_FIELDS = [
   ["setMaxConcurrency", "maxConcurrency", 1, 4, 2],
   ["setMaxRepairRounds", "maxRepairRounds", 0, 3, 1],
   ["setMaxStepAttempts", "maxStepAttempts", 1, 3, 2],
+  ["setMaxPlanSteps", "maxPlanSteps", 2, 12, 12],
 ];
 
 const FLOW_PRESETS = {
-  fast: { debateEnabled: false, debateParticipants: 2, debateConcurrency: 2, debatePoolSeats: 0, maxTaskConcurrency: 3, maxConcurrency: 4, maxRepairRounds: 0, maxStepAttempts: 1 },
-  balanced: { debateEnabled: true, debateParticipants: 5, debateConcurrency: 2, debatePoolSeats: 1, maxTaskConcurrency: 2, maxConcurrency: 2, maxRepairRounds: 1, maxStepAttempts: 2 },
-  thorough: { debateEnabled: true, debateParticipants: 6, debateConcurrency: 4, debatePoolSeats: 2, maxTaskConcurrency: 2, maxConcurrency: 4, maxRepairRounds: 3, maxStepAttempts: 3 },
+  fast: { debateEnabled: false, dynamicPlanEnabled: false, debateParticipants: 2, debateConcurrency: 2, debatePoolSeats: 0, maxTaskConcurrency: 3, maxConcurrency: 4, maxRepairRounds: 0, maxStepAttempts: 1, maxPlanSteps: 8 },
+  balanced: { debateEnabled: true, dynamicPlanEnabled: true, debateParticipants: 5, debateConcurrency: 2, debatePoolSeats: 1, maxTaskConcurrency: 2, maxConcurrency: 2, maxRepairRounds: 1, maxStepAttempts: 2, maxPlanSteps: 12 },
+  thorough: { debateEnabled: true, dynamicPlanEnabled: true, debateParticipants: 6, debateConcurrency: 4, debatePoolSeats: 2, maxTaskConcurrency: 2, maxConcurrency: 4, maxRepairRounds: 3, maxStepAttempts: 3, maxPlanSteps: 12 },
 };
 
 function currentFlowSettings() {
   const s = S.settings || {};
   return {
     debateEnabled: s.debateEnabled !== false,
+    dynamicPlanEnabled: s.dynamicPlanEnabled !== false,
     debateParticipants: Number(s.debateParticipants) || 4,
     debateConcurrency: Number(s.debateConcurrency) || 2,
     debatePoolSeats: Number(s.debatePoolSeats ?? 1),
@@ -2662,6 +2638,7 @@ function currentFlowSettings() {
     maxConcurrency: Number(s.maxConcurrency) || 2,
     maxRepairRounds: Number(s.maxRepairRounds ?? 1),
     maxStepAttempts: Number(s.maxStepAttempts) || 2,
+    maxPlanSteps: Number(s.maxPlanSteps) || 12,
     timeouts: { ...(s.timeouts || {}) },
   };
 }
@@ -2723,11 +2700,15 @@ function fillFlowForm(values) {
     el.value = String(values[key] ?? fallback);
   }
   $("#setDebateEnabled").checked = values.debateEnabled !== false;
+  $("#setDynamicPlanEnabled").checked = values.dynamicPlanEnabled !== false;
   fillTimeoutFields(values.timeouts);
 }
 
 function readFlowForm() {
-  const out = { debateEnabled: $("#setDebateEnabled").checked };
+  const out = {
+    debateEnabled: $("#setDebateEnabled").checked,
+    dynamicPlanEnabled: $("#setDynamicPlanEnabled").checked,
+  };
   for (const [id, key] of FLOW_NUM_FIELDS) out[key] = Number($(`#${id}`).value);
   out.timeouts = timeoutMillisecondsFromForm($("#flowModal"));
   return out;
@@ -2800,20 +2781,6 @@ function setFlowMode(mode) {
 /* ---------------- 渲染总入口 ---------------- */
 
 /* ---------------- 定时任务 ---------------- */
-
-const AUTOMATION_STATUS_LABEL = {
-  idle: "待运行",
-  paused: "已暂停",
-  scheduled: "已排队",
-  running: "运行中",
-  waiting: "等待上一轮",
-  "event-waiting": "等待事件",
-  woken: "事件已唤醒",
-  done: "已完成",
-  failed: "失败",
-  "retry-waiting": "等待重试",
-  stopped: "已停止",
-};
 
 function fmtDateTime(ts) {
   if (!ts) return "—";
@@ -3342,7 +3309,8 @@ async function createTask(goal) {
     };
     if (S.dir) body.workspace = S.dir;
     if (S.dir && S.worktree) body.isolation = "worktree";
-    const { task } = await api("/api/tasks", { method: "POST", body });
+    const created = await api("/api/tasks", { method: "POST", body });
+    const task = created.task;
     S.task = task;
     S.workspace = null;
     S.workspacePreviewData = null;
@@ -3357,7 +3325,22 @@ async function createTask(goal) {
     switchTab(S.flowMode === "direct" ? "plan" : "debate");
     renderAll();
     loadWorkspace();
-    toast(S.flowMode === "direct" ? "团队已按「直接开工」开工" : "团队已开工，先出方案再实施", "ok");
+    if (created.requiresConfirmation) {
+      const est = created.estimate || {};
+      const ok = window.confirm(
+        `历史同模式任务预计消耗 ${est.low}-${est.high} tokens，超过确认阈值 ${created.costGateTokens}。\n确认后才会开工，是否继续？`,
+      );
+      if (ok) {
+        const confirmed = await api(`/api/tasks/${task.id}/confirm`, { method: "POST" });
+        S.task = confirmed.task;
+        renderAll();
+        toast("已确认，团队开工", "ok");
+      } else {
+        toast("已保留为待确认任务，点任务卡片可再确认", "info");
+      }
+    } else {
+      toast(S.flowMode === "direct" ? "团队已按「直接开工」开工" : "团队已开工，先出方案再实施", "ok");
+    }
   } catch (err) {
     toast(`创建失败：${err.message}`, "err");
   } finally {
@@ -4603,9 +4586,21 @@ function bind() {
   });
 
   /* 任务列表 */
-  $("#taskList").addEventListener("click", (e) => {
+  $("#taskList").addEventListener("click", async (e) => {
     const item = e.target.closest(".task-item");
-    if (item) selectTask(item.dataset.task);
+    if (!item) return;
+    selectTask(item.dataset.task);
+    const pending = S.tasks.find((t) => t.id === item.dataset.task)?.pendingConfirmation;
+    if (!pending) return;
+    if (!window.confirm("该任务因预计成本超过阈值被挂起，现在确认开工？")) return;
+    try {
+      const confirmed = await api(`/api/tasks/${item.dataset.task}/confirm`, { method: "POST" });
+      S.task = confirmed.task;
+      renderAll();
+      toast("已确认，团队开工", "ok");
+    } catch (err) {
+      toast(`确认失败：${err.message}`, "err");
+    }
   });
   $("#loadMoreTasks").addEventListener("click", loadMoreTasks);
 
@@ -4861,7 +4856,8 @@ function bind() {
   $("#wcReplan").addEventListener("click", replanWorkspaceTask);
 
   $("#copyHook").addEventListener("click", async () => {
-    const url = `${location.origin}/api/hooks/${S.settings.hookToken || ""}`;
+    await ensureHookToken();
+    const url = `${location.origin}/api/hooks/${S.hookToken || ""}`;
     try {
       await navigator.clipboard.writeText(url);
       toast("地址已复制", "ok");
@@ -4870,8 +4866,9 @@ function bind() {
     }
   });
 
-  $("#showCurl").addEventListener("click", () => {
-    const url = `${location.origin}/api/hooks/${S.settings.hookToken || ""}`;
+  $("#showCurl").addEventListener("click", async () => {
+    await ensureHookToken();
+    const url = `${location.origin}/api/hooks/${S.hookToken || ""}`;
     const box = $("#curlBox");
     box.textContent = `curl -X POST ${url} \\\n  -H "Content-Type: application/json" \\\n  -d '{"goal":"做一个并发安全的待办 API"}'`;
     box.hidden = !box.hidden;
@@ -5002,6 +4999,7 @@ async function boot() {
     S.commands = state.commands || [];
     S.approvals = state.approvals || [];
     S.security = state.security || null;
+    ensureHookToken();
     if (state.activeTask) {
       S.task = state.activeTask;
     } else if (state.activeTaskId) {

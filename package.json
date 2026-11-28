@@ -15,6 +15,8 @@
     "test:unit": "node tests/run-tests.mjs unit",
     "desktop": "node desktop/launcher.mjs",
     "install-desktop": "node desktop/install.mjs",
-    "icon": "node desktop/make-icon.mjs"
+    "icon": "node desktop/make-icon.mjs",
+    "check:types": "node scripts/check-types.mjs",
+    "test:coverage": "node scripts/test-coverage.mjs"
   }
 }

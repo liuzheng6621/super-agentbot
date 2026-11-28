@@ -11,6 +11,16 @@ process.env.AGENTFORGE_DATA_DIR = temp;
 
 const { store } = await import('../server/store.mjs');
 const dbFile = path.join(temp, 'db.json');
+
+function readTaskShards(dir) {
+  const tasksDir = path.join(dir, 'tasks');
+  if (!fs.existsSync(tasksDir)) return [];
+  return fs
+    .readdirSync(tasksDir)
+    .filter((name) => name.endsWith('.json') && name !== 'index.json')
+    .map((name) => JSON.parse(fs.readFileSync(path.join(tasksDir, name), 'utf8')));
+}
+
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 test('appendMessage 使用 dirty 窗口合并写，且只重新序列化变化任务', async () => {
@@ -51,7 +61,7 @@ test('appendMessage 使用 dirty 窗口合并写，且只重新序列化变化�
   );
 
   const saved = JSON.parse(fs.readFileSync(dbFile, 'utf8'));
-  const savedTask = saved.tasks.find((task) => task.id === changed.id);
+  const savedTask = readTaskShards(temp).find((task) => task.id === changed.id);
   const savedMessage = savedTask.messages.find((item) => item.id === message.id);
   assert.equal(savedMessage.text, 'x'.repeat(200), '窗口到期后数据完整可读');
   assert.deepEqual(Object.keys(saved).sort(), [
@@ -81,8 +91,7 @@ test('进程正常退出前会 flush 尚未到期的 dirty 数据', () => {
   });
   assert.equal(child.status, 0, child.stderr || child.stdout);
 
-  const saved = JSON.parse(fs.readFileSync(path.join(childDir, 'db.json'), 'utf8'));
-  const task = saved.tasks.find((item) => item.goal === 'exit flush');
+  const task = readTaskShards(childDir).find((item) => item.goal === 'exit flush');
   assert.ok(task);
   assert.equal(task.messages[0].text, 'EXIT_FLUSH_COMPLETE', '正常退出不能丢最后一段流式文本');
 });
@@ -103,7 +112,7 @@ test('no-arg save upgrades an existing precise dirty hint to a full save', async
   await wait(260);
   const saved = JSON.parse(fs.readFileSync(dbFile, 'utf8'));
   assert.equal(saved.settings.noArgSaveProbe, 'persist-me');
-  const savedTask = saved.tasks.find((item) => item.id === task.id);
+  const savedTask = readTaskShards(temp).find((item) => item.id === task.id);
   assert.equal(savedTask.messages.find((item) => item.id === message.id).text, 'precise-dirty');
 });
 

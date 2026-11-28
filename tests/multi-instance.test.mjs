@@ -40,6 +40,16 @@ function readDb() {
   return JSON.parse(fs.readFileSync(path.join(temp, 'db.json'), 'utf8'));
 }
 
+function readTaskShards(dir) {
+  const tasksDir = path.join(dir, 'tasks');
+  if (!fs.existsSync(tasksDir)) return [];
+  return fs
+    .readdirSync(tasksDir)
+    .filter((name) => name.endsWith('.json') && name !== 'index.json')
+    .map((name) => JSON.parse(fs.readFileSync(path.join(tasksDir, name), 'utf8')));
+}
+
+
 function waitExit(child) {
   return new Promise((resolve) => {
     if (child.exitCode !== null) resolve();
@@ -69,7 +79,7 @@ test('two instances merge concurrent task writes instead of overwriting each oth
   const [first, second] = await Promise.all([run('instance one'), run('instance two')]);
   assert.equal(first.code, 0);
   assert.equal(second.code, 0);
-  const ids = readDb().tasks.map((task) => task.id);
+  const ids = readTaskShards(temp).map((task) => task.id);
   assert.ok(ids.includes(first.out.trim()));
   assert.ok(ids.includes(second.out.trim()));
 });
@@ -230,7 +240,7 @@ test('task removal survives another instance write', async () => {
   assert.equal(remover.status, 0, remover.stderr || remover.stdout);
   other.kill('SIGTERM');
   await waitExit(other);
-  assert.equal(readDb().tasks.some((task) => task.id === taskId), false);
+  assert.equal(readTaskShards(temp).some((task) => task.id === taskId), false);
 });
 
 test('a stale lock file without a holder is reclaimed after a grace period', () => {

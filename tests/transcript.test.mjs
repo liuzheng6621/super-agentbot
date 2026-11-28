@@ -195,8 +195,9 @@ test('中文、emoji、日文与引号标题经过创建、落库、重启和导
     await stopServer(first);
     first = null;
 
-    const saved = JSON.parse(fs.readFileSync(path.join(dataDir, 'db.json'), 'utf8'));
-    const savedTask = saved.tasks.find((task) => task.id === created.task.id);
+    const savedTask = JSON.parse(
+      fs.readFileSync(path.join(dataDir, 'tasks', `${created.task.id}.json`), 'utf8'),
+    );
     assert.equal(savedTask.title, `${title.slice(0, 26)}…`);
     assert.equal(savedTask.goal, title);
 

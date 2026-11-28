@@ -58,11 +58,17 @@ import {
   clientAddress,
   corsDecision,
   corsHeaders,
+  hasScope,
+  requestGuard,
+  requestOrigin,
   resolveSecurityConfig,
   securitySummary,
   tenantFilterForPrincipal,
   validateListenSecurity,
 } from './security.mjs';
+import { normalizeRoots, withinAnyRoot } from './path-roots.mjs';
+import { gcStorage } from './gc.mjs';
+import { FixedWindowLimiter } from './rate-limit.mjs';
 import {
   automationRunnerSnapshot,
   automationSnapshot,
@@ -94,6 +100,36 @@ const PORT = Number(process.env.PORT || 8787);
 // 本地桌面场景只监听回环；被托管平台注入 PORT 时（容器 / 云沙箱）需要对外绑定
 const HOST = process.env.HOST || (process.env.PORT ? '0.0.0.0' : '127.0.0.1');
 const SECURITY = resolveSecurityConfig(process.env);
+// 固定窗口限流：认证失败按 IP，任务创建与目录浏览按主体。
+const RATE_LIMITS = {
+  auth: new FixedWindowLimiter({ windowMs: 60_000, max: 10 }),
+  tasks: new FixedWindowLimiter({ windowMs: 60_000, max: 30 }),
+  fs: new FixedWindowLimiter({ windowMs: 60_000, max: 60 }),
+};
+
+function enforceRateLimit(res, limiter, key, limit, meta = {}) {
+  const result = limiter.hit(key, { limit });
+  if (result.ok) return true;
+  store.recordSecurityEvent({
+    type: 'api.rate_limited',
+    method: meta.method || '',
+    path: meta.path || '',
+    requestId: meta.requestId || '',
+    remoteAddress: meta.remoteAddress || '',
+    origin: meta.origin || '',
+    reason: `固定窗口超限（${result.count}/${result.limit}）`,
+    tenantId: meta.tenantId || 'default',
+    actorId: meta.actorId || '',
+    actorKind: meta.actorKind || '',
+  });
+  res.setHeader('Retry-After', String(Math.max(1, Math.ceil(result.retryAfterMs / 1000))));
+  json(res, 429, {
+    error: '请求过于频繁，请稍后重试',
+    code: 'rate-limited',
+    retryAfterMs: result.retryAfterMs,
+  });
+  return false;
+}
 const LISTEN_SECURITY = validateListenSecurity({ host: HOST, config: SECURITY });
 if (!LISTEN_SECURITY.ok) {
   console.error(`  ✗ ${LISTEN_SECURITY.error}`);
@@ -184,6 +220,7 @@ function stateSettings() {
     securityAudit: _securityAudit,
     mcpServers: _mcpServers,
     automations: _automations,
+    hookToken: _hookToken,
     ...settings
   } = store.db.settings;
   return settings;
@@ -191,6 +228,11 @@ function stateSettings() {
 
 function principalTenant(principal) {
   return tenantFilterForPrincipal(principal).tenantId;
+}
+
+/** 外部工作区等于把宿主任意目录交给 CLI 写入，只对 owner 与显式管理员开放。 */
+function canUseExternalWorkspace(principal) {
+  return principal?.kind === 'owner' || hasScope(principal, 'operator:admin');
 }
 
 function requestedTenant(principal, value) {
@@ -447,6 +489,20 @@ const server = http.createServer(async (req, res) => {
   }
 
   {
+    const guard = requestGuard(req, SECURITY);
+    if (!guard.ok) {
+      store.recordSecurityEvent({
+        type: `request.${guard.code}`,
+        method,
+        path: pathname,
+        requestId,
+        remoteAddress: clientAddress(req),
+        origin: requestOrigin(req),
+        reason: guard.reason,
+        tenantId: 'default',
+      });
+      return json(res, 403, { error: guard.reason, code: guard.code });
+    }
     const cors = corsDecision(req, SECURITY);
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -479,6 +535,23 @@ const server = http.createServer(async (req, res) => {
     if (!isHook && !isPublicHealth) {
       const auth = authenticateApi(req, url, SECURITY);
       if (!auth.ok) {
+        if (
+          !enforceRateLimit(
+            res,
+            RATE_LIMITS.auth,
+            `auth:${clientAddress(req) || 'unknown'}`,
+            10,
+            {
+              method,
+              path: pathname,
+              requestId,
+              remoteAddress: clientAddress(req),
+              origin: requestOrigin(req),
+            },
+          )
+        ) {
+          return;
+        }
         store.recordSecurityEvent({
           type: 'api.auth.denied',
           method,
@@ -1032,9 +1105,19 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/context-preview' && method === 'POST') {
       const body = await readBody(req);
       const goal = String(body.goal || '').trim();
+      const previewWorkspace = String(body.workspace || '').trim();
+      if (previewWorkspace) {
+        const roots = normalizeRoots(store.db.settings.workspaceRoots);
+        if (roots.length && !withinAnyRoot(path.resolve(previewWorkspace), roots)) {
+          return json(res, 403, {
+            error: '工作区不在 workspaceRoots 白名单内',
+            code: 'workspace-not-allowed',
+          });
+        }
+      }
       const previewTask = {
         goal,
-        workspace: body.workspace || WORKSPACE_DIR,
+        workspace: previewWorkspace || WORKSPACE_DIR,
         status: 'idle',
         mode: 'auto',
         messages: [],
@@ -1099,10 +1182,31 @@ const server = http.createServer(async (req, res) => {
 
     /* ---- 目录选择器（本机服务，供「选文件夹开工」用） ---- */
     if (pathname === '/api/fs' && method === 'GET') {
+      if (
+        !enforceRateLimit(res, RATE_LIMITS.fs, `fs:${principal?.id || 'anonymous'}`, 60, {
+          method,
+          path: pathname,
+          requestId,
+          remoteAddress: clientAddress(req),
+          origin: requestOrigin(req),
+          tenantId: principal?.tenantId || 'default',
+          actorId: principal?.id || '',
+          actorKind: principal?.kind || '',
+        })
+      ) {
+        return;
+      }
       const raw = String(searchParams.get('path') || '').trim();
+      const browseRoots = normalizeRoots(store.db.settings.fsBrowseRoots);
       if (!raw) {
         const home = process.env.USERPROFILE || process.env.HOME || '';
         const dirs = [];
+        if (browseRoots.length) {
+          for (const root of browseRoots) {
+            dirs.push({ name: root, path: root });
+          }
+          return json(res, 200, { path: '', parent: null, dirs, restricted: true });
+        }
         if (process.platform === 'win32') {
           for (const letter of 'CDEFGH') {
             const drive = `${letter}:\\`;
@@ -1116,6 +1220,24 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { path: '', parent: null, dirs });
       }
       const abs = path.resolve(raw);
+      if (browseRoots.length && !withinAnyRoot(abs, browseRoots)) {
+        store.recordSecurityEvent({
+          type: 'fs.browse.denied',
+          method,
+          path: pathname,
+          requestId,
+          remoteAddress: clientAddress(req),
+          origin: requestOrigin(req),
+          reason: `目录不在 fsBrowseRoots 内：${abs}`,
+          tenantId: principal?.tenantId || 'default',
+          actorId: principal?.id || '',
+          actorKind: principal?.kind || '',
+        });
+        return json(res, 403, {
+          error: '目录不在允许浏览的白名单内',
+          code: 'fs-root-not-allowed',
+        });
+      }
       let stat = null;
       try {
         stat = fs.statSync(abs);
@@ -1149,7 +1271,7 @@ const server = http.createServer(async (req, res) => {
     }
     // 把内置演示席位换成真实 CLI：ensure 只补齐内置席位，refresh 强制重体检并重组
     if (pathname === '/api/team/ensure' && method === 'POST') {
-      return json(res, 200, await ensureRealTeam());
+      return json(res, 200, await ensureRealTeam({ probe: true }));
     }
     if (pathname === '/api/team/refresh' && method === 'POST') {
       clearResolveCache();
@@ -1195,6 +1317,20 @@ const server = http.createServer(async (req, res) => {
 
     /* ---- 任务 ---- */
     if (pathname === '/api/tasks' && method === 'POST') {
+      if (
+        !enforceRateLimit(res, RATE_LIMITS.tasks, `task:${principal?.id || 'anonymous'}`, 30, {
+          method,
+          path: pathname,
+          requestId,
+          remoteAddress: clientAddress(req),
+          origin: requestOrigin(req),
+          tenantId: principal?.tenantId || 'default',
+          actorId: principal?.id || '',
+          actorKind: principal?.kind || '',
+        })
+      ) {
+        return;
+      }
       const body = await readBody(req);
       const goal = String(body.goal || '').trim();
       if (goal.length < 2) return json(res, 400, { error: '目标太短，至少 2 个字' });
@@ -1213,11 +1349,39 @@ const server = http.createServer(async (req, res) => {
           idempotentReplay: true,
         });
       }
+      const requestedWorkspace =
+        typeof body.workspace === 'string' ? body.workspace.trim() : '';
+      if (requestedWorkspace && !canUseExternalWorkspace(principal)) {
+        store.recordSecurityEvent({
+          type: 'workspace.external.denied',
+          method,
+          path: pathname,
+          requestId,
+          remoteAddress: clientAddress(req),
+          origin: requestOrigin(req),
+          reason: `主体 ${principal?.id || 'anonymous'} 无权使用外部工作区`,
+          tenantId: taskTenant,
+          actorId: principal?.id || '',
+          actorKind: principal?.kind || '',
+          tokenSource: principal?.source || '',
+        });
+        return json(res, 403, {
+          error: '只有 owner 或持有 operator:admin 的主体可以使用外部工作区',
+          code: 'external-workspace-forbidden',
+        });
+      }
+      const mode = body.mode === 'manual' ? 'manual' : 'auto';
+      const costEstimate = store.estimateTaskTokens({ mode });
+      const costGate = Number(store.db.settings.costGateTokens) || 0;
+      const requiresConfirmation =
+        costGate > 0 && costEstimate.ready && Number(costEstimate.high) > costGate;
       let task;
       try {
         task = store.createTask({
           goal,
-          mode: body.mode === 'manual' ? 'manual' : 'auto',
+          costEstimate,
+          pendingConfirmation: requiresConfirmation,
+          mode,
           priority: body.priority,
           workspace: typeof body.workspace === 'string' ? body.workspace : '',
           isolation: body.isolation === 'worktree' ? 'worktree' : 'direct',
@@ -1234,11 +1398,37 @@ const server = http.createServer(async (req, res) => {
           code: err.code || '',
         });
       }
+      if (requiresConfirmation) {
+        return json(res, 202, {
+          task: taskDetail(store.getTask(task.id)),
+          requiresConfirmation: true,
+          estimate: costEstimate,
+          costGateTokens: costGate,
+          message: `历史同模式任务预计消耗 ${costEstimate.low}-${costEstimate.high} tokens，超过确认阈值 ${costGate}；确认后才会开始。`,
+        });
+      }
       const speed = Number(body.speed) || 1;
       if (body.autoRun !== false) {
         scheduleTask(task.id, { speed, source: 'api.create' });
       }
       return json(res, 201, { task: taskDetail(store.getTask(task.id)) });
+    }
+
+    const confirmMatch = pathname.match(/^\/api\/tasks\/([\w-]+)\/confirm$/);
+    if (confirmMatch && method === 'POST') {
+      const task = visibleTask(principal, confirmMatch[1]);
+      if (!task) return json(res, 404, { error: '任务不存在' });
+      if (!task.pendingConfirmation) {
+        return json(res, 409, { error: '任务不在待确认状态', code: 'task-not-pending' });
+      }
+      store.updateTask(task.id, { pendingConfirmation: false });
+      store.addTaskEvent(task.id, {
+        type: 'task.cost.confirmed',
+        runId: task.runId || null,
+        data: { estimate: task.costEstimate || null, actorId: principal?.id || '' },
+      });
+      scheduleTask(task.id, { speed: 1, source: 'api.confirm' });
+      return json(res, 200, { task: taskDetail(store.getTask(task.id)) });
     }
 
     const taskMcpMatch = pathname.match(/^\/api\/tasks\/([\w-]+)\/mcp\/call$/);
@@ -1591,14 +1781,100 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    if (pathname === '/api/maintenance/gc' && method === 'POST') {
+      const body = await readBody(req).catch(() => ({}));
+      const retentionDays = Math.max(
+        0,
+        Math.min(365, Number(body.retentionDays ?? store.db.settings.workspaceTrashRetentionDays) || 0),
+      );
+      const stats = gcStorage({
+        tasks: store.tasks,
+        retentionDays,
+        dryRun: body.dryRun === true,
+      });
+      store.recordSecurityEvent({
+        type: 'storage.gc',
+        method,
+        path: pathname,
+        requestId,
+        actorId: principal?.id || '',
+        actorKind: principal?.kind || '',
+        tenantId: principal?.tenantId || 'default',
+        reason: `清理 spill ${stats.spill.removed} / 附件 ${stats.attachments.removed}`,
+      });
+      return json(res, 200, { ok: true, ...stats });
+    }
+
     /* ---- 外部 bot webhook ---- */
+    const hookTokenMatch = pathname === '/api/hook-token';
+    if (hookTokenMatch && method === 'GET') {
+      const settings = store.db.settings;
+      return json(res, 200, {
+        enabled: settings.hookTokenEnabled !== false,
+        pathEnabled: settings.hookTokenPathEnabled !== false,
+        token: String(settings.hookToken || ''),
+        path: `/api/hooks/${settings.hookToken || ''}`,
+        header: 'X-Hook-Token',
+      });
+    }
+    if (pathname === '/api/hook-token/rotate' && method === 'POST') {
+      const token = store.rotateHookToken();
+      store.recordSecurityEvent({
+        type: 'hook.token.rotated',
+        method,
+        path: pathname,
+        requestId,
+        remoteAddress: clientAddress(req),
+        origin: requestOrigin(req),
+        actorId: principal?.id || '',
+        actorKind: principal?.kind || '',
+        tenantId: principal?.tenantId || 'default',
+        reason: 'Hook Token 已轮换',
+      });
+      return json(res, 200, {
+        ok: true,
+        token,
+        path: `/api/hooks/${token}`,
+        header: 'X-Hook-Token',
+      });
+    }
+
     const hookMatch = pathname.match(/^\/api\/hooks\/([\w-]+)$/);
     if (hookMatch) {
-      if (hookMatch[1] !== store.db.settings.hookToken) return json(res, 401, { error: 'token 无效' });
+      const settings = store.db.settings;
+      const expected = String(settings.hookToken || '');
+      const supplied = String(req.headers['x-hook-token'] || '').trim();
+      const pathAllowed = settings.hookTokenPathEnabled !== false;
+      // 请求头优先；路径令牌只在兼容模式下参与比对。
+      const candidate = supplied || (pathAllowed ? hookMatch[1] : '');
+      const ok =
+        settings.hookTokenEnabled !== false &&
+        expected &&
+        candidate &&
+        candidate.length === expected.length &&
+        crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(expected));
+      if (!ok) {
+        store.recordSecurityEvent({
+          type: 'hook.token.denied',
+          method,
+          path: pathname,
+          requestId,
+          remoteAddress: clientAddress(req),
+          origin: requestOrigin(req),
+          reason: supplied ? '请求头令牌无效' : '路径令牌无效或已禁用',
+          tenantId: 'default',
+          tokenSource: supplied ? 'header' : 'path',
+        });
+        return json(res, 401, { error: 'token 无效', code: 'hook-token-required' });
+      }
       if (method === 'GET') {
+        // 降级摘要：不返回任务标题、目标或事件，避免令牌即读全文。
+        const running = store.tasks.filter((t) => ['running', 'queued'].includes(t.status)).length;
         return json(res, 200, {
           ok: true,
-          tasks: store.tasks.slice(0, 5).map((t) => store.taskSummary(t)),
+          taskCount: store.tasks.length,
+          running,
+          latestStatus: store.tasks[0]?.status || '',
         });
       }
       if (method === 'POST') {

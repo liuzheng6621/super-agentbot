@@ -669,7 +669,15 @@ export async function tickAutomations({ now = Date.now(), dependencies = {} } = 
       ) {
         continue;
       }
-      if (automation.lastTaskId && isScheduled(automation.lastTaskId)) continue;
+      if (automation.lastTaskId && isScheduled(automation.lastTaskId)) {
+        // 运行期心跳：claim 只有启动期 TTL，长任务不续约就会过期被别的实例抢走。
+        if (store.automationClaimIsOwned(automation.id)) {
+          store.renewAutomationClaim(automation.id, {
+            runKey: `task:${automation.lastTaskId}`,
+          });
+        }
+        continue;
+      }
       if (automation.retryDueAt && automation.retryDueAt <= now) {
         const claim = store.claimAutomation(automation.id, {
           runKey: `retry:${automation.retryDueAt}`,
