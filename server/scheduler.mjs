@@ -163,6 +163,7 @@ function stopEntryLeaseHeartbeat(entry) {
 function releaseEntryLease(entry) {
   stopEntryLeaseHeartbeat(entry);
   store.releaseTaskLease(entry.taskId);
+  store.releaseProviderSlots(entry.taskId);
   entry.leaseOwned = false;
 }
 
@@ -331,6 +332,9 @@ export function isScheduled(taskId) {
 }
 
 export function schedulerSnapshot() {
+  const crossProcessCounts = Object.fromEntries(
+    Object.entries(store.providerSlotSnapshot() || {}).map(([id, slots]) => [id, slots.length]),
+  );
   const providers = (store.db.providers || []).map((provider) => ({
     id: provider.id,
     name: provider.name,
@@ -359,7 +363,10 @@ export function schedulerSnapshot() {
       providerIds: [...entry.providerIds],
       agentIds: [...entry.agentIds],
     })),
-    providers,
+    providers: providers.map((provider) => ({
+      ...provider,
+      crossProcess: crossProcessCounts[provider.id] || 0,
+    })),
     agentLeases: [...agentLeases.entries()].map(([agentId, lease]) => ({
       agentId,
       limit: agentLimit(agentId),
@@ -463,6 +470,20 @@ export function dispatch() {
           data: { reason: '任务租约已失效' },
         });
         continue;
+      }
+      const slots = store.acquireProviderSlots(entry.taskId, entry.providerIds, {
+        limitFor: providerLimit,
+      });
+      if (!slots.ok) {
+        const blocked = slots.blocked || {};
+        const name = store.getProvider(blocked.providerId)?.name || blocked.providerId || 'Provider';
+        entry.waitingReason = `等待 Provider「${name}」（跨实例 ${blocked.used}/${blocked.limit}）`;
+        queue.unshift(entry);
+        sortQueue();
+        refreshQueuePositions();
+        // 其他实例释放槽位没有事件通知，退避后重试一次。
+        setTimeout(() => dispatch(), 1000).unref?.();
+        break;
       }
       entry.startedAt = Date.now();
       active.set(entry.taskId, entry);

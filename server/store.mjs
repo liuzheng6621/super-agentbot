@@ -23,6 +23,15 @@ import {
   resolveProvider,
 } from './providers.mjs';
 import { publicImageRef, supportsVision } from './attachments.mjs';
+import * as persistence from './persistence.mjs';
+import { TaskShardStore } from './persistence.mjs';
+import {
+  DEFAULT_AUTOMATION_CLAIM_MS,
+  DEFAULT_TASK_LEASE_MS,
+  pruneExpiredLeases,
+  taskLeaseIsLive,
+} from './leases.mjs';
+import { resolveParentSpanId, safeSpanId } from './events.mjs';
 import { normalizeExecutionPolicy } from './cli-policy.mjs';
 import { normalizeRoots, withinAnyRoot } from './path-roots.mjs';
 import { normalizeMcpServer } from './mcp.mjs';
@@ -59,130 +68,17 @@ const LOCK_FILE = path.join(DATA_DIR, '.db.lock');
 const LEASE_FILE = path.join(DATA_DIR, '.leases.json');
 const LOCK_TIMEOUT_MS = 5000;
 const LOCK_STALE_MS = 15000;
-const DEFAULT_TASK_LEASE_MS = 30000;
-const DEFAULT_AUTOMATION_CLAIM_MS = 15 * 60 * 1000;
 
-const sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
-
-function sleepSync(ms) {
-  Atomics.wait(sleepBuffer, 0, 0, ms);
-}
-
-function readJsonFile(file, fallback = null) {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return fallback;
-  }
-}
-
-function writeTextAtomic(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
-  fs.writeFileSync(tmp, value, 'utf8');
-  try {
-    fs.renameSync(tmp, file);
-  } catch (err) {
-    try {
-      fs.rmSync(tmp, { force: true });
-    } catch {
-      /* Best effort cleanup; the original file remains authoritative. */
-    }
-    throw err;
-  }
-}
-
-function writeJsonAtomic(file, value) {
-  writeTextAtomic(file, JSON.stringify(value));
-}
-
-function processIsAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (err) {
-    return err?.code === 'EPERM';
-  }
-}
+const acquireFileLockSync = (options = {}) =>
+  persistence.acquireFileLockSync(LOCK_FILE, { ...options, dataDir: DATA_DIR });
+const releaseFileLockSync = (token) => persistence.releaseFileLockSync(LOCK_FILE, token);
+const readJsonFile = persistence.readJsonFile;
+const writeTextAtomic = persistence.writeTextAtomic;
+const writeJsonAtomic = persistence.writeJsonAtomic;
+const processIsAlive = persistence.processIsAlive;
 
 function cryptoHash(value) {
   return createHash('sha256').update(value).digest('hex');
-}
-
-function acquireFileLockSync({ timeoutMs = LOCK_TIMEOUT_MS, staleMs = LOCK_STALE_MS } = {}) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const started = Date.now();
-  const token = randomUUID();
-  while (true) {
-    try {
-      const fd = fs.openSync(LOCK_FILE, 'wx');
-      try {
-        fs.writeFileSync(
-          fd,
-          JSON.stringify({ pid: process.pid, token, createdAt: Date.now() }),
-          'utf8',
-        );
-      } finally {
-        fs.closeSync(fd);
-      }
-      return token;
-    } catch (err) {
-      if (err?.code !== 'EEXIST') throw err;
-      const holder = readJsonFile(LOCK_FILE, null);
-      let fileAge = Number.POSITIVE_INFINITY;
-      try {
-        fileAge = Date.now() - fs.statSync(LOCK_FILE).mtimeMs;
-      } catch {
-        /* The holder may have released the lock between open and stat. */
-      }
-      const age = holder ? Date.now() - Number(holder.createdAt || 0) : fileAge;
-      const stale = holder
-        ? age > staleMs || !processIsAlive(Number(holder.pid))
-        : fileAge > 1000;
-      if (stale) {
-        try {
-          fs.rmSync(LOCK_FILE, { force: true });
-        } catch {
-          /* Another process may be replacing it. */
-        }
-        continue;
-      }
-      if (Date.now() - started >= timeoutMs) {
-        const timeout = new Error('持久化文件锁等待超时');
-        timeout.code = 'STORE_LOCK_TIMEOUT';
-        throw timeout;
-      }
-      sleepSync(25);
-    }
-  }
-}
-
-function releaseFileLockSync(token) {
-  const holder = readJsonFile(LOCK_FILE, null);
-  if (holder?.token !== token) return;
-  try {
-    fs.rmSync(LOCK_FILE, { force: true });
-  } catch {
-    /* A stale lock can be reclaimed by the next writer. */
-  }
-}
-
-function taskLeaseIsLive(lease, now = Date.now()) {
-  return !!lease && Number(lease.expiresAt) > now && processIsAlive(Number(lease.pid));
-}
-
-function pruneExpiredLeases(data, now = Date.now()) {
-  const result = data && typeof data === 'object' ? data : {};
-  result.tasks ||= {};
-  result.automations ||= {};
-  for (const [id, lease] of Object.entries(result.tasks)) {
-    if (!taskLeaseIsLive(lease, now)) delete result.tasks[id];
-  }
-  for (const [id, claim] of Object.entries(result.automations)) {
-    if (!taskLeaseIsLive(claim, now)) delete result.automations[id];
-  }
-  return result;
 }
 
 export const ROLE_ORDER = ['planner', 'architect', 'coder', 'tester', 'reviewer'];
@@ -742,11 +638,12 @@ function ensureTaskTrace(task, runId, spanId, at) {
   return task.trace;
 }
 
-class Store {
-  constructor() {
+export class Store {
+  constructor({ instanceId = '' } = {}) {
     this.instanceId =
-      String(process.env.AGENTFORGE_INSTANCE_ID || '').trim() || randomUUID();
+      String(instanceId || process.env.AGENTFORGE_INSTANCE_ID || '').trim() || randomUUID();
     this.db = emptyDb();
+    this._shards = new TaskShardStore(path.join(DATA_DIR, 'tasks'));
     this.listeners = new Set();
     this._saveTimer = null;
     this._lastSerialized = null;
@@ -779,6 +676,7 @@ class Store {
       conflicts: 0,
       leaseAcquires: 0,
       leaseRenewals: 0,
+      taskShards: 0,
     };
     this._load();
     process.once('exit', () => this.flush());
@@ -789,6 +687,9 @@ class Store {
       fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
       if (fs.existsSync(DB_FILE)) {
         const raw = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+        // 旧格式把任务放在 db.json；首次加载时迁到 tasks/<id>.json 并备份原文件。
+        const legacyTasks = Array.isArray(raw.tasks) ? raw.tasks : [];
+        const shardState = this._shards.migrate(legacyTasks, { backupFile: DB_FILE });
         this._lastSerialized = JSON.stringify(this._parseDiskDb(raw));
         const defaults = defaultProviders();
         const capabilitiesMigrated = raw.settings?.providerCapabilitiesMigrated === true;
@@ -817,7 +718,7 @@ class Store {
           agents: Array.isArray(raw.agents) && raw.agents.length ? raw.agents : defaultAgents(),
           providers,
           profiles: Array.isArray(raw.profiles) ? raw.profiles : [],
-          tasks: Array.isArray(raw.tasks) ? raw.tasks : [],
+          tasks: shardState.tasks,
           settings: {
             ...emptyDb().settings,
             ...(raw.settings || {}),
@@ -1012,6 +913,7 @@ class Store {
         }
         if (recovered) this.flush();
       } else {
+        this.db.tasks = this._shards.loadAll();
         this.save();
       }
     } catch (err) {
@@ -1090,69 +992,63 @@ class Store {
   _buildMergedDb() {
     const disk = this._parseDiskDb(readJsonFile(DB_FILE, null));
     const dirtyAll = this._dirty.all || this._dirty.tasksAll;
-    const merged = disk
+    const base = disk
       ? {
           agents: dirtyAll || this._dirty.agents ? this.db.agents : disk.agents,
           profiles: dirtyAll || this._dirty.profiles ? this.db.profiles : disk.profiles,
           providers: dirtyAll || this._dirty.providers ? this.db.providers : disk.providers,
           settings: dirtyAll || this._dirty.settings ? this.db.settings : disk.settings,
-          tasks: [],
         }
       : {
           agents: this.db.agents,
           profiles: this.db.profiles,
           providers: this.db.providers,
           settings: this.db.settings,
-          tasks: [],
         };
 
+    // 任务以 tasks/<id>.json 为准，db.json 只保留其余元数据。
     const localTasks = new Map(this.db.tasks.map((task) => [task.id, task]));
-    const diskTaskIds = new Set();
-    for (const diskTask of disk?.tasks || []) {
-      diskTaskIds.add(diskTask.id);
-      if (!dirtyAll && !this._dirty.tasks.has(diskTask.id)) {
-        merged.tasks.push(diskTask);
-        continue;
-      }
-      const local = localTasks.get(diskTask.id);
-      if (!local) {
-        if (!this._dirty.tasksRemoved.has(diskTask.id)) merged.tasks.push(diskTask);
-        continue;
-      }
-      const baseHash = this._baseTaskHashes.get(diskTask.id);
+    const mergedTasks = [...this.db.tasks];
+    for (const id of this._dirty.tasksRemoved) {
+      const index = mergedTasks.findIndex((task) => task.id === id);
+      if (index >= 0) mergedTasks.splice(index, 1);
+    }
+    const known = new Set(mergedTasks.map((task) => task.id));
+    for (const id of this._dirty.tasks) {
+      if (!known.has(id)) continue;
+      const diskTask = this._shards.readShard(id);
+      if (!diskTask) continue;
+      const local = localTasks.get(id);
+      const baseHash = this._baseTaskHashes.get(id);
       const diskHash = cryptoHash(JSON.stringify(diskTask));
       const localHash = cryptoHash(JSON.stringify(local));
       if (baseHash && diskHash !== baseHash && localHash === baseHash) {
-        merged.tasks.push(diskTask);
+        const index = mergedTasks.findIndex((task) => task.id === id);
+        if (index >= 0) mergedTasks[index] = diskTask;
         continue;
       }
       if (baseHash && diskHash !== baseHash && localHash !== baseHash && localHash !== diskHash) {
         this.persistenceStats.conflicts += 1;
-        this._storageConflicts.push({
-          taskId: diskTask.id,
-          at: Date.now(),
-          diskHash,
-          baseHash,
-        });
+        this._storageConflicts.push({ taskId: id, at: Date.now(), diskHash, baseHash });
         this._storageConflicts = this._storageConflicts.slice(-50);
-        const error = new Error(`任务 ${diskTask.id} 已被其他实例修改，拒绝静默覆盖`);
+        const error = new Error(`任务 ${id} 已被其他实例修改，拒绝静默覆盖`);
         error.code = 'STORE_CONFLICT';
-        error.taskId = diskTask.id;
+        error.taskId = id;
         throw error;
       }
-      merged.tasks.push(local);
     }
-    for (const local of this.db.tasks) {
-      if (!diskTaskIds.has(local.id) && (dirtyAll || this._dirty.tasks.has(local.id))) {
-        merged.tasks.push(local);
+    // 其他实例新建的任务：索引里有、本进程还没加载过。
+    const index = this._shards.readIndex();
+    for (const id of index?.ids || []) {
+      if (known.has(id) || this._dirty.tasksRemoved.has(id)) continue;
+      const task = this._shards.readShard(id);
+      if (task?.id) {
+        mergedTasks.push(task);
+        known.add(id);
       }
     }
-    for (const id of this._dirty.tasksRemoved) {
-      merged.tasks = merged.tasks.filter((task) => task.id !== id);
-    }
-    return merged;
+    return { ...base, tasks: mergedTasks };
   }
-
   _readLeasesLocked() {
     const leases = pruneExpiredLeases(
       readJsonFile(LEASE_FILE, { version: 1, tasks: {}, automations: {} }),
@@ -1250,6 +1146,102 @@ class Store {
     });
   }
 
+  /**
+   * Cross-process Provider slots. In-process counting only protects one server
+   * instance; the authoritative count lives in `.leases.json`.
+   */
+  acquireProviderSlots(taskId, providerIds, { limitFor = () => 1, ttlMs = DEFAULT_TASK_LEASE_MS } = {}) {
+    const ids = [...new Set((providerIds || []).map(String).filter(Boolean))];
+    if (!ids.length) return { ok: true, acquired: [], blocked: null };
+    const id = String(taskId || '');
+    if (!id) return { ok: false, acquired: [], blocked: { reason: '缺少 taskId' } };
+    return this._withLeaseLock((leases) => {
+      leases.providers ||= {};
+      const now = Date.now();
+      const acquired = [];
+      for (const providerId of ids) {
+        const all = leases.providers[providerId] || [];
+        const mine = all.find((slot) => slot.taskId === id && slot.instanceId === this.instanceId);
+        const others = all.filter(
+          (slot) => !(slot.taskId === id && slot.instanceId === this.instanceId),
+        );
+        const limit = Math.max(1, Number(limitFor(providerId)) || 1);
+        // 同一任务重复调度只续期，不重复占槽。
+        if (mine) {
+          mine.expiresAt = now + Math.max(1000, Number(ttlMs) || DEFAULT_TASK_LEASE_MS);
+          mine.updatedAt = now;
+          acquired.push(providerId);
+          continue;
+        }
+        if (others.length >= limit) {
+          if (acquired.length) {
+            for (const got of acquired) {
+              leases.providers[got] = (leases.providers[got] || []).filter(
+                (slot) => !(slot.taskId === id && slot.instanceId === this.instanceId),
+              );
+              if (!leases.providers[got].length) delete leases.providers[got];
+            }
+            this._writeLeasesLocked(leases);
+          }
+          return {
+            ok: false,
+            acquired: [],
+            blocked: { providerId, used: others.length, limit },
+          };
+        }
+        leases.providers[providerId] = [
+          ...others,
+          {
+            taskId: id,
+            instanceId: this.instanceId,
+            pid: process.pid,
+            acquiredAt: now,
+            updatedAt: now,
+            expiresAt: now + Math.max(1000, Number(ttlMs) || DEFAULT_TASK_LEASE_MS),
+          },
+        ];
+        acquired.push(providerId);
+      }
+      this._writeLeasesLocked(leases);
+      return { ok: true, acquired, blocked: null };
+    });
+  }
+
+  releaseProviderSlots(taskId) {
+    const id = String(taskId || '');
+    if (!id) return 0;
+    return this._withLeaseLock((leases) => {
+      leases.providers ||= {};
+      let released = 0;
+      for (const [providerId, slots] of Object.entries(leases.providers)) {
+        const kept = (Array.isArray(slots) ? slots : []).filter(
+          (slot) => !(slot.taskId === id && slot.instanceId === this.instanceId),
+        );
+        released += (slots.length || 0) - kept.length;
+        if (kept.length) leases.providers[providerId] = kept;
+        else delete leases.providers[providerId];
+      }
+      if (released) this._writeLeasesLocked(leases);
+      return released;
+    });
+  }
+
+  providerSlotSnapshot() {
+    return this._withLeaseLock((leases) => {
+      const out = {};
+      for (const [providerId, slots] of Object.entries(leases.providers || {})) {
+        out[providerId] = slots.map((slot) => ({
+          taskId: slot.taskId,
+          instanceId: slot.instanceId,
+          pid: slot.pid,
+          expiresAt: slot.expiresAt,
+          owned: slot.instanceId === this.instanceId,
+        }));
+      }
+      return out;
+    });
+  }
+
   releaseAllLeases() {
     return this._withLeaseLock((leases) => {
       let released = 0;
@@ -1299,6 +1291,12 @@ class Store {
       this._writeLeasesLocked(leases);
       return { ...claim, owned: true };
     });
+  }
+
+  /** 运行期续约：只有当前持有者能延长，过期后其他实例可重新 claim。 */
+  renewAutomationClaim(id, { ttlMs = DEFAULT_AUTOMATION_CLAIM_MS, runKey = '' } = {}) {
+    if (!this.automationClaimIsOwned(id)) return null;
+    return this.claimAutomation(id, { ttlMs, runKey, renew: true });
   }
 
   automationClaimIsOwned(id) {
@@ -1421,15 +1419,18 @@ class Store {
       lockToken = acquireFileLockSync();
       this._buildSerializedDb();
       const merged = this._buildMergedDb();
-      const localTaskMap = new Map(this.db.tasks.map((task) => [task.id, task]));
-      const taskFragments = merged.tasks.map((task) => {
-        if (localTaskMap.get(task.id) === task) {
-          const fragment = this._serialized.tasks.get(task.id);
-          if (fragment !== undefined) return fragment;
-        }
-        return JSON.stringify(task);
-      });
-      const json = `{"agents":${JSON.stringify(merged.agents)},"profiles":${JSON.stringify(merged.profiles)},"providers":${JSON.stringify(merged.providers)},"tasks":[${taskFragments.join(',')}],"settings":${JSON.stringify(merged.settings)}}`;
+      // 任务先落分片：单个任务原子写，崩溃只会丢这一个任务的最后一次变更。
+      const localTasks = new Map(this.db.tasks.map((task) => [task.id, task]));
+      for (const task of merged.tasks) {
+        const local = localTasks.get(task.id);
+        const dirty = this._dirty.tasksAll || this._dirty.all || this._dirty.tasks.has(task.id);
+        if (dirty || !local) this._shards.writeShard(task);
+      }
+      for (const id of this._dirty.tasksRemoved) this._shards.removeShard(id);
+      this._shards.writeIndex(merged.tasks.map((task) => task.id));
+      this.persistenceStats.taskShards = (this.persistenceStats.taskShards || 0) + 1;
+      // db.json 只保留元数据，tasks 保持空数组兼容旧的五键形状。
+      const json = `{"agents":${JSON.stringify(merged.agents)},"profiles":${JSON.stringify(merged.profiles)},"providers":${JSON.stringify(merged.providers)},"tasks":[],"settings":${JSON.stringify(merged.settings)}}`;
       if (json === this._lastSerialized) {
         this.db.agents = merged.agents;
         this.db.profiles = merged.profiles;
@@ -2832,30 +2833,21 @@ class Store {
     const at = Number(event.at) || Date.now();
     const type = String(event.type || 'event').slice(0, 120);
     const runId = String(event.runId || task.runId || '') || null;
-    const spanId =
-      String(event.spanId || '').replace(/[^\w-]/g, '').slice(0, 80) || randomUUID();
+    const spanId = safeSpanId(event.spanId) || randomUUID();
     const trace = ensureTaskTrace(task, runId, spanId, at);
     const stepId = String(event.stepId || '');
     const executionId = String(event.executionId || '');
-    let parentSpanId;
-    if (Object.prototype.hasOwnProperty.call(event, 'parentSpanId')) {
-      parentSpanId = event.parentSpanId
-        ? String(event.parentSpanId).replace(/[^\w-]/g, '').slice(0, 80)
-        : null;
-    } else if (type === 'run.start' || spanId === trace.rootSpanId) {
-      parentSpanId = null;
-    } else if (stepId) {
-      const step = (task.plan || []).find((item) => item.id === stepId);
-      if (step) {
-        if (!step.traceSpanId) step.traceSpanId = randomUUID();
-        step.traceParentSpanId ||= trace.rootSpanId;
-        parentSpanId = step.traceSpanId;
-      } else {
-        parentSpanId = trace.rootSpanId;
-      }
-    } else {
-      parentSpanId = trace.rootSpanId;
-    }
+    const step = stepId ? (task.plan || []).find((item) => item.id === stepId) : null;
+    const resolved = resolveParentSpanId({
+      event,
+      type,
+      spanId,
+      trace,
+      step,
+      createId: () => randomUUID(),
+    });
+    if (step && resolved.stepPatch) Object.assign(step, resolved.stepPatch);
+    const parentSpanId = resolved.parentSpanId;
     const saved = {
       id: randomUUID(),
       ...event,

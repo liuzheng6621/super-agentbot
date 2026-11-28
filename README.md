@@ -50,7 +50,7 @@ AgentForge 当前定位是**单机 / 团队服务基线**：一个 Node.js 进�
 - **文件夹开工**：可从本机目录选择器选择已有项目，或使用 Git 隔离工作树并行开工；当前构建已用真实浏览器验收目录进入、返回、中文与空格路径，缺少 Edge 时显式跳过浏览器用例。
 - **M3 平台边界**：owner / operator / agent / system 主体与 Token 作用域、Provider 用量账本、可审计上下文压缩、历史检索、`clientMessageId` 幂等、只读 MCP 网关和一次性命令审批。
 - **M4 工作区能力**：可复用 Agent Profile、默认不跨任务的工作区池、读后写版本守卫、事务回滚、DAG 图、时间回放和跨任务总览。
-- **M5 生产化**：按租户过滤任务 / Automation / 审批并执行任务配额、OTLP trace 导出、`db.json` 文件锁与任务 / Automation 租约、目录懒加载和 `/api/state` cursor 分页。
+- **M5 生产化**：按租户过滤任务 / Automation / 审批并执行任务配额、OTLP trace 导出、`db.json` 文件锁与任务 / Automation / Provider 槽位租约、任务分片持久化、目录懒加载和 `/api/state` cursor 分页。
 
 ## 为什么会有这个项目
 
@@ -94,7 +94,7 @@ AgentForge 当前定位是**单机 / 团队服务基线**：一个 Node.js 进�
 - 🔌 **Provider Profile、参数模板与自动回退** — 每个 Agent 可绑定独立 Provider Profile，保存 Base URL、模型、密钥环境变量引用、CLI 参数模板和并发上限；可配置有序备用 Provider，真实 CLI 失败后自动切换并把 `provider.fallback` 写入任务事件流。密钥只从服务进程环境读取，不写入 `db.json`。
 - 🧾 **产物带内容版本** — 每个产物记录 `version`（sha256 前 16 位），改写即换版本，可判断「这一步到底动了什么」。
 - 🧷 **不合格输出不流转** — 每个角色的回复都要过结构校验：提案需 5 段标题、质询需覆盖全部方案、步骤需可执行产出；半截回复或「我无法完成」直接重试，不把残稿喂给下一步。
-- 💾 **增量持久化** — `db.json` 使用临时文件 + 原子替换，流式输出在 200ms dirty 窗口内合并写盘，只重新序列化变化任务，正常退出、`SIGINT` / `SIGTERM` 前自动 flush。当前 `db.json` 没有显式 `fsync`；工作区文件写入才会走临时文件 + `fsync` + `rename`。
+- 💾 **任务分片持久化** — 每个任务独立落 `data/tasks/<id>.json`（临时文件 + 原子替换），`tasks/index.json` 是可按目录重建的索引，`db.json` 只保留 agents / profiles / providers / settings 并维持五键兼容形状。旧版内联任务在首次加载时自动迁移并备份为 `db.json.bak`；损坏的分片会被跳过而不是让整个库加载失败。流式输出仍在 200ms dirty 窗口内合并写盘，只写变化任务的分片。
 - 🧩 **零依赖多实例** — 同一数据目录可由多个进程共享：写盘走 `.db.lock` 合并，任务和 Automation 使用 `.leases.json` 租约避免重复执行。Automation / Scheduler 仍是进程内调度器，不是分布式队列。
 
 **界面**
@@ -125,7 +125,9 @@ npm start
 首次启动会自动生成：
 
 ```
-data/db.json                 团队、任务、设置、Webhook Token
+data/db.json                 团队、设置、Webhook Token（不含任务）
+data/tasks/<id>.json         任务分片，单任务原子写
+data/tasks/index.json        分片索引，缺失或过期时自动重建
 data/workspaces/<taskId>/    每个任务的真实工作区（产物就在这里）
 data/spill/<taskId>/         超长上游产物的落盘副本
 data/attachments/<sha前两位>/<sha>.<ext>
@@ -513,7 +515,7 @@ CI 在 Ubuntu / Windows × Node 20 / 22 上运行 `npm test` 和 `npm run check:
 
 ## 已知边界
 
-- **零依赖多实例，但不是分布式队列**：多个进程可共享同一 `db.json`，通过 `.db.lock` 合并写、通过 `.leases.json` 互斥任务和 Automation；Automation 与 Scheduler 仍由各进程内调度器驱动，没有 Redis、SQLite 或消息队列。
+- **零依赖多实例，但不是分布式队列**：多个进程可共享同一数据目录，任务按 `tasks/<id>.json` 分片写，`.db.lock` 保护合并写，`.leases.json` 互斥任务、Automation 和 Provider 槽位；Automation claim 在运行期按 TTL 续约，进程崩溃后过期可回收。Automation 与 Scheduler 仍由各进程内调度器驱动，没有 Redis、SQLite 或消息队列。
 - **租户隔离已落地，但账号体系未完成**：owner / operator / agent Token 已有作用域、租户绑定、任务 / Automation / 审批过滤和任务配额；没有用户注册、完整 RBAC、SSO 或按用户计费。
 - **`kimi` 只适合单行任务**：`-p` 与 `--auto` 互斥，只能走 argv，多行 prompt 会被 `cmd.exe` 截断。
 - **`trae-cli` 的行为取决于模型**：工具齐全（bash / 编辑 / 顺序思考），但某些模型只肯调顺序思考而不落盘——这是模型行为，不是配置问题。
@@ -602,7 +604,7 @@ gemini -p "Reply with exactly: OK" --skip-trust
 <details>
 <summary><b>数据存在哪？能备份吗？</b></summary>
 
-全在 `data/`：`db.json` 是团队 / 任务 / 设置，`workspaces/<taskId>/` 是每个任务的真实产物，`spill/` 保存超长内容副本，`attachments/` 保存内容寻址的图片附件。整个目录拷走即是完整备份，删掉即是从零开始。
+全在 `data/`：`db.json` 是团队 / 设置，`tasks/<id>.json` 是任务分片，`workspaces/<taskId>/` 是每个任务的真实产物，`spill/` 保存超长内容副本，`attachments/` 保存内容寻址的图片附件。整个目录拷走即是完整备份，删掉即是从零开始。
 </details>
 
 <details>

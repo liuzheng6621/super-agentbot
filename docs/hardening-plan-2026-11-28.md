@@ -35,10 +35,10 @@
 | W2 | P0 | 质量门反伪造与环境隔离 | `server/test-entry.mjs`、`server/orchestrator.mjs`、`server/adapters.mjs` | trivial `scripts.test`（`exit 0`、空 echo、占位符）判失败；本次变更文件与测试文件无交集时给出显式状态；runner 输出无 pass/fail 证据时 fail closed；保留退出码、超时和输出记录；质量门子进程只继承最小环境白名单，Provider / CLI 密钥不进入测试命令（F7）。 | 已完成（`tests/quality-forgery.test.mjs`） |
 | W3 | P0 | 启动成本边界 | `server/team.mjs`、`server/index.mjs` | 默认启动只做本地存在性、版本和配置探测；真实提示词调用只能由显式 probe 或体检触发；保留 `AGENTFORGE_SKIP_TEAM_BOOTSTRAP` 兼容。 | 已完成（`tests/team-startup.test.mjs`） |
 | W4 | P1 | 成本预估与确认门 | `server/index.mjs`、`server/store.mjs`、`public/app.js` | 任务创建前按同模式历史 usage 给 token 区间，不伪造费用换算；超过阈值时任务进入待确认且 UI 可见。 | 已完成（`tests/cost-gate.test.mjs`） |
-| W5 | P1 | Provider 并发跨进程仲裁 | `server/scheduler.mjs`、`server/store.mjs`、`server/store-leases.mjs` | Provider 并发计数进入 `.leases.json`；两实例并发测试不超过配置配额；冲突有等待原因和审计。 | 未开始 |
-| W6 | P1 | Automation claim 心跳 | `server/store.mjs`、`server/automation-runner.mjs` | 运行中 claim 定期续约；进程崩溃后 TTL 到期可回收；幂等和取消语义测试覆盖。 | 未开始 |
-| W7 | P1 | 任务分片持久化 | `server/store.mjs` 或新 persistence 模块 | `tasks/<id>.json` + 索引；原子写、崩溃恢复、旧 `db.json` 迁移和备份；跨实例合并写测试。 | 未开始 |
-| W8 | P2 | Store 门面拆分 | `server/store.mjs`、新 persistence / leases / events / trace 模块 | 只做机械搬移，公开 API 不破坏；每个模块有直接单元测试；全量测试通过。 | 未开始 |
+| W5 | P1 | Provider 并发跨进程仲裁 | `server/scheduler.mjs`、`server/store.mjs`、`server/store-leases.mjs` | Provider 并发计数进入 `.leases.json`；两实例并发测试不超过配置配额；冲突有等待原因和审计。 | 已完成（`tests/provider-lease.test.mjs`） |
+| W6 | P1 | Automation claim 心跳 | `server/store.mjs`、`server/automation-runner.mjs` | 运行中 claim 定期续约；进程崩溃后 TTL 到期可回收；幂等和取消语义测试覆盖。 | 已完成（`tests/automation-claim.test.mjs`） |
+| W7 | P1 | 任务分片持久化 | `server/store.mjs` 或新 persistence 模块 | `tasks/<id>.json` + 索引；原子写、崩溃恢复、旧 `db.json` 迁移和备份；跨实例合并写测试。 | 已完成（`tests/task-shards.test.mjs`） |
+| W8 | P2 | Store 门面拆分 | `server/store.mjs`、新 persistence / leases / events / trace 模块 | 只做机械搬移，公开 API 不破坏；每个模块有直接单元测试；全量测试通过。 | 已完成（`tests/store-modules.test.mjs`） |
 | W9 | P0 | 目录白名单 | `server/index.mjs`、`server/store.mjs`、`server/path-roots.mjs` | `/api/fs` 与 external workspace 使用独立可配置白名单；白名单外 403；非 owner/admin 主体禁 external workspace；worktree isolation 白名单同步生效。 | 已完成（`tests/path-allowlist.test.mjs`、`tests/http-hardening.test.mjs`） |
 | W10 | P0 | 回环与无 Token 加固 | `server/security.mjs`、`server/index.mjs` | 非 GET 无 Token 请求必须同源 `Origin + Sec-Fetch-Site`；Host 校验拒绝 DNS rebinding；insecure remote 拒绝 `operator:admin` 且不得授予 owner；覆盖 CSRF / rebinding 场景。 | 已完成（`tests/http-hardening.test.mjs`） |
 | W11 | P1 | Spill 与附件根目录校验 | `server/fs.mjs`、`server/attachments.mjs` | locator 必须解析到 `spillRoot()` / `attachmentRoot()` 内；符号链接逃逸拒绝；哈希与大小校验保留。 | 已完成（`tests/spill-root.test.mjs`） |

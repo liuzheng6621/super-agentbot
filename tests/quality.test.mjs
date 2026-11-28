@@ -472,9 +472,8 @@ test('Provider 用量账本按 run 记录真实归属，未知成本保持 null'
   assert.equal(summary.usage.cost, null, '没有价格配置时不能伪造 0 成本');
 
   store.flush();
-  const saved = JSON.parse(
-    fs.readFileSync(path.join(temp, 'db.json'), 'utf8'),
-  ).tasks.find((item) => item.id === task.id);
+  const shardFile = path.join(temp, 'tasks', `${task.id}.json`);
+  const saved = JSON.parse(fs.readFileSync(shardFile, 'utf8'));
   assert.equal(saved.usageLedger[0].runId, 'run-usage-1');
   assert.equal(saved.usageLedger[0].tokensOut, 123);
 });

@@ -73,7 +73,17 @@ test('tenant principals carry scope and owner is the only cross-tenant default',
 });
 
 test('HTTP API isolates tasks, automations, approvals and quotas by tenant', async () => {
-  const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-tenant-'));
+  
+function readTaskShards(dir) {
+  const tasksDir = path.join(dir, 'tasks');
+  if (!fs.existsSync(tasksDir)) return [];
+  return fs
+    .readdirSync(tasksDir)
+    .filter((name) => name.endsWith('.json') && name !== 'index.json')
+    .map((name) => JSON.parse(fs.readFileSync(path.join(tasksDir, name), 'utf8')));
+}
+
+const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'agentforge-tenant-'));
   const port = await availablePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   const child = spawn(process.execPath, ['server/index.mjs'], {
@@ -242,9 +252,10 @@ test('HTTP API isolates tasks, automations, approvals and quotas by tenant', asy
 
     await new Promise((resolve) => setTimeout(resolve, 300));
     const saved = JSON.parse(fs.readFileSync(path.join(temp, 'db.json'), 'utf8'));
-    assert.ok(saved.tasks.some((task) => task.tenantId === 'alpha'));
-    assert.ok(saved.tasks.some((task) => task.tenantId === 'default'));
-    assert.ok(saved.tasks.some((task) => task.tenantId === 'beta'));
+    const persisted = readTaskShards(temp);
+    assert.ok(persisted.some((task) => task.tenantId === 'alpha'));
+    assert.ok(persisted.some((task) => task.tenantId === 'default'));
+    assert.ok(persisted.some((task) => task.tenantId === 'beta'));
     assert.deepEqual(
       saved.settings.automations.map((automation) => automation.tenantId),
       ['alpha', 'beta'],
