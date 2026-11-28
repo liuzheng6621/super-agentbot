@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { withinRoot } from './path-roots.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -108,7 +109,36 @@ export function readSpillText(ref, { maxBytes = 16 * 1024 * 1024 } = {}) {
     error.code = 'SPILL_INVALID';
     throw error;
   }
-  const stat = fs.statSync(locator);
+  const abs = path.resolve(locator);
+  const root = path.resolve(spillRoot());
+  if (!withinRoot(abs, root)) {
+    const error = new Error('spill 引用不在 spill 根目录内');
+    error.code = 'SPILL_OUTSIDE_ROOT';
+    throw error;
+  }
+  const linkStat = (() => {
+    try {
+      return fs.lstatSync(abs);
+    } catch {
+      const error = new Error('spill 引用不存在');
+      error.code = 'SPILL_INVALID';
+      throw error;
+    }
+  })();
+  if (linkStat.isSymbolicLink()) {
+    const error = new Error('spill 引用不能是符号链接');
+    error.code = 'SPILL_SYMLINK';
+    throw error;
+  }
+  // 目录本身可能是符号链接，解析真实路径后再判一次。
+  const realRoot = fs.existsSync(root) ? fs.realpathSync(root) : root;
+  const realAbs = fs.realpathSync(abs);
+  if (!withinRoot(realAbs, realRoot)) {
+    const error = new Error('spill 引用经符号链接逃逸出根目录');
+    error.code = 'SPILL_OUTSIDE_ROOT';
+    throw error;
+  }
+  const stat = fs.statSync(abs);
   if (!stat.isFile()) {
     const error = new Error('spill 引用不是普通文件');
     error.code = 'SPILL_NOT_FILE';
