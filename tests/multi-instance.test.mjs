@@ -148,32 +148,56 @@ test('two loaded instances detect a same-task write conflict at flush time', asy
   `);
   assert.equal(create.status, 0, create.stderr || create.stdout);
   const taskId = create.stdout.trim();
+  // 两个实例必须都在对方写盘之前完成加载，否则后加载的一方基线就是新内容，
+  // 本来就不该报冲突。用 ready/peer 文件做握手，避免靠 sleep 抢时序。
   const childCode = `
+    import fs from 'node:fs';
     import { store } from ${JSON.stringify(storeUrl)};
-    store.updateTask(${JSON.stringify(taskId)}, { note: process.env.NOTE });
-    setTimeout(() => {
-      try { store.flush({ throwOnConflict: true }); console.log('ok'); }
-      catch (err) { console.log(err.code); process.exit(err.code === 'STORE_CONFLICT' ? 0 : 1); }
-    }, Number(process.env.DELAY));
+    const taskId = ${JSON.stringify(taskId)};
+    store.updateTask(taskId, { note: process.env.NOTE });
+    fs.writeFileSync(process.env.READY_FILE, '1');
+    const waitFor = (file) => {
+      const sleeper = new Int32Array(new SharedArrayBuffer(4));
+      for (let i = 0; i < 500; i += 1) {
+        if (fs.existsSync(file)) return true;
+        Atomics.wait(sleeper, 0, 0, 10);
+      }
+      return false;
+    };
+    if (!waitFor(process.env.PEER_FILE)) {
+      console.log('HANDSHAKE_TIMEOUT');
+      process.exit(2);
+    }
+    try { store.flush({ throwOnConflict: true }); console.log('ok'); }
+    catch (err) { console.log(err.code); process.exit(err.code === 'STORE_CONFLICT' ? 0 : 1); }
   `;
-  const [first, second] = await Promise.all([
-    new Promise((resolve) => {
-      const child = spawnChild(childCode, { NOTE: 'one', DELAY: '0' });
-      let out = '';
-      child.stdout.on('data', (chunk) => (out += chunk));
-      child.on('exit', (code) => resolve({ code, out }));
-    }),
-    new Promise((resolve) => {
-      const child = spawnChild(childCode, { NOTE: 'two', DELAY: '300' });
-      let out = '';
-      child.stdout.on('data', (chunk) => (out += chunk));
-      child.on('exit', (code) => resolve({ code, out }));
-    }),
-  ]);
-  assert.equal(first.code, 0, first.out);
-  assert.equal(first.out.trim(), 'ok');
-  assert.equal(second.code, 0, second.out);
-  assert.equal(second.out.trim(), 'STORE_CONFLICT');
+  const readyA = path.join(temp, 'ready-a');
+  const readyB = path.join(temp, 'ready-b');
+  const results = await Promise.all(
+    [
+      { note: 'one', ready: readyA, peer: readyB },
+      { note: 'two', ready: readyB, peer: readyA },
+    ].map(
+      (child) =>
+        new Promise((resolve) => {
+          const proc = spawnChild(childCode, {
+            NOTE: child.note,
+            READY_FILE: child.ready,
+            PEER_FILE: child.peer,
+          });
+          let out = '';
+          proc.stdout.on('data', (chunk) => (out += chunk));
+          proc.on('exit', (code) => resolve({ code, out: out.trim() }));
+        }),
+    ),
+  );
+
+  const ok = results.find((result) => result.out === 'ok');
+  const conflict = results.find((result) => result.out === 'STORE_CONFLICT');
+  assert.ok(ok, `必须有一个实例正常写入：${JSON.stringify(results)}`);
+  assert.ok(conflict, `后写入的实例必须报 STORE_CONFLICT：${JSON.stringify(results)}`);
+  assert.equal(ok.code, 0);
+  assert.equal(conflict.code, 0);
 });
 
 test('automation claims are exclusive across instances', async () => {
