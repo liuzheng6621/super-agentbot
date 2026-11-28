@@ -79,7 +79,12 @@ const workers = Array.from({ length: Math.min(concurrency, queue.length) }, asyn
     } else {
       // GitHub Actions 会把 ::error:: 提取成注解，失败文件在运行页就能看到。
       if (process.env.GITHUB_ACTIONS === 'true') {
-        console.error(`::error file=${file}::测试文件失败 ${file}`);
+        const names = [...result.output.matchAll(/^not ok \d+ - (.+)$/gm)]
+          .map((match) => match[1].trim())
+          .slice(0, 5);
+        console.error(
+          `::error file=${file}::测试文件失败 ${file}${names.length ? `：${names.join(' / ')}` : ''}`,
+        );
       }
       console.error(`[test] FAIL ${file}\n${result.output}`);
     }
