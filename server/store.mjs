@@ -24,6 +24,7 @@ import {
 } from './providers.mjs';
 import { publicImageRef, supportsVision } from './attachments.mjs';
 import { normalizeExecutionPolicy } from './cli-policy.mjs';
+import { normalizeRoots, withinAnyRoot } from './path-roots.mjs';
 import { normalizeMcpServer } from './mcp.mjs';
 import {
   agentToProfile,
@@ -574,6 +575,9 @@ function emptyDb() {
       dynamicPlanEnabled: true,
       maxPlanSteps: 12,
       timeouts: defaultTimeouts(),
+      // 目录白名单：空数组表示未配置，保持零配置行为；非空时白名单外一律拒绝。
+      workspaceRoots: [],
+      fsBrowseRoots: [],
       automations: [],
       mcpServers: [],
       approvals: [],
@@ -826,6 +830,8 @@ class Store {
           this.db.settings.commandWhitelist = [];
         }
         if (!Array.isArray(this.db.settings.securityAudit)) this.db.settings.securityAudit = [];
+        if (!Array.isArray(this.db.settings.workspaceRoots)) this.db.settings.workspaceRoots = [];
+        if (!Array.isArray(this.db.settings.fsBrowseRoots)) this.db.settings.fsBrowseRoots = [];
         this.db.profiles = this.db.profiles
           .map((profile) =>
             normalizeAgentProfile(profile, {}, {
@@ -2048,6 +2054,15 @@ class Store {
     let worktree = null;
     if (workspace) {
       const abs = path.resolve(String(workspace).trim());
+      const allowedRoots = normalizeRoots(this.db.settings.workspaceRoots);
+      if (allowedRoots.length && !withinAnyRoot(abs, allowedRoots)) {
+        const error = new Error(
+          `工作区不在白名单内：${abs}（可在设置 workspaceRoots 中显式加入）`,
+        );
+        error.status = 403;
+        error.code = 'workspace-not-allowed';
+        throw error;
+      }
       let st = null;
       try {
         st = fs.statSync(abs);
@@ -2226,6 +2241,16 @@ class Store {
     }
     if (patch.simSpeed !== undefined)
       s.simSpeed = clamp(patch.simSpeed, 1, 20, s.simSpeed);
+    if (patch.workspaceRoots !== undefined) {
+      s.workspaceRoots = normalizeRoots(patch.workspaceRoots)
+        .map((item) => item.slice(0, 500))
+        .slice(0, 32);
+    }
+    if (patch.fsBrowseRoots !== undefined) {
+      s.fsBrowseRoots = normalizeRoots(patch.fsBrowseRoots)
+        .map((item) => item.slice(0, 500))
+        .slice(0, 32);
+    }
     if (patch.defaultMode !== undefined && ['auto', 'cli', 'sim'].includes(patch.defaultMode))
       s.defaultMode = patch.defaultMode;
     this.save({ settings: true });

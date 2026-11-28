@@ -58,11 +58,15 @@ import {
   clientAddress,
   corsDecision,
   corsHeaders,
+  hasScope,
+  requestGuard,
+  requestOrigin,
   resolveSecurityConfig,
   securitySummary,
   tenantFilterForPrincipal,
   validateListenSecurity,
 } from './security.mjs';
+import { normalizeRoots, withinAnyRoot } from './path-roots.mjs';
 import {
   automationRunnerSnapshot,
   automationSnapshot,
@@ -191,6 +195,11 @@ function stateSettings() {
 
 function principalTenant(principal) {
   return tenantFilterForPrincipal(principal).tenantId;
+}
+
+/** 外部工作区等于把宿主任意目录交给 CLI 写入，只对 owner 与显式管理员开放。 */
+function canUseExternalWorkspace(principal) {
+  return principal?.kind === 'owner' || hasScope(principal, 'operator:admin');
 }
 
 function requestedTenant(principal, value) {
@@ -447,6 +456,20 @@ const server = http.createServer(async (req, res) => {
   }
 
   {
+    const guard = requestGuard(req, SECURITY);
+    if (!guard.ok) {
+      store.recordSecurityEvent({
+        type: `request.${guard.code}`,
+        method,
+        path: pathname,
+        requestId,
+        remoteAddress: clientAddress(req),
+        origin: requestOrigin(req),
+        reason: guard.reason,
+        tenantId: 'default',
+      });
+      return json(res, 403, { error: guard.reason, code: guard.code });
+    }
     const cors = corsDecision(req, SECURITY);
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -1032,9 +1055,19 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/context-preview' && method === 'POST') {
       const body = await readBody(req);
       const goal = String(body.goal || '').trim();
+      const previewWorkspace = String(body.workspace || '').trim();
+      if (previewWorkspace) {
+        const roots = normalizeRoots(store.db.settings.workspaceRoots);
+        if (roots.length && !withinAnyRoot(path.resolve(previewWorkspace), roots)) {
+          return json(res, 403, {
+            error: '工作区不在 workspaceRoots 白名单内',
+            code: 'workspace-not-allowed',
+          });
+        }
+      }
       const previewTask = {
         goal,
-        workspace: body.workspace || WORKSPACE_DIR,
+        workspace: previewWorkspace || WORKSPACE_DIR,
         status: 'idle',
         mode: 'auto',
         messages: [],
@@ -1100,9 +1133,16 @@ const server = http.createServer(async (req, res) => {
     /* ---- 目录选择器（本机服务，供「选文件夹开工」用） ---- */
     if (pathname === '/api/fs' && method === 'GET') {
       const raw = String(searchParams.get('path') || '').trim();
+      const browseRoots = normalizeRoots(store.db.settings.fsBrowseRoots);
       if (!raw) {
         const home = process.env.USERPROFILE || process.env.HOME || '';
         const dirs = [];
+        if (browseRoots.length) {
+          for (const root of browseRoots) {
+            dirs.push({ name: root, path: root });
+          }
+          return json(res, 200, { path: '', parent: null, dirs, restricted: true });
+        }
         if (process.platform === 'win32') {
           for (const letter of 'CDEFGH') {
             const drive = `${letter}:\\`;
@@ -1116,6 +1156,24 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { path: '', parent: null, dirs });
       }
       const abs = path.resolve(raw);
+      if (browseRoots.length && !withinAnyRoot(abs, browseRoots)) {
+        store.recordSecurityEvent({
+          type: 'fs.browse.denied',
+          method,
+          path: pathname,
+          requestId,
+          remoteAddress: clientAddress(req),
+          origin: requestOrigin(req),
+          reason: `目录不在 fsBrowseRoots 内：${abs}`,
+          tenantId: principal?.tenantId || 'default',
+          actorId: principal?.id || '',
+          actorKind: principal?.kind || '',
+        });
+        return json(res, 403, {
+          error: '目录不在允许浏览的白名单内',
+          code: 'fs-root-not-allowed',
+        });
+      }
       let stat = null;
       try {
         stat = fs.statSync(abs);
@@ -1211,6 +1269,27 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, {
           task: taskDetail(existing),
           idempotentReplay: true,
+        });
+      }
+      const requestedWorkspace =
+        typeof body.workspace === 'string' ? body.workspace.trim() : '';
+      if (requestedWorkspace && !canUseExternalWorkspace(principal)) {
+        store.recordSecurityEvent({
+          type: 'workspace.external.denied',
+          method,
+          path: pathname,
+          requestId,
+          remoteAddress: clientAddress(req),
+          origin: requestOrigin(req),
+          reason: `主体 ${principal?.id || 'anonymous'} 无权使用外部工作区`,
+          tenantId: taskTenant,
+          actorId: principal?.id || '',
+          actorKind: principal?.kind || '',
+          tokenSource: principal?.source || '',
+        });
+        return json(res, 403, {
+          error: '只有 owner 或持有 operator:admin 的主体可以使用外部工作区',
+          code: 'external-workspace-forbidden',
         });
       }
       let task;
